@@ -1,0 +1,146 @@
+deployment_mode: local_single_user
+
+server:
+  name: active-knowledge-server
+  transport: stdio
+  expose_ops_tools: false
+  http:
+    host: 127.0.0.1
+    port: 8765
+    mcp_path: /mcp
+    require_auth: false
+    auth_provider: none
+    allowed_origins:
+      - http://127.0.0.1
+      - http://localhost
+    trust_reverse_proxy: false
+
+runtime:
+  source_root: .
+  workdir: ./.active-kb
+  baseline_dir: ./.active-kb/baseline
+  local_dir: ./.active-kb/local
+  source_docs_root: ./knowledge-sources
+  log_level: info
+
+project:
+  id: active
+  display_name: Active
+  workspace_root: /home/gangan/Active
+  branch_strategy: baseline-first
+  baseline_branch: main
+  default_snapshot: current
+  default_profile: auto
+
+paths:
+  include:
+    - application
+    - components
+    - configs
+    - core
+    - drivers
+    - framework
+    - packages
+    - platform
+    - resources
+    - ui
+    - uiframework
+  exclude:
+    - .git
+    - build/out
+    - build/tmp
+    - "**/.cache/**"
+    - "**/node_modules/**"
+    - "**/__pycache__/**"
+
+profiles:
+  discovery:
+    defconfig_roots:
+      - configs
+    dotconfig_candidates:
+      - build/.config
+      - build/out_hub/.config
+  known:
+    - id: mhs003_watch
+      dotconfig: build/.config
+      app: watch
+      board: mhs003
+    - id: mhs003_sensorhub
+      dotconfig: build/out_hub/.config
+      app: sensorhub
+      board: mhs003
+
+storage:
+  baseline:
+    manifest: ./.active-kb/baseline/manifest.json
+  metadata:
+    backend: sqlite
+    path: ./.active-kb/baseline/db/metadata.db
+    mode: readonly
+  overlay:
+    backend: sqlite
+    path: ./.active-kb/local/db/overlay.db
+  jobs:
+    backend: sqlite
+    path: ./.active-kb/local/db/jobs.db
+  vector:
+    backend: lancedb
+    path: ./.active-kb/baseline/vectors/lancedb
+    mode: readonly
+  vector_delta:
+    backend: lancedb
+    path: ./.active-kb/local/vectors/lancedb-delta
+  artifacts_root: ./.active-kb/baseline/artifacts
+  local_artifacts_root: ./.active-kb/local/artifacts
+  cache_root: ./.active-kb/local/cache
+
+indexing:
+  mode: local
+  incremental: true
+  reuse_baseline: true
+  write_target: local_overlay
+  workers: auto
+  code:
+    enable_full_code_scan: true
+    enable_ctags: true
+    enable_tree_sitter: true
+    enable_clang_index: false
+    compile_db_candidates:
+      - build/compile_commands.json
+      - build/out_hub/compile_commands.json
+  docs:
+    enable_markdown: true
+    enable_html: true
+    enable_pdf: false
+  embeddings:
+    enabled: true
+    provider: local
+    model: bge-m3
+    batch_size: 32
+  learned_cards:
+    enabled: false
+    require_review: true
+
+query:
+  default_top_k: 12
+  max_evidence_items: 20
+  hybrid:
+    enable_fts: true
+    enable_vector: true
+    enable_symbol: true
+    enable_graph_expand: true
+    rerank: lightweight
+  evidence_required: true
+
+security:
+  path_allowlist:
+    - /home/gangan/Active
+    - ./knowledge-sources
+    - ./.active-kb
+  secret_scan:
+    enabled: true
+    deny_patterns:
+      - "AKIA[0-9A-Z]{16}"
+      - "-----BEGIN PRIVATE KEY-----"
+  audit:
+    enabled: true

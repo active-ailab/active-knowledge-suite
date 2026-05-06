@@ -1,0 +1,17 @@
+{
+  "baseline_id": "active-main-example",
+  "created_at": "1970-01-01T00:00:00Z",
+  "source_docs_hash": "sha256:example",
+  "schema_version": "0.0.0",
+  "parser_version": "0.0.0",
+  "extractor_version": "0.0.0",
+  "embedding_model": "unset",
+  "embedding_model_version": "0.0.0",
+  "snapshots": [],
+  "profiles": [],
+  "artifacts": {
+    "metadata": "db/metadata.db",
+    "vectors": "vectors/lancedb",
+    "workspace_map": "artifacts/workspace-maps/current.json"
+  }
+}
