@@ -243,6 +243,7 @@ active-kb clean      # 清理缓存与临时文件
 |------|------|
 | [架构与方案设计](doc/active_knowledge_server_architecture_design.md) | 完整的 Server 架构、存储模型、查询链路、MCP 接口设计 |
 | [工程 TODO](doc/active_knowledge_server_engineering_todo.md) | 分阶段工程任务、契约冻结项、验收命令 |
+| [评审变更追踪矩阵](doc/active_knowledge_server_review_trace.md) | 评审意见到设计章节、实现任务、测试任务和验收 gate 的追踪关系 |
 | [MCP + Skill 全案设计](doc/rtos_engineering_kb_mcp_skill_full_design.md) | 面向大型 RTOS 项目的知识库 MCP 与 Skill 完整方案 |
 | [Workspace Map](doc/active-knowledge-workspace-map.md) | 仓库顶层心智模型速查 |
 

@@ -5,6 +5,7 @@
 > 适用对象：`active-knowledge-server`  
 > 依据文档：
 > - [Active Knowledge Server 架构与方案设计](./active_knowledge_server_architecture_design.md)
+> - [Active Knowledge Server 评审变更追踪矩阵](./active_knowledge_server_review_trace.md)
 > - [面向大型 RTOS 项目的知识库 MCP + Skill 全案设计（正式版）](./rtos_engineering_kb_mcp_skill_full_design.md)
 
 ---
@@ -64,6 +65,8 @@
 ---
 
 ## 3. 评审意见到任务映射
+
+完整设计位置、实现任务、测试任务和验收 gate 的可追踪矩阵见 [Active Knowledge Server 评审变更追踪矩阵](./active_knowledge_server_review_trace.md)。
 
 | 评审项 | 转换后的任务 | 插入位置 |
 | --- | --- | --- |
@@ -341,17 +344,18 @@ security:
 
 ### D0-09 架构文档变更追踪矩阵
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`DOC`
 - 依赖：`D0-01` 至 `D0-08`
 - 目标：确保评审意见不会只存在于 TODO，而是能回写到架构文档和实现任务。
+- 输出：已建立 [Active Knowledge Server 评审变更追踪矩阵](./active_knowledge_server_review_trace.md)，并在架构文档末尾增加“评审变更追踪”入口。
 
 TODO：
 
-- [ ] 在架构文档末尾添加“评审变更记录”或单独建立 `doc/active_knowledge_server_review_trace.md`。
-- [ ] 每条评审意见记录：原意见、设计改动位置、实现任务 ID、测试任务 ID、验收 gate。
-- [ ] TODO 文档与架构文档互相链接。
+- [x] 在架构文档末尾添加“评审变更记录”或单独建立 `doc/active_knowledge_server_review_trace.md`。
+- [x] 每条评审意见记录：原意见、设计改动位置、实现任务 ID、测试任务 ID、验收 gate。
+- [x] TODO 文档与架构文档互相链接。
 
 验收标准：
 
@@ -1691,7 +1695,7 @@ V1 可以发布的最低功能边界：
 
 短期建议按以下顺序落地：
 
-1. 完成 `D0-01` 至 `D0-08`，把评审意见回写到架构文档。
+1. 完成 `D0-01` 至 `D0-09`，把评审意见回写到架构文档并维护追踪矩阵。
 2. 建立 `active-knowledge-server` 代码骨架、config schema、fail-safe 校验和 storage migration。
 3. 先做文档 RAG MVP，再接入代码结构索引，避免一开始被 compile DB 问题拖住。
 4. 在 query service 首个可用版本之前完成异常返回契约测试。

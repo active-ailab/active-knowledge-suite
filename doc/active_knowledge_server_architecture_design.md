@@ -4345,6 +4345,14 @@ D0-06 对应的 tests 至少覆盖：
 
 ---
 
+## 19. 评审变更追踪
+
+Phase 0 评审意见、设计改动位置、实现任务、测试任务和 release gate 的追踪关系统一维护在 [Active Knowledge Server 评审变更追踪矩阵](./active_knowledge_server_review_trace.md)。
+
+该矩阵是架构文档和工程 TODO 的连接点。新增或关闭评审意见时，必须同步更新矩阵中的 `review_id`、设计章节、任务 ID 和 gate。
+
+---
+
 ## 20. 参考资料
 
 - FastMCP Tools：https://fastmcp.wiki/en/servers/tools
