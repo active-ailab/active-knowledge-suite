@@ -35,3 +35,25 @@ uv run active-kb --version
 
 The package uses a `src/` layout so tests exercise the installed package shape
 rather than importing directly from the repository root.
+
+## Current CLI Skeleton
+
+Phase C1-02 provides the command and config contract used by later indexing and
+MCP phases:
+
+```bash
+uv run active-kb init --workspace /path/to/active
+uv run active-kb status --format json
+uv run active-kb validate --strict
+uv run active-kb serve --transport stdio
+uv run active-kb index --incremental
+```
+
+Config precedence is fixed as:
+
+```text
+CLI > ACTIVE_KB_* environment > local config > baseline config > defaults
+```
+
+`serve` and `index` currently return executable plans; FastMCP runtime wiring and
+the indexing pipeline are introduced by later implementation phases.

@@ -3,25 +3,175 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+import json
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
+
+import yaml
 
 from active_knowledge_server import __version__
+from active_knowledge_server.config.defaults import DEFAULT_WORKDIR
+from active_knowledge_server.config.loader import (
+    ConfigDict,
+    ConfigError,
+    ConfigValue,
+    ResolvedConfig,
+    config_path_value,
+    normalize_transport,
+    resolve_config,
+    resolve_runtime_path,
+    set_nested,
+)
+from active_knowledge_server.server import server_name
+
+_TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
+_FORMAT_CHOICES = ("text", "json")
+
+
+@dataclass(frozen=True)
+class WorkdirLayout:
+    """Resolved runtime directories used by CLI commands."""
+
+    workdir: Path
+    baseline_dir: Path
+    local_dir: Path
+    local_config_dir: Path
+    local_config_path: Path
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the top-level CLI parser.
+    """Build the top-level CLI parser."""
 
-    C1-01 only guarantees the entry point and version output. Concrete subcommands
-    are introduced by later Phase 1 tasks.
-    """
-
-    parser = argparse.ArgumentParser(prog="active-kb")
+    parser = argparse.ArgumentParser(
+        prog="active-kb",
+        description="Active Knowledge Server CLI.",
+    )
     parser.add_argument(
         "--version",
         action="store_true",
         help="Print active-knowledge-server version and exit.",
     )
+
+    common = argparse.ArgumentParser(add_help=False)
+    add_common_config_options(common)
+
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    init_parser = subparsers.add_parser(
+        "init",
+        parents=[common],
+        help="Initialize a local Active Knowledge workdir.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the generated local config if it already exists.",
+    )
+    init_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    init_parser.set_defaults(handler=handle_init)
+
+    serve_parser = subparsers.add_parser(
+        "serve",
+        parents=[common],
+        help="Resolve server config and prepare the MCP server launch plan.",
+    )
+    serve_parser.add_argument(
+        "--transport",
+        choices=_TRANSPORT_CHOICES,
+        help="MCP transport to use. 'http' is accepted as streamable-http alias.",
+    )
+    serve_parser.add_argument("--host", help="HTTP host for streamable-http transport.")
+    serve_parser.add_argument("--port", type=int, help="HTTP port for streamable-http transport.")
+    serve_parser.add_argument(
+        "--expose-ops-tools",
+        action="store_true",
+        help="Expose operational tools when server policy allows it.",
+    )
+    serve_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    serve_parser.set_defaults(handler=handle_serve)
+
+    index_parser = subparsers.add_parser(
+        "index",
+        parents=[common],
+        help="Resolve config and prepare an indexing job plan.",
+    )
+    mode = index_parser.add_mutually_exclusive_group()
+    mode.add_argument("--full", action="store_true", help="Plan a full local overlay rebuild.")
+    mode.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Plan an incremental index update.",
+    )
+    index_parser.add_argument(
+        "--source",
+        choices=("all", "code", "docs"),
+        default="all",
+        help="Source family to index.",
+    )
+    index_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    index_parser.set_defaults(handler=handle_index)
+
+    status_parser = subparsers.add_parser(
+        "status",
+        parents=[common],
+        help="Show Active Knowledge local state and config summary.",
+    )
+    status_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    status_parser.set_defaults(handler=handle_status)
+
+    validate_parser = subparsers.add_parser(
+        "validate",
+        parents=[common],
+        help="Validate basic CLI, config, and local path readiness.",
+    )
+    validate_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Return failure when workspace, source docs, or workdir paths are missing.",
+    )
+    validate_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    validate_parser.set_defaults(handler=handle_validate)
+
     return parser
+
+
+def add_common_config_options(parser: argparse.ArgumentParser) -> None:
+    """Add config-related options shared by subcommands."""
+
+    parser.add_argument("--config", type=Path, help="Baseline/static config YAML path.")
+    parser.add_argument("--local-config", type=Path, help="User-local config YAML path.")
+    parser.add_argument("--workdir", type=Path, help="Active Knowledge workdir.")
+    parser.add_argument("--workspace", type=Path, help="Active project workspace root.")
+    parser.add_argument("--source-docs-root", type=Path, help="Knowledge source docs root.")
+    parser.add_argument("--profile", help="Default profile id or 'auto'.")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -34,8 +184,464 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"active-knowledge-server {__version__}")
         return 0
 
-    parser.print_help()
+    handler = getattr(args, "handler", None)
+    if handler is None:
+        parser.print_help()
+        return 0
+
+    try:
+        return cast(Callable[[argparse.Namespace], int], handler)(args)
+    except ConfigError as exc:
+        print(f"active-kb: error: {exc}", file=sys.stderr)
+        return 2
+
+
+def handle_init(args: argparse.Namespace) -> int:
+    """Initialize the local workdir skeleton."""
+
+    resolved = resolve_from_args(args)
+    layout = workdir_layout(resolved)
+    created = initialize_workdir(layout, resolved, force=bool(args.force))
+
+    summary = config_summary(resolved)
+    payload = {
+        "command": "init",
+        "status": "ok",
+        "created": [str(path) for path in created],
+        "config": summary,
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Initialized Active Knowledge workdir: {layout.workdir}")
+        print(f"Local config: {layout.local_config_path}")
+        print(f"Workspace: {summary['workspace_root']}")
     return 0
+
+
+def handle_serve(args: argparse.Namespace) -> int:
+    """Resolve a server launch plan."""
+
+    resolved = resolve_from_args(args, command_overrides=serve_overrides(args))
+    summary = config_summary(resolved)
+    payload = {
+        "command": "serve",
+        "status": "ready",
+        "server": server_name(),
+        "config": summary,
+        "note": "FastMCP runtime wiring is scheduled for M6-01; C1-02 validates CLI/config only.",
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Server plan ready for {payload['server']}")
+        print(f"Transport: {summary['transport']}")
+        print(f"Workdir: {summary['workdir']}")
+        print("MCP runtime wiring is not started by the C1-02 skeleton.")
+    return 0
+
+
+def handle_index(args: argparse.Namespace) -> int:
+    """Resolve an index job plan."""
+
+    resolved = resolve_from_args(args, command_overrides=index_overrides(args))
+    summary = config_summary(resolved)
+    payload = {
+        "command": "index",
+        "status": "ready",
+        "source": args.source,
+        "mode": "full" if args.full else "incremental",
+        "config": summary,
+        "note": "Index pipeline execution is scheduled for Phase 4; C1-02 validates job planning.",
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Index plan ready: {payload['mode']} ({payload['source']})")
+        print(f"Workdir: {summary['workdir']}")
+        print("Index pipeline execution is not started by the C1-02 skeleton.")
+    return 0
+
+
+def handle_status(args: argparse.Namespace) -> int:
+    """Show local state and config summary."""
+
+    resolved = resolve_from_args(args)
+    layout = workdir_layout(resolved)
+    summary = config_summary(resolved)
+    payload = {
+        "command": "status",
+        "status": "ok",
+        "config": summary,
+        "paths": path_status(layout, resolved),
+        "index": {
+            "result_status": "partial_ready",
+            "message": "Storage and indexing backends are not implemented yet.",
+        },
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print("Active Knowledge status")
+        print(f"Workdir: {layout.workdir} ({exists_label(layout.workdir)})")
+        print(
+            f"Local config: {layout.local_config_path} ({exists_label(layout.local_config_path)})"
+        )
+        print(f"Transport: {summary['transport']}")
+        print("Index: partial_ready (storage/indexing backends pending)")
+    return 0
+
+
+def handle_validate(args: argparse.Namespace) -> int:
+    """Validate basic setup readiness."""
+
+    resolved = resolve_from_args(args)
+    layout = workdir_layout(resolved)
+    checks = validation_checks(layout, resolved, strict=bool(args.strict))
+    errors = [check for check in checks if check["level"] == "error"]
+    payload = {
+        "command": "validate",
+        "status": "error" if errors else "ok",
+        "checks": checks,
+        "config": config_summary(resolved),
+    }
+
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print("Validation checks")
+        for check in checks:
+            print(f"- {check['level']}: {check['name']} - {check['message']}")
+    return 1 if errors else 0
+
+
+def resolve_from_args(
+    args: argparse.Namespace,
+    *,
+    command_overrides: ConfigDict | None = None,
+) -> ResolvedConfig:
+    """Resolve config for a parsed command."""
+
+    overrides = merge_cli_overrides(common_overrides(args), command_overrides or {})
+    return resolve_config(
+        config_path=getattr(args, "config", None),
+        local_config_path=getattr(args, "local_config", None),
+        cli_overrides=overrides,
+    )
+
+
+def common_overrides(args: argparse.Namespace) -> ConfigDict:
+    """Build config overrides from common CLI flags."""
+
+    overrides: ConfigDict = {}
+    optional_paths: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("workdir", ("runtime", "workdir")),
+        ("workspace", ("project", "workspace_root")),
+        ("source_docs_root", ("runtime", "source_docs_root")),
+    )
+    for attr, path in optional_paths:
+        value = getattr(args, attr, None)
+        if value is not None:
+            set_nested(overrides, path, str(value))
+
+    profile = getattr(args, "profile", None)
+    if profile is not None:
+        set_nested(overrides, ("project", "default_profile"), profile)
+    return overrides
+
+
+def serve_overrides(args: argparse.Namespace) -> ConfigDict:
+    """Build serve-specific config overrides."""
+
+    overrides: ConfigDict = {}
+    if args.transport is not None:
+        set_nested(overrides, ("server", "transport"), normalize_transport(args.transport))
+    if args.host is not None:
+        set_nested(overrides, ("server", "http", "host"), args.host)
+    if args.port is not None:
+        set_nested(overrides, ("server", "http", "port"), args.port)
+    if args.expose_ops_tools:
+        set_nested(overrides, ("server", "expose_ops_tools"), True)
+    return overrides
+
+
+def index_overrides(args: argparse.Namespace) -> ConfigDict:
+    """Build index-specific config overrides."""
+
+    overrides: ConfigDict = {}
+    if args.full:
+        set_nested(overrides, ("indexing", "incremental"), False)
+    elif args.incremental:
+        set_nested(overrides, ("indexing", "incremental"), True)
+    return overrides
+
+
+def merge_cli_overrides(low: ConfigDict, high: ConfigDict) -> ConfigDict:
+    """Merge command override dictionaries without importing loader internals."""
+
+    merged: ConfigDict = dict(low)
+    for key, value in high.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = merge_cli_overrides(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def workdir_layout(resolved: ResolvedConfig) -> WorkdirLayout:
+    """Return resolved workdir paths."""
+
+    cwd = Path.cwd()
+    workdir = resolve_runtime_path(
+        config_path_value(resolved.data, "runtime.workdir", DEFAULT_WORKDIR),
+        cwd,
+    )
+    baseline_dir = resolve_runtime_path(
+        config_path_value(resolved.data, "runtime.baseline_dir", str(workdir / "baseline")),
+        cwd,
+    )
+    local_dir = resolve_runtime_path(
+        config_path_value(resolved.data, "runtime.local_dir", str(workdir / "local")),
+        cwd,
+    )
+    local_config_dir = local_dir / "config"
+    return WorkdirLayout(
+        workdir=workdir,
+        baseline_dir=baseline_dir,
+        local_dir=local_dir,
+        local_config_dir=local_config_dir,
+        local_config_path=resolved.local_config_path,
+    )
+
+
+def initialize_workdir(
+    layout: WorkdirLayout,
+    resolved: ResolvedConfig,
+    *,
+    force: bool,
+) -> list[Path]:
+    """Create an idempotent local workdir skeleton."""
+
+    directories = [
+        layout.workdir,
+        layout.baseline_dir,
+        layout.baseline_dir / "config",
+        layout.baseline_dir / "db",
+        layout.baseline_dir / "vectors",
+        layout.baseline_dir / "artifacts",
+        layout.local_dir,
+        layout.local_config_dir,
+        layout.local_dir / "db",
+        layout.local_dir / "vectors",
+        layout.local_dir / "artifacts",
+        layout.local_dir / "cache",
+        layout.local_dir / "logs",
+        layout.local_dir / "tmp",
+        layout.local_dir / "locks",
+    ]
+
+    created: list[Path] = []
+    for directory in directories:
+        if not directory.exists():
+            created.append(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+    gitignore = layout.local_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(local_gitignore_template(), encoding="utf-8")
+        created.append(gitignore)
+
+    if force or not layout.local_config_path.exists():
+        layout.local_config_path.parent.mkdir(parents=True, exist_ok=True)
+        layout.local_config_path.write_text(
+            yaml.safe_dump(local_config_seed(resolved), sort_keys=False, allow_unicode=False),
+            encoding="utf-8",
+        )
+        created.append(layout.local_config_path)
+    return created
+
+
+def local_config_seed(resolved: ResolvedConfig) -> ConfigDict:
+    """Build the initial user-local config file."""
+
+    seed: ConfigDict = {}
+    for source, target in (
+        ("runtime.workdir", ("runtime", "workdir")),
+        ("runtime.source_docs_root", ("runtime", "source_docs_root")),
+        ("project.workspace_root", ("project", "workspace_root")),
+        ("project.default_profile", ("project", "default_profile")),
+        ("server.transport", ("server", "transport")),
+        ("server.http.host", ("server", "http", "host")),
+        ("server.http.port", ("server", "http", "port")),
+    ):
+        value = resolved.get(source)
+        if value is not None:
+            set_nested(seed, target, value)
+    return seed
+
+
+def local_gitignore_template() -> str:
+    """Return the gitignore used for machine-local overlay files."""
+
+    return "\n".join(
+        [
+            "*",
+            "!.gitignore",
+            "!README.md",
+            "!config/",
+            "!config/.gitkeep",
+            "!db/",
+            "!db/.gitkeep",
+            "!vectors/",
+            "!vectors/.gitkeep",
+            "!artifacts/",
+            "!artifacts/.gitkeep",
+            "!cache/",
+            "!cache/.gitkeep",
+            "!logs/",
+            "!logs/.gitkeep",
+            "!tmp/",
+            "!tmp/.gitkeep",
+            "!locks/",
+            "!locks/.gitkeep",
+            "",
+        ]
+    )
+
+
+def config_summary(
+    resolved: ResolvedConfig,
+) -> dict[str, str | int | bool | list[str] | dict[str, Any]]:
+    """Return a non-sensitive config summary for CLI output."""
+
+    http = {
+        "host": scalar(resolved.get("server.http.host"), "127.0.0.1"),
+        "port": scalar(resolved.get("server.http.port"), 8765),
+    }
+    return {
+        "deployment_mode": str(scalar(resolved.get("deployment_mode"), "local_single_user")),
+        "workdir": config_path_value(resolved.data, "runtime.workdir", DEFAULT_WORKDIR),
+        "local_dir": config_path_value(
+            resolved.data,
+            "runtime.local_dir",
+            f"{DEFAULT_WORKDIR}/local",
+        ),
+        "baseline_dir": config_path_value(
+            resolved.data,
+            "runtime.baseline_dir",
+            f"{DEFAULT_WORKDIR}/baseline",
+        ),
+        "source_docs_root": config_path_value(
+            resolved.data,
+            "runtime.source_docs_root",
+            "knowledge-sources",
+        ),
+        "workspace_root": config_path_value(resolved.data, "project.workspace_root", "."),
+        "profile": str(scalar(resolved.get("project.default_profile"), "auto")),
+        "transport": str(scalar(resolved.get("server.transport"), "stdio")),
+        "http": http,
+        "loaded_config_files": [str(path) for path in resolved.loaded_files],
+        "local_config_path": str(resolved.local_config_path),
+    }
+
+
+def path_status(
+    layout: WorkdirLayout,
+    resolved: ResolvedConfig,
+) -> dict[str, dict[str, str | bool]]:
+    """Return existence status for important local paths."""
+
+    cwd = Path.cwd()
+    workspace = resolve_runtime_path(
+        config_path_value(resolved.data, "project.workspace_root", "."),
+        cwd,
+    )
+    source_docs = resolve_runtime_path(
+        config_path_value(resolved.data, "runtime.source_docs_root", "knowledge-sources"),
+        cwd,
+    )
+    paths = {
+        "workspace_root": workspace,
+        "source_docs_root": source_docs,
+        "workdir": layout.workdir,
+        "baseline_dir": layout.baseline_dir,
+        "local_dir": layout.local_dir,
+        "local_config": layout.local_config_path,
+    }
+    return {
+        name: {"path": str(path), "exists": path.exists(), "kind": path_kind(path)}
+        for name, path in paths.items()
+    }
+
+
+def validation_checks(
+    layout: WorkdirLayout,
+    resolved: ResolvedConfig,
+    *,
+    strict: bool,
+) -> list[dict[str, str]]:
+    """Build setup validation checks."""
+
+    statuses = path_status(layout, resolved)
+    checks: list[dict[str, str]] = []
+    for name, info in statuses.items():
+        exists = bool(info["exists"])
+        missing_is_error = strict and name in {"workspace_root", "source_docs_root", "workdir"}
+        if exists:
+            checks.append({"name": name, "level": "ok", "message": f"{info['path']} exists"})
+        else:
+            level = "error" if missing_is_error else "warning"
+            checks.append(
+                {
+                    "name": name,
+                    "level": level,
+                    "message": f"{info['path']} does not exist",
+                }
+            )
+
+    transport = resolved.get("server.transport")
+    if transport in {"stdio", "streamable-http"}:
+        checks.append({"name": "server.transport", "level": "ok", "message": str(transport)})
+    else:
+        checks.append(
+            {
+                "name": "server.transport",
+                "level": "error",
+                "message": f"unsupported transport: {transport}",
+            }
+        )
+    return checks
+
+
+def scalar(value: ConfigValue | None, default: str | int | bool) -> str | int | bool:
+    """Return a scalar config value for display."""
+
+    if isinstance(value, str | int | bool):
+        return value
+    return default
+
+
+def path_kind(path: Path) -> str:
+    """Classify an existing or missing path."""
+
+    if path.is_dir():
+        return "directory"
+    if path.is_file():
+        return "file"
+    return "missing"
+
+
+def exists_label(path: Path) -> str:
+    """Return a short existence label."""
+
+    return "exists" if path.exists() else "missing"
+
+
+def print_json(payload: object) -> None:
+    """Print stable JSON output."""
+
+    print(json.dumps(payload, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

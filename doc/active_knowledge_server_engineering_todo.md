@@ -388,24 +388,25 @@ TODO：
 
 ### C1-02 CLI 骨架
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`
 - 依赖：`C1-01`
+- 输出：已实现 `active-kb` 子命令骨架、配置解析与优先级合并、机器可读 JSON 输出和单元测试；`serve` 与 `index` 在后续 Phase 接入真实 FastMCP / indexing pipeline 前返回可验证的执行计划。
 
 TODO：
 
-- [ ] 实现 `active-kb init`。
-- [ ] 实现 `active-kb serve`。
-- [ ] 实现 `active-kb index`。
-- [ ] 实现 `active-kb status`。
-- [ ] 实现 `active-kb validate`。
-- [ ] CLI 参数优先级遵守：CLI > env > local_config > baseline_config > defaults。
+- [x] 实现 `active-kb init`。
+- [x] 实现 `active-kb serve`。
+- [x] 实现 `active-kb index`。
+- [x] 实现 `active-kb status`。
+- [x] 实现 `active-kb validate`。
+- [x] CLI 参数优先级遵守：CLI > env > local_config > baseline_config > defaults。
 
 验收标准：
 
-- 所有命令有 `--help`。
-- 参数解析和配置合并有单元测试。
+- [x] 所有命令有 `--help`。
+- [x] 参数解析和配置合并有单元测试。
 
 ### C1-03 Config schema 与配置合并
 
