@@ -68,3 +68,9 @@ the indexing pipeline are introduced by later implementation phases.
 `local/config/active-kb.local.yaml` when missing, preserves an existing local
 config unless `--force` is used, warns when `baseline/manifest.json` is missing,
 and warns if runtime files under `.active-kb/local/` are tracked by git.
+
+`serve` runs fail-safe security validation before returning a launch plan.
+`local_single_user` HTTP may only bind loopback hosts. `remote_shared` requires
+authenticated `streamable-http`, explicit non-wildcard origins, enabled audit
+logging, and hidden ops tools. Failures return a structured
+`result_status=blocked` response for JSON callers.

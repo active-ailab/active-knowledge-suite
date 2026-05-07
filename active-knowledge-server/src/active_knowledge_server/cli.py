@@ -25,6 +25,12 @@ from active_knowledge_server.config.workdir import (
     initialize_workdir,
     layout_from_config,
 )
+from active_knowledge_server.security.config import (
+    SecurityBlockedWarning,
+    SecurityConfigError,
+    SecurityValidationResult,
+    validate_startup_security,
+)
 from active_knowledge_server.server import server_name
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
@@ -180,9 +186,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return cast(Callable[[argparse.Namespace], int], handler)(args)
+    except SecurityConfigError as exc:
+        return emit_blocked_result(args, exc.result)
     except ConfigError as exc:
-        print(f"active-kb: error: {exc}", file=sys.stderr)
-        return 2
+        result = SecurityValidationResult(
+            (
+                SecurityBlockedWarning(
+                    code="schema.invalid_request",
+                    message=str(exc),
+                    suggested_action="Fix the configuration and rerun the command.",
+                ),
+            )
+        )
+        return emit_blocked_result(args, result)
 
 
 def handle_init(args: argparse.Namespace) -> int:
@@ -216,6 +232,10 @@ def handle_serve(args: argparse.Namespace) -> int:
     """Resolve a server launch plan."""
 
     resolved = resolve_from_args(args, command_overrides=serve_overrides(args))
+    security_result = validate_startup_security(resolved.model)
+    if security_result.blocked:
+        return emit_blocked_result(args, security_result)
+
     summary = config_summary(resolved)
     payload = {
         "command": "serve",
@@ -463,6 +483,25 @@ def validation_checks(
                 "message": f"unsupported transport: {transport}",
             }
         )
+
+    security_result = validate_startup_security(resolved.model)
+    if security_result.ok:
+        checks.append(
+            {
+                "name": "security.fail_safe",
+                "level": "ok",
+                "message": "fail-safe startup security checks passed",
+            }
+        )
+    else:
+        for warning in security_result.warnings:
+            checks.append(
+                {
+                    "name": warning.code,
+                    "level": "error",
+                    "message": warning.message,
+                }
+            )
     return checks
 
 
@@ -486,6 +525,24 @@ def print_json(payload: object) -> None:
     """Print stable JSON output."""
 
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def emit_blocked_result(args: argparse.Namespace, result: SecurityValidationResult) -> int:
+    """Emit a structured blocked result for JSON callers or a concise text error."""
+
+    payload = result.to_blocked_response()
+    if getattr(args, "format", None) == "json":
+        print_json(payload)
+    else:
+        warnings = payload["warnings"]
+        if isinstance(warnings, list):
+            for warning in warnings:
+                if isinstance(warning, dict):
+                    print(
+                        f"active-kb: blocked [{warning.get('code')}]: {warning.get('message')}",
+                        file=sys.stderr,
+                    )
+    return 2
 
 
 if __name__ == "__main__":

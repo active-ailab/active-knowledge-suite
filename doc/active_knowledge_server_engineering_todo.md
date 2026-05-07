@@ -453,24 +453,25 @@ TODO：
 
 ### C1-05 Fail-safe 安全配置校验
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`SEC`、`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-08`、`C1-03`
+- 输出：已实现合并配置后的 fail-safe 启动校验，覆盖本地/远程部署模式、loopback 绑定、认证、Origin、audit、ops tool 暴露和结构化 blocked 返回。
 
 TODO：
 
-- [ ] 实现 `deployment_mode` 校验。
-- [ ] 非 loopback HTTP 缺认证时拒绝启动。
-- [ ] remote_shared 下通配 Origin 拒绝启动。
-- [ ] remote_shared 下 audit disabled 拒绝启动。
-- [ ] remote_shared 下 ops tools 默认禁用。
-- [ ] 本地 HTTP 默认只允许 loopback。
+- [x] 实现 `deployment_mode` 校验。
+- [x] 非 loopback HTTP 缺认证时拒绝启动。
+- [x] remote_shared 下通配 Origin 拒绝启动。
+- [x] remote_shared 下 audit disabled 拒绝启动。
+- [x] remote_shared 下 ops tools 默认禁用。
+- [x] 本地 HTTP 默认只允许 loopback。
 
 验收标准：
 
-- 安全配置契约测试 100% 通过。
-- 所有失败场景返回结构化 `blocked` 错误。
+- [x] 安全配置契约测试 100% 通过。
+- [x] 所有失败场景返回结构化 `blocked` 错误。
 
 ### C1-06 Path Guard
 

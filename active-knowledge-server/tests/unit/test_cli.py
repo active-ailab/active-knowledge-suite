@@ -84,3 +84,42 @@ def test_validate_strict_reports_missing_workdir(tmp_path: Path, capsys) -> None
     assert exit_code == 1
     assert payload["status"] == "error"
     assert any(check["name"] == "workdir" for check in payload["checks"])
+
+
+def test_serve_returns_blocked_json_for_insecure_local_http(capsys) -> None:
+    exit_code = main(
+        [
+            "serve",
+            "--transport",
+            "http",
+            "--host",
+            "0.0.0.0",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert payload["result_status"] == "blocked"
+    assert payload["warnings"][0]["code"] == "security.remote_insecure_config"
+
+
+def test_serve_returns_blocked_json_for_invalid_deployment_mode(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    config = tmp_path / "bad.yaml"
+    config.write_text("deployment_mode: public_internet\n", encoding="utf-8")
+
+    exit_code = main(["serve", "--config", str(config), "--format", "json"])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert payload["result_status"] == "blocked"
+    assert payload["warnings"][0]["code"] == "schema.invalid_request"
+    assert "deployment_mode" in payload["warnings"][0]["message"]
