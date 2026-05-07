@@ -6,11 +6,8 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
-
-import yaml
 
 from active_knowledge_server import __version__
 from active_knowledge_server.config.loader import (
@@ -23,21 +20,15 @@ from active_knowledge_server.config.loader import (
     set_nested,
 )
 from active_knowledge_server.config.schema import summarize_config
+from active_knowledge_server.config.workdir import (
+    WorkdirLayout,
+    initialize_workdir,
+    layout_from_config,
+)
 from active_knowledge_server.server import server_name
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
-
-
-@dataclass(frozen=True)
-class WorkdirLayout:
-    """Resolved runtime directories used by CLI commands."""
-
-    workdir: Path
-    baseline_dir: Path
-    local_dir: Path
-    local_config_dir: Path
-    local_config_path: Path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,14 +189,16 @@ def handle_init(args: argparse.Namespace) -> int:
     """Initialize the local workdir skeleton."""
 
     resolved = resolve_from_args(args)
-    layout = workdir_layout(resolved)
-    created = initialize_workdir(layout, resolved, force=bool(args.force))
+    result = initialize_workdir(resolved, force=bool(args.force))
+    layout = result.layout
 
     summary = config_summary(resolved)
     payload = {
         "command": "init",
         "status": "ok",
-        "created": [str(path) for path in created],
+        "created": [str(path) for path in result.created],
+        "warnings": [warning.to_dict() for warning in result.warnings],
+        "baseline_manifest": result.baseline_manifest.to_dict(),
         "config": summary,
     }
     if args.format == "json":
@@ -214,6 +207,8 @@ def handle_init(args: argparse.Namespace) -> int:
         print(f"Initialized Active Knowledge workdir: {layout.workdir}")
         print(f"Local config: {layout.local_config_path}")
         print(f"Workspace: {summary['workspace_root']}")
+        for warning in result.warnings:
+            print(f"Warning [{warning.code}]: {warning.message}")
     return 0
 
 
@@ -390,113 +385,7 @@ def merge_cli_overrides(low: ConfigDict, high: ConfigDict) -> ConfigDict:
 def workdir_layout(resolved: ResolvedConfig) -> WorkdirLayout:
     """Return resolved workdir paths."""
 
-    cwd = Path.cwd()
-    workdir = resolve_runtime_path(resolved.model.runtime.workdir, cwd)
-    baseline_dir = resolve_runtime_path(resolved.model.runtime.baseline_dir, cwd)
-    local_dir = resolve_runtime_path(resolved.model.runtime.local_dir, cwd)
-    local_config_dir = local_dir / "config"
-    return WorkdirLayout(
-        workdir=workdir,
-        baseline_dir=baseline_dir,
-        local_dir=local_dir,
-        local_config_dir=local_config_dir,
-        local_config_path=resolved.local_config_path,
-    )
-
-
-def initialize_workdir(
-    layout: WorkdirLayout,
-    resolved: ResolvedConfig,
-    *,
-    force: bool,
-) -> list[Path]:
-    """Create an idempotent local workdir skeleton."""
-
-    directories = [
-        layout.workdir,
-        layout.baseline_dir,
-        layout.baseline_dir / "config",
-        layout.baseline_dir / "db",
-        layout.baseline_dir / "vectors",
-        layout.baseline_dir / "artifacts",
-        layout.local_dir,
-        layout.local_config_dir,
-        layout.local_dir / "db",
-        layout.local_dir / "vectors",
-        layout.local_dir / "artifacts",
-        layout.local_dir / "cache",
-        layout.local_dir / "logs",
-        layout.local_dir / "tmp",
-        layout.local_dir / "locks",
-    ]
-
-    created: list[Path] = []
-    for directory in directories:
-        if not directory.exists():
-            created.append(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-
-    gitignore = layout.local_dir / ".gitignore"
-    if not gitignore.exists():
-        gitignore.write_text(local_gitignore_template(), encoding="utf-8")
-        created.append(gitignore)
-
-    if force or not layout.local_config_path.exists():
-        layout.local_config_path.parent.mkdir(parents=True, exist_ok=True)
-        layout.local_config_path.write_text(
-            yaml.safe_dump(local_config_seed(resolved), sort_keys=False, allow_unicode=False),
-            encoding="utf-8",
-        )
-        created.append(layout.local_config_path)
-    return created
-
-
-def local_config_seed(resolved: ResolvedConfig) -> ConfigDict:
-    """Build the initial user-local config file."""
-
-    seed: ConfigDict = {}
-    for source, target in (
-        ("runtime.workdir", ("runtime", "workdir")),
-        ("runtime.source_docs_root", ("runtime", "source_docs_root")),
-        ("project.workspace_root", ("project", "workspace_root")),
-        ("project.default_profile", ("project", "default_profile")),
-        ("server.transport", ("server", "transport")),
-        ("server.http.host", ("server", "http", "host")),
-        ("server.http.port", ("server", "http", "port")),
-    ):
-        value = resolved.get(source)
-        if value is not None:
-            set_nested(seed, target, value)
-    return seed
-
-
-def local_gitignore_template() -> str:
-    """Return the gitignore used for machine-local overlay files."""
-
-    return "\n".join(
-        [
-            "*",
-            "!.gitignore",
-            "!README.md",
-            "!config/",
-            "!config/.gitkeep",
-            "!db/",
-            "!db/.gitkeep",
-            "!vectors/",
-            "!vectors/.gitkeep",
-            "!artifacts/",
-            "!artifacts/.gitkeep",
-            "!cache/",
-            "!cache/.gitkeep",
-            "!logs/",
-            "!logs/.gitkeep",
-            "!tmp/",
-            "!tmp/.gitkeep",
-            "!locks/",
-            "!locks/.gitkeep",
-            "",
-        ]
-    )
+    return layout_from_config(resolved)
 
 
 def config_summary(

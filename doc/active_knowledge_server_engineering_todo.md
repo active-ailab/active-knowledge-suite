@@ -432,23 +432,24 @@ TODO：
 
 ### C1-04 Workdir 初始化
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`OPS`
 - 依赖：`C1-03`
+- 输出：已将 workdir 初始化抽成可复用服务，支持幂等创建 baseline/local 目录、初始化本地配置、检查 baseline manifest、检测误追踪 local runtime 文件，并在不可写时 fail fast。
 
 TODO：
 
-- [ ] 创建 `.active-kb/baseline`、`.active-kb/local` 目录结构。
-- [ ] 初始化 `local/config/active-kb.local.yaml`。
-- [ ] 初始化 `local/db`、`local/vectors`、`cache`、`logs`、`tmp`、`locks`。
-- [ ] 检查 baseline manifest 是否存在和可读。
-- [ ] 检查 `.active-kb/local` 是否被误加入版本管理提示。
+- [x] 创建 `.active-kb/baseline`、`.active-kb/local` 目录结构。
+- [x] 初始化 `local/config/active-kb.local.yaml`。
+- [x] 初始化 `local/db`、`local/vectors`、`cache`、`logs`、`tmp`、`locks`。
+- [x] 检查 baseline manifest 是否存在和可读。
+- [x] 检查 `.active-kb/local` 是否被误加入版本管理提示。
 
 验收标准：
 
-- 重复执行 init 幂等。
-- workdir 不可写时 fail fast。
+- [x] 重复执行 init 幂等。
+- [x] workdir 不可写时 fail fast。
 
 ### C1-05 Fail-safe 安全配置校验
 

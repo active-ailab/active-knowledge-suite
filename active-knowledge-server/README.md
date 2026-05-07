@@ -63,3 +63,8 @@ or the user's home directory.
 
 `serve` and `index` currently return executable plans; FastMCP runtime wiring and
 the indexing pipeline are introduced by later implementation phases.
+
+`init` is idempotent. It creates the baseline/local directory skeleton, writes
+`local/config/active-kb.local.yaml` when missing, preserves an existing local
+config unless `--force` is used, warns when `baseline/manifest.json` is missing,
+and warns if runtime files under `.active-kb/local/` are tracked by git.
