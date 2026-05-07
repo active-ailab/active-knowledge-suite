@@ -55,5 +55,11 @@ Config precedence is fixed as:
 CLI > ACTIVE_KB_* environment > local config > baseline config > defaults
 ```
 
+The merged config is validated by the Pydantic schema in
+`active_knowledge_server.config.schema`, expands `${...}` references such as
+`${runtime.workdir}`, and emits safe summaries with token-like scalar fields
+redacted and absolute paths shortened when they live under the current directory
+or the user's home directory.
+
 `serve` and `index` currently return executable plans; FastMCP runtime wiring and
 the indexing pipeline are introduced by later implementation phases.

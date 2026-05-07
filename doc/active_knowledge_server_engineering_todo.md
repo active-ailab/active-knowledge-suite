@@ -410,24 +410,25 @@ TODO：
 
 ### C1-03 Config schema 与配置合并
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-08`、`C1-01`
+- 输出：已定义 Pydantic 配置模型、合并后变量展开、schema version、示例配置校验、可操作错误格式和脱敏/路径缩短的配置摘要。
 
 TODO：
 
-- [ ] 定义 Pydantic `RuntimeConfig`、`ProjectConfig`、`StorageConfig`、`IndexingConfig`、`QueryConfig`、`SecurityConfig`。
-- [ ] 支持 `${runtime.workdir}` 这类变量展开。
-- [ ] 支持 baseline config 和 local config 合并。
-- [ ] 记录 config schema version。
-- [ ] 输出配置摘要时脱敏 token、绝对路径按策略缩短。
+- [x] 定义 Pydantic `RuntimeConfig`、`ProjectConfig`、`StorageConfig`、`IndexingConfig`、`QueryConfig`、`SecurityConfig`。
+- [x] 支持 `${runtime.workdir}` 这类变量展开。
+- [x] 支持 baseline config 和 local config 合并。
+- [x] 记录 config schema version。
+- [x] 输出配置摘要时脱敏 token、绝对路径按策略缩短。
 
 验收标准：
 
-- 示例配置可通过校验。
-- 缺必填字段有可操作错误信息。
-- config dump 不泄漏密钥。
+- [x] 示例配置可通过校验。
+- [x] 缺必填字段有可操作错误信息。
+- [x] config dump 不泄漏密钥。
 
 ### C1-04 Workdir 初始化
 

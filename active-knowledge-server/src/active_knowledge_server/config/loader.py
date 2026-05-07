@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,10 +17,13 @@ from active_knowledge_server.config.defaults import (
     DEFAULT_WORKDIR,
     default_config,
 )
+from active_knowledge_server.config.schema import ActiveKnowledgeConfig, validate_config_dict
 
 ConfigScalar: TypeAlias = str | int | float | bool | None
 ConfigValue: TypeAlias = ConfigScalar | list["ConfigValue"] | dict[str, "ConfigValue"]
 ConfigDict: TypeAlias = dict[str, ConfigValue]
+
+_VARIABLE_RE = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
 
 _ENV_PATHS: Mapping[str, tuple[str, ...]] = {
     "ACTIVE_KB_WORKDIR": ("runtime", "workdir"),
@@ -42,6 +46,7 @@ class ResolvedConfig:
     """A merged config plus the file paths used to build it."""
 
     data: ConfigDict
+    model: ActiveKnowledgeConfig
     baseline_config_path: Path | None
     local_config_path: Path
     loaded_files: tuple[Path, ...]
@@ -97,12 +102,15 @@ def resolve_config(
     local_path = select_local_config_path(local_config_path, environment, pre_local, root)
     local_data = load_yaml_config(local_path) if local_path.exists() else {}
 
-    data = merge_configs(default_config_data(), baseline_data, local_data, env_data, cli_data)
-    data = apply_derived_runtime_paths(data)
+    merged = merge_configs(default_config_data(), baseline_data, local_data, env_data, cli_data)
+    data = expand_config_variables(apply_derived_runtime_paths(merged))
+    model = validate_merged_config(data)
+    data = coerce_config_value(model.to_config_dict(), source="validated config")
 
     loaded_files = tuple(path for path in (baseline_path, local_path) if path and path.exists())
     return ResolvedConfig(
         data=data,
+        model=model,
         baseline_config_path=baseline_path,
         local_config_path=local_path,
         loaded_files=loaded_files,
@@ -248,6 +256,30 @@ def apply_derived_runtime_paths(config: ConfigDict) -> ConfigDict:
     return merged
 
 
+def expand_config_variables(config: ConfigDict) -> ConfigDict:
+    """Expand ${dotted.path} variables against the merged config."""
+
+    expanded = merge_configs(config)
+    for _ in range(10):
+        next_value = cast(
+            ConfigDict,
+            _expand_value(expanded, root=expanded),
+        )
+        if next_value == expanded:
+            return next_value
+        expanded = next_value
+    raise ConfigError("config variable expansion exceeded 10 passes; check for cyclic references")
+
+
+def validate_merged_config(config: ConfigDict) -> ActiveKnowledgeConfig:
+    """Validate a merged config dictionary with the Pydantic schema."""
+
+    try:
+        return validate_config_dict(config, source="merged config")
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def config_path_value(config: Mapping[str, ConfigValue], dotted_path: str, default: str) -> str:
     """Return a string config value by dotted path."""
 
@@ -274,6 +306,17 @@ def normalize_transport(transport: str) -> str:
     """Normalize common transport aliases to the config contract vocabulary."""
 
     return "streamable-http" if transport == "http" else transport
+
+
+def get_config_value(config: Mapping[str, ConfigValue], dotted_path: str) -> ConfigValue:
+    """Return a config value by dotted path or raise a ConfigError."""
+
+    current: ConfigValue | None = cast(ConfigDict, dict(config))
+    for part in dotted_path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            raise ConfigError(f"unknown config variable ${{{dotted_path}}}")
+        current = current[part]
+    return current
 
 
 def _deep_merge(
@@ -303,3 +346,24 @@ def _coerce_value(value: object, *, source: str) -> ConfigValue:
             coerced[key] = _coerce_value(item, source=source)
         return coerced
     raise ConfigError(f"{source} contains unsupported value {value!r}")
+
+
+def _expand_value(value: ConfigValue, *, root: ConfigDict) -> ConfigValue:
+    if isinstance(value, str):
+        return _expand_string(value, root=root)
+    if isinstance(value, list):
+        return [_expand_value(item, root=root) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_value(item, root=root) for key, item in value.items()}
+    return value
+
+
+def _expand_string(value: str, *, root: ConfigDict) -> str:
+    def replace(match: re.Match[str]) -> str:
+        dotted_path = match.group(1)
+        replacement = get_config_value(root, dotted_path)
+        if isinstance(replacement, dict | list):
+            raise ConfigError(f"config variable ${{{dotted_path}}} points to a non-scalar value")
+        return "" if replacement is None else str(replacement)
+
+    return _VARIABLE_RE.sub(replace, value)

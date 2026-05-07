@@ -13,18 +13,16 @@ from typing import Any, cast
 import yaml
 
 from active_knowledge_server import __version__
-from active_knowledge_server.config.defaults import DEFAULT_WORKDIR
 from active_knowledge_server.config.loader import (
     ConfigDict,
     ConfigError,
-    ConfigValue,
     ResolvedConfig,
-    config_path_value,
     normalize_transport,
     resolve_config,
     resolve_runtime_path,
     set_nested,
 )
+from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.server import server_name
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
@@ -393,18 +391,9 @@ def workdir_layout(resolved: ResolvedConfig) -> WorkdirLayout:
     """Return resolved workdir paths."""
 
     cwd = Path.cwd()
-    workdir = resolve_runtime_path(
-        config_path_value(resolved.data, "runtime.workdir", DEFAULT_WORKDIR),
-        cwd,
-    )
-    baseline_dir = resolve_runtime_path(
-        config_path_value(resolved.data, "runtime.baseline_dir", str(workdir / "baseline")),
-        cwd,
-    )
-    local_dir = resolve_runtime_path(
-        config_path_value(resolved.data, "runtime.local_dir", str(workdir / "local")),
-        cwd,
-    )
+    workdir = resolve_runtime_path(resolved.model.runtime.workdir, cwd)
+    baseline_dir = resolve_runtime_path(resolved.model.runtime.baseline_dir, cwd)
+    local_dir = resolve_runtime_path(resolved.model.runtime.local_dir, cwd)
     local_config_dir = local_dir / "config"
     return WorkdirLayout(
         workdir=workdir,
@@ -515,35 +504,15 @@ def config_summary(
 ) -> dict[str, str | int | bool | list[str] | dict[str, Any]]:
     """Return a non-sensitive config summary for CLI output."""
 
-    http = {
-        "host": scalar(resolved.get("server.http.host"), "127.0.0.1"),
-        "port": scalar(resolved.get("server.http.port"), 8765),
-    }
-    return {
-        "deployment_mode": str(scalar(resolved.get("deployment_mode"), "local_single_user")),
-        "workdir": config_path_value(resolved.data, "runtime.workdir", DEFAULT_WORKDIR),
-        "local_dir": config_path_value(
-            resolved.data,
-            "runtime.local_dir",
-            f"{DEFAULT_WORKDIR}/local",
+    return cast(
+        dict[str, str | int | bool | list[str] | dict[str, Any]],
+        summarize_config(
+            resolved.model,
+            cwd=Path.cwd(),
+            loaded_files=resolved.loaded_files,
+            local_config_path=resolved.local_config_path,
         ),
-        "baseline_dir": config_path_value(
-            resolved.data,
-            "runtime.baseline_dir",
-            f"{DEFAULT_WORKDIR}/baseline",
-        ),
-        "source_docs_root": config_path_value(
-            resolved.data,
-            "runtime.source_docs_root",
-            "knowledge-sources",
-        ),
-        "workspace_root": config_path_value(resolved.data, "project.workspace_root", "."),
-        "profile": str(scalar(resolved.get("project.default_profile"), "auto")),
-        "transport": str(scalar(resolved.get("server.transport"), "stdio")),
-        "http": http,
-        "loaded_config_files": [str(path) for path in resolved.loaded_files],
-        "local_config_path": str(resolved.local_config_path),
-    }
+    )
 
 
 def path_status(
@@ -553,14 +522,8 @@ def path_status(
     """Return existence status for important local paths."""
 
     cwd = Path.cwd()
-    workspace = resolve_runtime_path(
-        config_path_value(resolved.data, "project.workspace_root", "."),
-        cwd,
-    )
-    source_docs = resolve_runtime_path(
-        config_path_value(resolved.data, "runtime.source_docs_root", "knowledge-sources"),
-        cwd,
-    )
+    workspace = resolve_runtime_path(resolved.model.project.workspace_root, cwd)
+    source_docs = resolve_runtime_path(resolved.model.runtime.source_docs_root, cwd)
     paths = {
         "workspace_root": workspace,
         "source_docs_root": source_docs,
@@ -612,14 +575,6 @@ def validation_checks(
             }
         )
     return checks
-
-
-def scalar(value: ConfigValue | None, default: str | int | bool) -> str | int | bool:
-    """Return a scalar config value for display."""
-
-    if isinstance(value, str | int | bool):
-        return value
-    return default
 
 
 def path_kind(path: Path) -> str:
