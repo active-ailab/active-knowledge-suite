@@ -74,3 +74,9 @@ and warns if runtime files under `.active-kb/local/` are tracked by git.
 authenticated `streamable-http`, explicit non-wildcard origins, enabled audit
 logging, and hidden ops tools. Failures return a structured
 `result_status=blocked` response for JSON callers.
+
+Path access is mediated by `active_knowledge_server.security.path_guard`.
+Configured allowlist roots are normalized before use, `..` traversal and
+symlink escapes are blocked by default, and successful paths expose
+root-relative display names such as `workspace:src/main.c` instead of leaking
+raw absolute paths.

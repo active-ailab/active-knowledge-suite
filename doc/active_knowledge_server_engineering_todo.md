@@ -475,23 +475,24 @@ TODO：
 
 ### C1-06 Path Guard
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`SEC`、`IMPL`、`TEST`
 - 依赖：`C1-03`
+- 输出：已实现配置驱动的 Path Guard，覆盖 allowlist 规范化校验、`..` 逃逸阻断、symlink 真实路径校验、显式 symlink escape 例外和 root-relative 展示路径。
 
 TODO：
 
-- [ ] 规范化路径并校验 allowlist。
-- [ ] 阻止 `..` 逃逸。
-- [ ] 阻止 symlink 跳出 allowlist，除非显式允许。
-- [ ] 返回相对路径展示策略。
-- [ ] 为 source docs、workspace、workdir 分别建立测试 fixture。
+- [x] 规范化路径并校验 allowlist。
+- [x] 阻止 `..` 逃逸。
+- [x] 阻止 symlink 跳出 allowlist，除非显式允许。
+- [x] 返回相对路径展示策略。
+- [x] 为 source docs、workspace、workdir 分别建立测试 fixture。
 
 验收标准：
 
-- 越权读取被阻断并产生 `security.path_blocked`。
-- 合法路径跨平台可通过。
+- [x] 越权读取被阻断并产生 `security.path_blocked`。
+- [x] 合法路径跨平台可通过。
 
 ### C1-07 审计与日志骨架
 
