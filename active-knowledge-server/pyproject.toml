@@ -1,0 +1,49 @@
+[project]
+name = "active-knowledge-server"
+version = "0.1.0"
+description = "Local-first RAG knowledge server for Active RTOS engineering projects."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+  { name = "GANLab" }
+]
+keywords = ["rag", "mcp", "rtos", "knowledge-base", "active-knowledge"]
+dependencies = []
+
+[project.scripts]
+active-kb = "active_knowledge_server.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "ruff>=0.5"
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["active_knowledge_server"]
+

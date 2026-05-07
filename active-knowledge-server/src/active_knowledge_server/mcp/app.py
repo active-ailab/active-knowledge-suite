@@ -1,0 +1,1 @@
+"""FastMCP application boundary."""

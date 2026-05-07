@@ -1,0 +1,1 @@
+"""Widget documentation parser boundary."""

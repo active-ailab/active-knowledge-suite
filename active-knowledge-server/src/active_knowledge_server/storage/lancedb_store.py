@@ -1,0 +1,1 @@
+"""LanceDB storage adapter boundary."""

@@ -1,0 +1,4 @@
+deployment_mode: local_single_user
+server:
+  transport: stdio
+  expose_ops_tools: false

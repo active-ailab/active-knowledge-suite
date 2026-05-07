@@ -1,0 +1,1 @@
+"""Response model boundary."""

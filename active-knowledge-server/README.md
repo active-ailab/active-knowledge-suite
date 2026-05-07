@@ -21,3 +21,17 @@ active-knowledge/
   knowledge-sources/       # source documents remembered by RAG
   active-knowledge-server/
 ```
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy
+uv run active-kb --version
+```
+
+The package uses a `src/` layout so tests exercise the installed package shape
+rather than importing directly from the repository root.

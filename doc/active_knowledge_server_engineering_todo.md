@@ -367,18 +367,19 @@ TODO：
 
 ### C1-01 Python 包与目录骨架
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`
 - 依赖：`D0-01` 至 `D0-08`
+- 输出：已创建 `active-knowledge-server` Python package、`src/active_knowledge_server/` 分层目录、测试目录、开发工具配置和 `active-kb` entrypoint。
 
 TODO：
 
-- [ ] 创建 `active-knowledge-server/pyproject.toml`。
-- [ ] 创建 `src/active_knowledge_server/` 包目录。
-- [ ] 创建模块：`config`、`connectors`、`parsers`、`indexing`、`storage`、`query`、`mcp`、`models`、`security`、`eval`。
-- [ ] 接入测试框架、类型检查、格式化工具。
-- [ ] 建立 `tests/unit`、`tests/integration`、`tests/contracts`、`tests/fixtures`。
+- [x] 创建 `active-knowledge-server/pyproject.toml`。
+- [x] 创建 `src/active_knowledge_server/` 包目录。
+- [x] 创建模块：`config`、`connectors`、`parsers`、`indexing`、`storage`、`query`、`mcp`、`models`、`security`、`eval`。
+- [x] 接入测试框架、类型检查、格式化工具。
+- [x] 建立 `tests/unit`、`tests/integration`、`tests/contracts`、`tests/fixtures`。
 
 验收标准：
 
