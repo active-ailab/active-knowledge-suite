@@ -1,0 +1,17 @@
+name: Guard Protected Branch
+
+on:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  guard:
+    uses: active-ailab/skills-manifest/.github/workflows/reusable-direct-push-guard.yml@main
+    secrets:
+      FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+      FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
