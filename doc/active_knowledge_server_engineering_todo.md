@@ -520,22 +520,23 @@ TODO：
 
 ### S2-01 Storage adapter 接口
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`CONTRACT`、`IMPL`
 - 依赖：`D0-05`
+- 输出：已定义 `storage/base.py` 稳定契约，覆盖 scope、physical record、logical view、replacement/tombstone 解析、reader/writer/adapter protocol，以及 baseline/overlay 显式写入请求和 baseline publish 写保护。
 
 TODO：
 
-- [ ] 定义 `storage/base.py`，包括 source、snapshot、profile、file、chunk、entity、relation、evidence、job 的读写接口。
-- [ ] 查询层只依赖接口，不直接写 SQL。
-- [ ] 写接口区分 baseline target 和 overlay target。
-- [ ] 普通运行默认禁止 baseline 写入。
+- [x] 定义 `storage/base.py`，包括 source、snapshot、profile、file、chunk、entity、relation、evidence、job 的读写接口。
+- [x] 查询层只依赖接口，不直接写 SQL。
+- [x] 写接口区分 baseline target 和 overlay target。
+- [x] 普通运行默认禁止 baseline 写入。
 
 验收标准：
 
-- query 模块没有 SQLite/LanceDB 直接导入。
-- baseline 写入必须经过显式 publish/build target。
+- [x] query 模块没有 SQLite/LanceDB 直接导入。
+- [x] baseline 写入必须经过显式 publish/build target。
 
 ### S2-02 SQLite schema 与 migration
 
