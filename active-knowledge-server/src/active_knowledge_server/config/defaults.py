@@ -35,6 +35,13 @@ DEFAULT_CONFIG: Final[dict[str, object]] = {
         "local_dir": "${runtime.workdir}/local",
         "source_docs_root": "knowledge-sources",
         "log_level": "info",
+        "logging": {
+            "rotation": {
+                "enabled": True,
+                "max_bytes": 10_485_760,
+                "backup_count": 5,
+            },
+        },
     },
     "project": {
         "id": "active",

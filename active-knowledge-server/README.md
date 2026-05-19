@@ -80,3 +80,9 @@ Configured allowlist roots are normalized before use, `..` traversal and
 symlink escapes are blocked by default, and successful paths expose
 root-relative display names such as `workspace:src/main.c` instead of leaking
 raw absolute paths.
+
+Runtime logging is split under `.active-kb/local/logs/` into `server.log`,
+`indexer.log`, `audit.log`, `security.log`, and `eval.log`. The audit boundary
+emits JSONL events for tool calls and ops operations with query hashes, safe
+short previews, caller/profile/result metadata, warning codes, and redacted
+details. Rotation is controlled by `runtime.logging.rotation`.

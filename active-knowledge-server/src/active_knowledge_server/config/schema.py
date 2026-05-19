@@ -82,6 +82,20 @@ class ServerConfig(ConfigModel):
     http: HttpConfig = Field(default_factory=HttpConfig)
 
 
+class LogRotationConfig(ConfigModel):
+    """Rotating file log policy."""
+
+    enabled: bool = True
+    max_bytes: int = Field(default=10_485_760, ge=1)
+    backup_count: int = Field(default=5, ge=0)
+
+
+class LoggingConfig(ConfigModel):
+    """Runtime log file configuration."""
+
+    rotation: LogRotationConfig = Field(default_factory=LogRotationConfig)
+
+
 class RuntimeConfig(ConfigModel):
     """Runtime filesystem and logging configuration."""
 
@@ -91,6 +105,7 @@ class RuntimeConfig(ConfigModel):
     local_dir: str
     source_docs_root: str
     log_level: Literal["debug", "info", "warning", "error"] = "info"
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
 
 
 class ProjectConfig(ConfigModel):

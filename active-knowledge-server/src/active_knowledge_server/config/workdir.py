@@ -141,6 +141,7 @@ def initialize_workdir(
     directories = workdir_directories(layout)
     for directory in directories:
         create_directory(directory, created)
+    create_log_files(layout.local_logs_dir, created)
 
     gitignore = layout.local_dir / ".gitignore"
     if not gitignore.exists():
@@ -232,6 +233,21 @@ def create_directory(directory: Path, created: list[Path]) -> None:
         raise ConfigError(f"workdir directory is not writable: {directory}")
     if not existed:
         created.append(directory)
+
+
+def create_log_files(logs_dir: Path, created: list[Path]) -> None:
+    """Create the fixed log files expected by runtime logging."""
+
+    from active_knowledge_server.observability.logging import log_file_paths
+
+    for path in log_file_paths(logs_dir).values():
+        existed = path.exists()
+        try:
+            path.touch(exist_ok=True)
+        except OSError as exc:
+            raise ConfigError(f"cannot create log file {path}: {exc}") from exc
+        if not existed:
+            created.append(path)
 
 
 def write_text_file(path: Path, content: str, created: list[Path]) -> None:

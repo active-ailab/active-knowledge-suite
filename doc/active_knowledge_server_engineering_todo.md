@@ -496,22 +496,23 @@ TODO：
 
 ### C1-07 审计与日志骨架
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`SEC`、`OPS`、`IMPL`
 - 依赖：`C1-03`
+- 输出：已建立分通道日志与 JSONL audit 骨架，支持 tool call / ops 操作审计、query hash + 安全短预览、warning 摘要、敏感字段/长文本脱敏和滚动日志配置。
 
 TODO：
 
-- [ ] 建立 `server.log`、`indexer.log`、`audit.log`、`eval.log`。
-- [ ] audit 记录：tool、query hash 或短 query、profile、调用方、耗时、结果数量、warning code、ops 操作。
-- [ ] 不记录大段源码正文和密钥。
-- [ ] 支持日志轮转配置。
+- [x] 建立 `server.log`、`indexer.log`、`audit.log`、`eval.log`。
+- [x] audit 记录：tool、query hash 或短 query、profile、调用方、耗时、结果数量、warning code、ops 操作。
+- [x] 不记录大段源码正文和密钥。
+- [x] 支持日志轮转配置。
 
 验收标准：
 
-- 每次 tool call 都有 audit 记录。
-- 敏感字段脱敏测试通过。
+- [x] 每次 tool call 都有 audit 记录。
+- [x] 敏感字段脱敏测试通过。
 
 ---
 

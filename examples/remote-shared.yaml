@@ -26,6 +26,11 @@ runtime:
   local_dir: /var/lib/active-kb/local
   source_docs_root: /srv/active-knowledge/knowledge-sources
   log_level: info
+  logging:
+    rotation:
+      enabled: true
+      max_bytes: 10485760
+      backup_count: 10
 
 project:
   id: active
