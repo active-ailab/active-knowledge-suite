@@ -40,6 +40,7 @@ from active_knowledge_server.storage.base import (
     StorageSourceIndex,
     StorageWriteRequest,
     TombstoneRecord,
+    VectorRefRecord,
     validate_write_request,
 )
 
@@ -1128,6 +1129,21 @@ class SQLiteStorageReader:
         rows = self._iter_scoped_rows("evidence", scope, reader=row_to_evidence_record)
         return tuple(record for record in rows if self._record_path_matches(scope, record.file_id))
 
+    def get_vector_ref(self, vector_ref_id: str) -> VectorRefRecord | None:
+        return self._get_first_physical(
+            "vector_ref",
+            vector_ref_id,
+            reader=row_to_vector_ref_record,
+        )
+
+    def iter_vector_refs(self, scope: QueryScope) -> tuple[VectorRefRecord, ...]:
+        rows = self._iter_unique_simple(
+            "vector_ref",
+            "vector_ref_id",
+            row_to_vector_ref_record,
+        )
+        return tuple(record for record in rows if self._vector_ref_matches_scope(record, scope))
+
     def get_job(self, job_id: str) -> JobRecord | None:
         if self._jobs_path is None:
             return None
@@ -1241,8 +1257,9 @@ class SQLiteStorageReader:
             ("overlay", self._overlay_metadata_path),
             ("baseline", self._baseline_metadata_path),
         ):
+            source = cast(StorageSourceIndex, source_index)
             for record in self.iter_relations_from_source(path, scope):
-                if source_index == "baseline" and record.relation_id in seen:
+                if source == "baseline" and record.relation_id in seen:
                     continue
                 if self.is_tombstoned("relation", record.relation_id, scope):
                     continue
@@ -1253,7 +1270,7 @@ class SQLiteStorageReader:
                 if not self._logical_object_exists("entity", dst.resolved_object_id, scope):
                     continue
                 relation = record
-                merged_source: StorageSourceIndex = source_index
+                merged_source: StorageSourceIndex = source
                 if src.replaced or dst.replaced:
                     relation = replace(
                         relation,
@@ -1280,19 +1297,20 @@ class SQLiteStorageReader:
             ("overlay", self._overlay_metadata_path),
             ("baseline", self._baseline_metadata_path),
         ):
+            source = cast(StorageSourceIndex, source_index)
             for record in self.iter_evidence_from_source(path, scope):
-                if source_index == "baseline" and record.evidence_id in seen:
+                if source == "baseline" and record.evidence_id in seen:
                     continue
                 if self.is_tombstoned("evidence", record.evidence_id, scope):
                     continue
                 items.append(
-                    LogicalEvidence(
-                        logical_object_id=record.evidence_id,
-                        physical_object_id=record.evidence_id,
-                        source_index=source_index,
-                        record=record,
+                        LogicalEvidence(
+                            logical_object_id=record.evidence_id,
+                            physical_object_id=record.evidence_id,
+                            source_index=source,
+                            record=record,
+                        )
                     )
-                )
                 seen.add(record.evidence_id)
         return tuple(items)
 
@@ -1728,6 +1746,42 @@ class SQLiteStorageReader:
             return self._record_path_matches(scope, cast(ChunkRecord, record).file_id)
         return self._record_path_matches(scope, cast(EntityRecord, record).file_id)
 
+    def _vector_ref_matches_scope(
+        self,
+        record: VectorRefRecord,
+        scope: QueryScope,
+    ) -> bool:
+        if scope.profile_id != ALL_SCOPE and record.profile_id not in (
+            ALL_SCOPE,
+            scope.profile_id,
+        ):
+            return False
+        if scope.source_scope != ALL_SCOPE and record.source_scope not in (
+            ALL_SCOPE,
+            scope.source_scope,
+        ):
+            return False
+
+        if record.object_type == "chunk":
+            return self._logical_object_exists("chunk", record.object_id, scope)
+        if record.object_type == "entity":
+            return self._logical_object_exists("entity", record.object_id, scope)
+
+        evidence = self.get_evidence(record.object_id)
+        if evidence is None or evidence.snapshot_id != scope.snapshot_id:
+            return False
+        if scope.profile_id != ALL_SCOPE and evidence.profile_id not in (
+            ALL_SCOPE,
+            scope.profile_id,
+        ):
+            return False
+        if scope.source_scope != ALL_SCOPE and evidence.source_scope not in (
+            ALL_SCOPE,
+            scope.source_scope,
+        ):
+            return False
+        return self._record_path_matches(scope, evidence.file_id)
+
     def _overlay_object_live(
         self,
         object_type: Literal["chunk", "entity"],
@@ -1860,6 +1914,13 @@ class SQLiteStorageWriter:
     def upsert_evidence(self, record: EvidenceRecord) -> None:
         self._upsert_metadata("evidence", evidence_record_values(record))
 
+    def upsert_vector_ref(self, record: VectorRefRecord) -> None:
+        path = self._metadata_path
+        with sqlite_connection(path) as connection:
+            upsert_row(connection, "vector_ref", vector_ref_record_values(record))
+            sync_chunk_embedding_ref(connection, record)
+            connection.commit()
+
     def upsert_job(self, record: JobRecord) -> None:
         if self._jobs_path is None:
             raise SQLiteMigrationError("jobs SQLite path is not configured.")
@@ -1926,9 +1987,16 @@ def prefer_match(current: FTSMatch, candidate: FTSMatch) -> FTSMatch:
         return candidate
     if source_priority(candidate.source_index) < source_priority(current.source_index):
         return current
-    if candidate.metadata.get("bm25", 0.0) < current.metadata.get("bm25", 0.0):
+    if bm25_score(candidate) < bm25_score(current):
         return candidate
     return current
+
+
+def bm25_score(match: FTSMatch) -> float:
+    value = match.metadata.get("bm25", 0.0)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
 
 
 def path_prefix_pattern(path_scope: str) -> str:
@@ -2125,6 +2193,23 @@ def row_to_evidence_record(row: sqlite3.Row) -> EvidenceRecord:
     )
 
 
+def row_to_vector_ref_record(row: sqlite3.Row) -> VectorRefRecord:
+    return VectorRefRecord(
+        vector_ref_id=str(row["vector_ref_id"]),
+        object_type=cast(
+            Literal["chunk", "entity", "evidence"],
+            str(row["object_type"]),
+        ),
+        object_id=str(row["object_id"]),
+        chunk_id=optional_text(row["chunk_id"]),
+        embedding_model_version=str(row["embedding_model_version"]),
+        content_hash=str(row["content_hash"]),
+        source_scope=str(row["source_scope"]),
+        profile_id=str(row["profile_id"]),
+        metadata=decode_metadata(row["metadata_json"]),
+    )
+
+
 def row_to_job_record(row: sqlite3.Row) -> JobRecord:
     return JobRecord(
         job_id=str(row["job_id"]),
@@ -2187,7 +2272,7 @@ def sync_chunk_fts(
 ) -> None:
     base_row = chunk_fts_values(record, file_record)
     for table in ("chunk_fts", "doc_fts", "code_fts"):
-        delete_fts_rows(connection, cast(StorageFTSTable, table), record.chunk_id)
+        delete_fts_rows(connection, table, record.chunk_id)
     insert_fts_row(connection, "chunk_fts", base_row)
     if is_doc_chunk(record, file_record):
         insert_fts_row(connection, "doc_fts", doc_fts_values(record, file_record, base_row))
@@ -2202,6 +2287,29 @@ def sync_entity_fts(
 ) -> None:
     delete_fts_rows(connection, "entity_fts", record.entity_id)
     insert_fts_row(connection, "entity_fts", entity_fts_values(record, file_record))
+
+
+def sync_chunk_embedding_ref(
+    connection: sqlite3.Connection,
+    record: VectorRefRecord,
+) -> None:
+    if record.object_type != "chunk":
+        return
+    chunk_id = record.chunk_id or record.object_id
+    row = connection.execute(
+        "SELECT metadata_json FROM chunk WHERE chunk_id = ? LIMIT 1",
+        (chunk_id,),
+    ).fetchone()
+    if row is None:
+        return
+    metadata = decode_metadata(row["metadata_json"])
+    metadata["embedding_ref"] = record.vector_ref_id
+    metadata["embedding_model_version"] = record.embedding_model_version
+    metadata["embedding_content_hash"] = record.content_hash
+    connection.execute(
+        "UPDATE chunk SET metadata_json = ? WHERE chunk_id = ?",
+        (encode_metadata(metadata), chunk_id),
+    )
 
 
 def is_doc_chunk(record: ChunkRecord, file_record: FileRecord | None) -> bool:
@@ -2450,6 +2558,20 @@ def evidence_record_values(record: EvidenceRecord) -> dict[str, Any]:
         "citation_label": record.citation_label,
         "start_line": record.start_line,
         "end_line": record.end_line,
+        "metadata_json": encode_metadata(record.metadata),
+    }
+
+
+def vector_ref_record_values(record: VectorRefRecord) -> dict[str, Any]:
+    return {
+        "vector_ref_id": record.vector_ref_id,
+        "object_type": record.object_type,
+        "object_id": record.object_id,
+        "chunk_id": record.chunk_id,
+        "embedding_model_version": record.embedding_model_version,
+        "content_hash": record.content_hash,
+        "source_scope": record.source_scope,
+        "profile_id": record.profile_id,
         "metadata_json": encode_metadata(record.metadata),
     }
 

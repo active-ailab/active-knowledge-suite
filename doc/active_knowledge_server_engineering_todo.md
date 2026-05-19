@@ -582,18 +582,18 @@ TODO：
 
 ### S2-04 LanceDB baseline/delta adapter
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-01`
 
 TODO：
 
-- [ ] 建立 baseline vector collection 只读访问。
-- [ ] 建立 local delta vector collection 写入。
-- [ ] vector ref 写回 chunk。
-- [ ] 查询时合并 baseline 和 delta 候选。
-- [ ] tombstone/replacement 后过滤过期向量。
+- [x] 建立 baseline vector collection 只读访问。
+- [x] 建立 local delta vector collection 写入。
+- [x] vector ref 写回 chunk。
+- [x] 查询时合并 baseline 和 delta 候选。
+- [x] tombstone/replacement 后过滤过期向量。
 
 验收标准：
 

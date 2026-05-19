@@ -28,6 +28,7 @@ StorageSourceIndex = Literal["baseline", "overlay", "merged"]
 StorageFTSTable = Literal["chunk_fts", "entity_fts", "doc_fts", "code_fts"]
 StorageWriteTarget = Literal["overlay", "baseline"]
 StorageOperationMode = Literal["normal", "baseline_publish"]
+StorageWarningLevel = Literal["info", "caution", "degraded", "blocked"]
 
 ALL_SCOPE = "all"
 
@@ -79,6 +80,70 @@ class FTSMatch:
     snippet: str | None = None
     replaced_from: tuple[str, ...] = ()
     metadata: StorageMetadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class StorageWarning:
+    """One structured storage-layer warning that can flow into query diagnostics."""
+
+    code: str
+    message: str
+    level: StorageWarningLevel = "degraded"
+    details: StorageMetadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VectorRefRecord:
+    """One metadata-side reference to a vector payload stored out-of-band."""
+
+    vector_ref_id: str
+    object_type: Literal["chunk", "entity", "evidence"]
+    object_id: str
+    chunk_id: str | None
+    embedding_model_version: str
+    content_hash: str
+    source_scope: str = ALL_SCOPE
+    profile_id: str = ALL_SCOPE
+    metadata: StorageMetadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VectorQuery:
+    """Stable semantic-search request understood by the vector storage layer."""
+
+    embedding: tuple[float, ...]
+    scope: QueryScope = field(default_factory=QueryScope)
+    top_k: int = 12
+    object_types: tuple[Literal["chunk", "entity", "evidence"], ...] = ("chunk",)
+    embedding_model_version: str | None = None
+    source_index: StorageSourceIndex | None = None
+
+
+@dataclass(frozen=True)
+class VectorMatch:
+    """One merged vector candidate after logical-view filtering."""
+
+    logical_object_id: str
+    physical_object_id: str
+    vector_ref_id: str
+    object_type: Literal["chunk", "entity", "evidence"]
+    source_index: StorageSourceIndex
+    score: float
+    embedding_model_version: str
+    content_hash: str
+    chunk_id: str | None = None
+    profile_id: str = ALL_SCOPE
+    source_scope: str = ALL_SCOPE
+    match_source: Literal["vector"] = "vector"
+    metadata: StorageMetadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VectorSearchResult:
+    """One vector search response with candidates and degradations."""
+
+    matches: tuple[VectorMatch, ...] = ()
+    warnings: tuple[StorageWarning, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -421,6 +486,12 @@ class StorageReader(Protocol):
     def iter_evidence(self, scope: QueryScope) -> Iterable[EvidenceRecord]:
         """Iterate physical evidence matching a scope."""
 
+    def get_vector_ref(self, vector_ref_id: str) -> VectorRefRecord | None:
+        """Return one vector reference record by ID."""
+
+    def iter_vector_refs(self, scope: QueryScope) -> Iterable[VectorRefRecord]:
+        """Iterate physical vector references matching a scope."""
+
     def get_job(self, job_id: str) -> JobRecord | None:
         """Return one job by ID."""
 
@@ -491,6 +562,9 @@ class StorageWriter(Protocol):
     def upsert_evidence(self, record: EvidenceRecord) -> None:
         """Insert or update one evidence record."""
 
+    def upsert_vector_ref(self, record: VectorRefRecord) -> None:
+        """Insert or update one vector reference record."""
+
     def upsert_job(self, record: JobRecord) -> None:
         """Insert or update one job record."""
 
@@ -512,6 +586,50 @@ class StorageAdapter(Protocol):
         """Return a reader over physical and logical metadata views."""
 
     def writer(self, request: StorageWriteRequest) -> StorageWriter:
+        """Return a writer scoped to one explicit baseline or overlay target."""
+
+    def close(self) -> None:
+        """Release adapter resources."""
+
+
+@runtime_checkable
+class VectorStoreReader(Protocol):
+    """Read contract for baseline+delta vector stores."""
+
+    def search(self, request: VectorQuery) -> VectorSearchResult:
+        """Run merged vector search over baseline and delta collections."""
+
+
+@runtime_checkable
+class VectorStoreWriter(Protocol):
+    """Write contract for vector payloads and synchronized metadata refs."""
+
+    @property
+    def request(self) -> StorageWriteRequest:
+        """Return the explicit write intent bound to this writer."""
+
+    def upsert_vector(self, record: VectorRefRecord, embedding: Iterable[float]) -> VectorRefRecord:
+        """Insert or update one vector payload and synchronized metadata ref."""
+
+    def delete_object_vectors(
+        self,
+        object_type: Literal["chunk", "entity", "evidence"],
+        object_ids: Iterable[str],
+    ) -> int:
+        """Delete vector payloads for the given logical objects from the writable target."""
+
+    def flush(self) -> None:
+        """Persist pending writes and make them visible to subsequent readers."""
+
+
+@runtime_checkable
+class VectorStoreAdapter(Protocol):
+    """Factory contract for one vector-store backend implementation."""
+
+    def reader(self) -> VectorStoreReader:
+        """Return a reader over baseline and delta vector collections."""
+
+    def writer(self, request: StorageWriteRequest) -> VectorStoreWriter:
         """Return a writer scoped to one explicit baseline or overlay target."""
 
     def close(self) -> None:
