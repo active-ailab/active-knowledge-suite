@@ -7,11 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from active_knowledge_server.config.loader import ConfigError, resolve_config
+from active_knowledge_server.config.loader import ConfigError, ResolvedConfig, resolve_config
 from active_knowledge_server.config.workdir import initialize_workdir
 
 
-def resolve_for_workdir(tmp_path: Path):
+def resolve_for_workdir(tmp_path: Path) -> ResolvedConfig:
     workspace = tmp_path / "workspace"
     source_docs = tmp_path / "knowledge-sources"
     workdir = tmp_path / ".active-kb"
@@ -40,6 +40,8 @@ def test_initialize_workdir_creates_full_layout_and_local_config(tmp_path: Path)
     assert layout.local_dir.is_dir()
     assert layout.local_config_path.is_file()
     assert layout.local_db_dir.is_dir()
+    assert (layout.local_db_dir / "overlay.db").is_file()
+    assert (layout.local_db_dir / "jobs.db").is_file()
     assert layout.local_vectors_dir.is_dir()
     assert layout.local_artifacts_dir.is_dir()
     assert layout.local_cache_dir.is_dir()
@@ -108,11 +110,9 @@ def test_initialize_workdir_warns_for_tracked_runtime_local_files(tmp_path: Path
         env={},
         cwd=repo,
     )
-    tracked_file = repo / ".active-kb" / "local" / "db" / "overlay.db"
-    tracked_file.parent.mkdir(parents=True)
-    tracked_file.write_text("tracked runtime file", encoding="utf-8")
+    initialize_workdir(resolved, cwd=repo)
     subprocess.run(
-        ["git", "-C", str(repo), "add", ".active-kb/local/db/overlay.db"],
+        ["git", "-C", str(repo), "add", "-f", ".active-kb/local/db/overlay.db"],
         check=True,
         capture_output=True,
         text=True,

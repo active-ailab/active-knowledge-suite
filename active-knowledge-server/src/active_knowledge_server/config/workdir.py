@@ -17,6 +17,7 @@ from active_knowledge_server.config.loader import (
     resolve_runtime_path,
     set_nested,
 )
+from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 
 _ALLOWED_TRACKED_LOCAL_FILES = {
     ".gitignore",
@@ -158,6 +159,8 @@ def initialize_workdir(
             created,
         )
 
+    create_local_sqlite_stores(resolved.model, cwd=root, created=created)
+
     baseline_status, baseline_warning = inspect_baseline_manifest(layout.baseline_manifest_path)
     warnings = [baseline_warning] if baseline_warning else []
     tracked_warning = inspect_tracked_local_files(layout.local_dir, cwd=root)
@@ -248,6 +251,21 @@ def create_log_files(logs_dir: Path, created: list[Path]) -> None:
             raise ConfigError(f"cannot create log file {path}: {exc}") from exc
         if not existed:
             created.append(path)
+
+
+def create_local_sqlite_stores(
+    config: ActiveKnowledgeConfig,
+    *,
+    cwd: Path,
+    created: list[Path],
+) -> None:
+    """Create and migrate the local writable SQLite stores."""
+
+    from active_knowledge_server.storage.sqlite_store import migrate_local_sqlite_stores
+
+    for result in migrate_local_sqlite_stores(config, cwd=cwd):
+        if result.created:
+            created.append(result.path)
 
 
 def write_text_file(path: Path, content: str, created: list[Path]) -> None:

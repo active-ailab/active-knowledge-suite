@@ -67,7 +67,9 @@ the indexing pipeline are introduced by later implementation phases.
 `init` is idempotent. It creates the baseline/local directory skeleton, writes
 `local/config/active-kb.local.yaml` when missing, preserves an existing local
 config unless `--force` is used, warns when `baseline/manifest.json` is missing,
-and warns if runtime files under `.active-kb/local/` are tracked by git.
+and warns if runtime files under `.active-kb/local/` are tracked by git. It
+also creates and migrates the writable local SQLite stores for
+`overlay.db` and `jobs.db`.
 
 `serve` runs fail-safe security validation before returning a launch plan.
 `local_single_user` HTTP may only bind loopback hosts. `remote_shared` requires

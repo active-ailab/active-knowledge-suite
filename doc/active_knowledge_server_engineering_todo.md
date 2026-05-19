@@ -540,24 +540,25 @@ TODO：
 
 ### S2-02 SQLite schema 与 migration
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`OPS`、`TEST`
 - 依赖：`S2-01`
+- 输出：已建立 `baseline_metadata`、`overlay_metadata`、`jobs` 三类 SQLite schema 与 migration 骨架，覆盖 `schema_version` / `migration_history`、幂等迁移、dry-run、existing db 备份、major baseline confirm gate，以及 init 期间本地 overlay/jobs 自动迁移。
 
 TODO：
 
-- [ ] 建立 `metadata.db` schema。
-- [ ] 建立 `overlay.db` schema。
-- [ ] 建立 `jobs.db` schema。
-- [ ] 建立 `schema_version` 表。
-- [ ] migration 幂等执行，支持 dry-run。
-- [ ] 大版本 migration 前自动备份 local db。
+- [x] 建立 `metadata.db` schema。
+- [x] 建立 `overlay.db` schema。
+- [x] 建立 `jobs.db` schema。
+- [x] 建立 `schema_version` 表。
+- [x] migration 幂等执行，支持 dry-run。
+- [x] 大版本 migration 前自动备份 local db。
 
 验收标准：
 
-- migration 连续执行 3 次结果一致。
-- migration 失败不破坏旧 db。
+- [x] migration 连续执行 3 次结果一致。
+- [x] migration 失败不破坏旧 db。
 
 ### S2-03 FTS5 索引
 
