@@ -562,22 +562,23 @@ TODO：
 
 ### S2-03 FTS5 索引
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-02`
+- 输出：已建立 baseline/overlay SQLite FTS5 表与 merged logical view 检索实现，覆盖 chunk/entity/doc/code 四类索引、写入同步、tombstone/replacement 过滤、domain/doc_type/profile/source_index 过滤，以及 baseline+overlay 去重单测。
 
 TODO：
 
-- [ ] 建立 `chunk_fts`、`entity_fts`、`doc_fts`、`code_fts`。
-- [ ] 写入 chunk/entity 时同步 FTS。
-- [ ] 删除或 replacement 时同步 FTS logical view。
-- [ ] 支持按 domain、doc_type、profile、source_index 过滤。
+- [x] 建立 `chunk_fts`、`entity_fts`、`doc_fts`、`code_fts`。
+- [x] 写入 chunk/entity 时同步 FTS。
+- [x] 删除或 replacement 时同步 FTS logical view。
+- [x] 支持按 domain、doc_type、profile、source_index 过滤。
 
 验收标准：
 
-- FTS 与 chunk/entity 一致性检查通过。
-- baseline + overlay 查询结果去重正确。
+- [x] FTS 与 chunk/entity 一致性检查通过。
+- [x] baseline + overlay 查询结果去重正确。
 
 ### S2-04 LanceDB baseline/delta adapter
 
@@ -1670,7 +1671,7 @@ V1 可以发布的最低功能边界：
 - [ ] baseline 只读、overlay 可写。
 - [ ] `knowledge-sources/api` 和 `knowledge-sources/widgets` 可索引。
 - [ ] Markdown/front matter 可解析。
-- [ ] SQLite FTS5 可检索文档、chunk、entity。
+- [x] SQLite FTS5 可检索文档、chunk、entity。
 - [ ] LanceDB 可选启用，禁用时 FTS 路径可用。
 - [ ] workspace、module、file、symbol 基础结构索引可用。
 - [ ] `profile auto` 有确定性行为，无法判断时 warning。

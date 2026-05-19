@@ -25,6 +25,7 @@ StorageObjectType = Literal[
     "vector_ref",
 ]
 StorageSourceIndex = Literal["baseline", "overlay", "merged"]
+StorageFTSTable = Literal["chunk_fts", "entity_fts", "doc_fts", "code_fts"]
 StorageWriteTarget = Literal["overlay", "baseline"]
 StorageOperationMode = Literal["normal", "baseline_publish"]
 
@@ -40,6 +41,44 @@ class QueryScope:
     source_scope: str = ALL_SCOPE
     path_scope: str | None = None
     include_inactive: bool = False
+
+
+@dataclass(frozen=True)
+class FTSQuery:
+    """Stable full-text search request understood by the storage layer."""
+
+    index_name: StorageFTSTable
+    query: str
+    scope: QueryScope = field(default_factory=QueryScope)
+    top_k: int = 12
+    domain: str | None = None
+    doc_type: str | None = None
+    source_index: StorageSourceIndex | None = None
+
+
+@dataclass(frozen=True)
+class FTSMatch:
+    """One merged FTS candidate after logical-view filtering."""
+
+    index_name: StorageFTSTable
+    logical_object_id: str
+    physical_object_id: str
+    object_type: Literal["chunk", "entity"]
+    source_index: StorageSourceIndex
+    score: float
+    match_source: Literal["fts"] = "fts"
+    file_id: str | None = None
+    relative_path: str | None = None
+    chunk_id: str | None = None
+    entity_id: str | None = None
+    profile_id: str = ALL_SCOPE
+    source_scope: str = ALL_SCOPE
+    domain: str | None = None
+    doc_type: str | None = None
+    title: str | None = None
+    snippet: str | None = None
+    replaced_from: tuple[str, ...] = ()
+    metadata: StorageMetadata = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -415,6 +454,9 @@ class StorageReader(Protocol):
         scope: QueryScope,
     ) -> bool:
         """Return whether one logical object is hidden by an active tombstone."""
+
+    def search_fts(self, request: FTSQuery) -> Iterable[FTSMatch]:
+        """Run merged FTS search over baseline and overlay logical views."""
 
 
 @runtime_checkable
