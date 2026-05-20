@@ -660,23 +660,23 @@ TODO：
 
 ### S2-08 存储一致性 validate
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`OPS`、`TEST`
 - 依赖：`S2-03`、`S2-04`、`S2-06`
 
 TODO：
 
-- [ ] 检查 manifest/schema/parser/embedding version。
-- [ ] 检查 baseline/overlay FTS 与 metadata 一致。
-- [ ] 检查 vector ref 是否存在。
-- [ ] 检查 evidence 是否能回到文件。
-- [ ] 检查 relation endpoint 是否存在。
-- [ ] 输出 machine-readable report。
+- [x] 检查 manifest/schema/parser/embedding version。
+- [x] 检查 baseline/overlay FTS 与 metadata 一致。
+- [x] 检查 vector ref 是否存在。
+- [x] 检查 evidence 是否能回到文件。
+- [x] 检查 relation endpoint 是否存在。
+- [x] 输出 machine-readable report。
 
 验收标准：
 
-- `active-kb validate --format json` 可被 CI 消费。
+- [x] `active-kb validate --format json` 可被 CI 消费。
 
 ### S2-09 Clean 与 compact 策略
 

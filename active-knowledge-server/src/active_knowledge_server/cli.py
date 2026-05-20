@@ -32,6 +32,7 @@ from active_knowledge_server.security.config import (
     validate_startup_security,
 )
 from active_knowledge_server.server import server_name
+from active_knowledge_server.storage.validation import validate_storage_consistency
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
@@ -311,11 +312,14 @@ def handle_validate(args: argparse.Namespace) -> int:
     resolved = resolve_from_args(args)
     layout = workdir_layout(resolved)
     checks = validation_checks(layout, resolved, strict=bool(args.strict))
+    storage_report = validate_storage_consistency(resolved.model, cwd=Path.cwd())
     errors = [check for check in checks if check["level"] == "error"]
     payload = {
+        "schema_version": "active_kb_validate.v1",
         "command": "validate",
-        "status": "error" if errors else "ok",
+        "status": "error" if errors or storage_report.status == "blocked" else "ok",
         "checks": checks,
+        "storage_report": storage_report.to_dict(),
         "config": config_summary(resolved),
     }
 
@@ -325,7 +329,13 @@ def handle_validate(args: argparse.Namespace) -> int:
         print("Validation checks")
         for check in checks:
             print(f"- {check['level']}: {check['name']} - {check['message']}")
-    return 1 if errors else 0
+        print(f"Storage consistency: {storage_report.status}")
+        for storage_check in storage_report.checks:
+            print(
+                f"- {storage_check.severity}: "
+                f"{storage_check.check_code} - {storage_check.message}"
+            )
+    return 1 if errors or storage_report.status == "blocked" else 0
 
 
 def resolve_from_args(

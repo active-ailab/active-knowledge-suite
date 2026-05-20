@@ -64,6 +64,11 @@ from active_knowledge_server.storage.sqlite_store import (
     migrate_sqlite_store,
     plan_sqlite_migration,
 )
+from active_knowledge_server.storage.validation import (
+    StorageValidationCheck,
+    StorageValidationReport,
+    validate_storage_consistency,
+)
 
 __all__ = [
     "ALL_SCOPE",
@@ -96,6 +101,8 @@ __all__ = [
     "StorageReader",
     "StorageSourceIndex",
     "StorageWarning",
+    "StorageValidationCheck",
+    "StorageValidationReport",
     "StorageWriteRequest",
     "StorageWriteTarget",
     "StorageWriter",
@@ -124,4 +131,5 @@ __all__ = [
     "migrate_sqlite_store",
     "plan_sqlite_migration",
     "validate_write_request",
+    "validate_storage_consistency",
 ]
