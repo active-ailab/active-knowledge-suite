@@ -743,18 +743,18 @@ TODO：
 
 ### X3-03 Build outputs connector
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`C1-06`
 
 TODO：
 
-- [ ] 发现 `configs/**/*defconfig`。
-- [ ] 发现 `build/.config`、`build/out_hub/.config`。
-- [ ] 发现 compile DB candidates。
-- [ ] 记录缺失 compile DB warning。
-- [ ] 生成 build artifact manifest。
+- [x] 发现 `configs/**/*defconfig`。
+- [x] 发现 `build/.config`、`build/out_hub/.config`。
+- [x] 发现 compile DB candidates。
+- [x] 记录缺失 compile DB warning。
+- [x] 生成 build artifact manifest。
 
 验收标准：
 
