@@ -104,3 +104,33 @@ def test_parse_kconfig_parses_symbols_depends_selects_and_if_context() -> None:
 	assert symbols["BOARD_ACCEL"].value_type == "tristate"
 	assert (symbols["FEATURE_SLEEP"].start_line, symbols["FEATURE_SLEEP"].end_line) == (1, 4)
 	assert (symbols["BOARD_ACCEL"].start_line, symbols["BOARD_ACCEL"].end_line) == (12, 14)
+
+
+def test_parse_defconfig_supports_zeppos_bare_symbols_and_board_clues() -> None:
+	parsed = parse_defconfig(
+		Path("configs/mhs003/mhs003_geneva_defconfig"),
+		dedent(
+			"""\
+			HMI_BOARD_MHS003=y
+			HMI_BUILD_BOARD="mhs003"
+			HMI_PRODUCT_CUSTOMIZE_DIR="geneva"
+			HMI_BOARD_MHS003_GENEVA=y
+			# HMI_SDK_2NDBOOT_SUPPORT is not set
+			i18N_LOCALE_ENABLE_ERROR_ASSERT=n
+			BOARD_PNP_ID=0x0A5
+			PRODUCT_DEVICE_NAME="Amazfit Active Max"
+			"""
+		),
+	)
+
+	assignments = {assignment.macro_name: assignment for assignment in parsed.assignments}
+
+	assert parsed.warnings == ()
+	assert assignments["HMI_BOARD_MHS003"].enabled is True
+	assert assignments["HMI_BOARD_MHS003"].symbol == "HMI_BOARD_MHS003"
+	assert assignments["HMI_SDK_2NDBOOT_SUPPORT"].enabled is False
+	assert assignments["i18N_LOCALE_ENABLE_ERROR_ASSERT"].enabled is False
+	assert assignments["BOARD_PNP_ID"].value == "0x0a5"
+	assert assignments["PRODUCT_DEVICE_NAME"].value == "Amazfit Active Max"
+	assert parsed.clues.board == "mhs003_geneva"
+	assert parsed.clues.board_candidates == ("mhs003_geneva", "mhs003")

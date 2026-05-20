@@ -18,6 +18,15 @@ from active_knowledge_server.parsers.kconfig import (
 	parse_kconfig,
 	parse_profile_config,
 )
+from active_knowledge_server.parsers.makefiles import (
+	MAKEFILE_PARSER_SCHEMA_VERSION,
+	MakefileParseWarning,
+	ParsedBuildModule,
+	ParsedMakefile,
+	ParsedMakefileFile,
+	ParsedMakefileRelation,
+	parse_makefile,
+)
 from active_knowledge_server.parsers.markdown import (
 	DOC_PARSER_SCHEMA_VERSION,
 	DocumentParseWarning,
@@ -34,8 +43,11 @@ from active_knowledge_server.parsers.widget_docs import parse_widget_doc
 __all__ = [
 	"DOC_PARSER_SCHEMA_VERSION",
 	"KCONFIG_PARSER_SCHEMA_VERSION",
+	"MAKEFILE_PARSER_SCHEMA_VERSION",
 	"DocumentParseWarning",
 	"KconfigParseWarning",
+	"MakefileParseWarning",
+	"ParsedBuildModule",
 	"ParsedConfigFile",
 	"ParsedChunk",
 	"ParsedDocument",
@@ -45,6 +57,9 @@ __all__ = [
 	"ParsedKconfigSelect",
 	"ParsedKconfigSymbol",
 	"ParsedMacroAssignment",
+	"ParsedMakefile",
+	"ParsedMakefileFile",
+	"ParsedMakefileRelation",
 	"ParsedProfileClues",
 	"ParsedProfileConfig",
 	"compute_profile_macro_summary_hash",
@@ -54,6 +69,7 @@ __all__ = [
 	"parse_dotconfig",
 	"parse_html_document",
 	"parse_kconfig",
+	"parse_makefile",
 	"parse_markdown_document",
 	"parse_profile_config",
 	"parse_source_document",

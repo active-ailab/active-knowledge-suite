@@ -801,17 +801,17 @@ TODO：
 
 ### X3-06 Makefile/module.mk parser
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-01`
 
 TODO：
 
-- [ ] 识别 build module。
-- [ ] 抽取模块名、源文件、条件宏。
-- [ ] 关联目录、文件、Config.in。
-- [ ] 输出 Module entity 和 relations。
+- [x] 识别 build module。
+- [x] 抽取模块名、源文件、条件宏。
+- [x] 关联目录、文件、Config.in。
+- [x] 输出 Module entity 和 relations。
 
 验收标准：
 

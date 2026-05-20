@@ -13,8 +13,9 @@ from typing import Final
 
 KCONFIG_PARSER_SCHEMA_VERSION: Final = "kconfig_parser.v1"
 
-_CONFIG_ASSIGNMENT_RE: Final = re.compile(r"^(CONFIG_[A-Za-z0-9_]+)=(.*)$")
-_CONFIG_NOT_SET_RE: Final = re.compile(r"^#\s*(CONFIG_[A-Za-z0-9_]+)\s+is\s+not\s+set\s*$")
+_CONFIG_SYMBOL_PATTERN: Final = r"(?:CONFIG_[A-Za-z0-9_]+|[A-Za-z][A-Za-z0-9_]+)"
+_CONFIG_ASSIGNMENT_RE: Final = re.compile(rf"^({_CONFIG_SYMBOL_PATTERN})=(.*)$")
+_CONFIG_NOT_SET_RE: Final = re.compile(rf"^#\s*({_CONFIG_SYMBOL_PATTERN})\s+is\s+not\s+set\s*$")
 _CONFIG_STRING_VALUE_RE: Final = re.compile(r'^".*"$')
 _CONFIG_INTEGER_RE: Final = re.compile(r"^-?[0-9]+$")
 
@@ -44,7 +45,8 @@ _TOP_LEVEL_KCONFIG_KEYWORDS: Final = {
 }
 
 _APP_VALUE_SYMBOLS: Final = {"APP", "APP_NAME", "APPLICATION", "APPLICATION_NAME"}
-_BOARD_VALUE_SYMBOLS: Final = {"BOARD", "BOARD_NAME"}
+_BOARD_VALUE_SYMBOLS: Final = {"BOARD", "BOARD_NAME", "BUILD_BOARD", "HMI_BUILD_BOARD"}
+_BOARD_VARIANT_VALUE_SYMBOLS: Final = {"PRODUCT_CUSTOMIZE_DIR", "HMI_PRODUCT_CUSTOMIZE_DIR"}
 
 
 @dataclass(frozen=True)
@@ -485,7 +487,7 @@ def _parse_config(source_path: Path, text: str, *, source_kind: str) -> ParsedCo
 			assignments.append(
 				ParsedMacroAssignment(
 					macro_name=macro_name,
-					symbol=macro_name.removeprefix("CONFIG_"),
+					symbol=_symbol_from_macro_name(macro_name),
 					value="n",
 					raw_value="n",
 					value_type="bool",
@@ -502,7 +504,7 @@ def _parse_config(source_path: Path, text: str, *, source_kind: str) -> ParsedCo
 				warnings.append(
 					KconfigParseWarning(
 						code="config.unparsed_line",
-						message="Skipping config line that does not match CONFIG_* syntax.",
+						message="Skipping config line that does not match supported defconfig/.config assignment syntax.",
 						line_number=line_number,
 						details={"source_kind": source_kind, "line": stripped},
 					)
@@ -515,7 +517,7 @@ def _parse_config(source_path: Path, text: str, *, source_kind: str) -> ParsedCo
 		assignments.append(
 			ParsedMacroAssignment(
 				macro_name=macro_name,
-				symbol=macro_name.removeprefix("CONFIG_"),
+				symbol=_symbol_from_macro_name(macro_name),
 				value=value,
 				raw_value=raw_value,
 				value_type=value_type,
@@ -572,6 +574,13 @@ def _extract_profile_clues(
 	app_candidates: list[str] = []
 	board_candidates: list[str] = []
 	feature_candidates: list[str] = []
+	board_base_candidates: list[str] = []
+	board_variant_candidates: list[str] = []
+	path_hint = _infer_path_clue(source_path)
+	if path_hint["app"] is not None:
+		app_candidates.append(path_hint["app"])
+	if path_hint["board"] is not None:
+		board_candidates.append(path_hint["board"])
 
 	for assignment in assignments:
 		symbol = assignment.symbol
@@ -583,6 +592,11 @@ def _extract_profile_clues(
 			candidate = _normalize_clue_value(assignment.value)
 			if candidate:
 				board_candidates.append(candidate)
+				board_base_candidates.append(candidate)
+		if symbol in _BOARD_VARIANT_VALUE_SYMBOLS and assignment.value_type in {"string", "literal"}:
+			candidate = _normalize_clue_value(assignment.value)
+			if candidate:
+				board_variant_candidates.append(candidate)
 
 		if not assignment.enabled:
 			continue
@@ -596,8 +610,12 @@ def _extract_profile_clues(
 			if candidate:
 				app_candidates.append(candidate)
 
-		if symbol.startswith("BOARD_"):
+		if symbol.startswith("BOARD_") and assignment.value_type in {"bool", "tristate"}:
 			candidate = _normalize_clue_value(symbol.removeprefix("BOARD_"))
+			if candidate:
+				board_candidates.append(candidate)
+		elif symbol.startswith("HMI_BOARD_") and assignment.value_type in {"bool", "tristate"}:
+			candidate = _normalize_clue_value(symbol.removeprefix("HMI_BOARD_"))
 			if candidate:
 				board_candidates.append(candidate)
 
@@ -610,18 +628,18 @@ def _extract_profile_clues(
 			if candidate:
 				feature_candidates.append(candidate)
 
-	path_hint = _infer_path_clue(source_path)
-	if path_hint["app"] is not None:
-		app_candidates.append(path_hint["app"])
-	if path_hint["board"] is not None:
-		board_candidates.append(path_hint["board"])
+	for board_base in board_base_candidates:
+		for board_variant in board_variant_candidates:
+			composed = _normalize_clue_value(f"{board_base}_{board_variant}")
+			if composed:
+				board_candidates.append(composed)
 
 	unique_apps = tuple(_unique_strings(app_candidates))
-	unique_boards = tuple(_unique_strings(board_candidates))
+	unique_boards = _filter_board_candidates(tuple(_unique_strings(board_candidates)), preferred_hint=path_hint["board"])
 	unique_features = tuple(_unique_strings(feature_candidates))
 	return ParsedProfileClues(
 		app=unique_apps[0] if unique_apps else None,
-		board=unique_boards[0] if unique_boards else None,
+		board=_select_preferred_board(unique_boards, preferred_hint=path_hint["board"]),
 		features=unique_features,
 		app_candidates=unique_apps,
 		board_candidates=unique_boards,
@@ -717,6 +735,10 @@ def _unescape_kconfig_string(value: str) -> str:
 	return value.replace(r'\"', '"').replace(r"\\", "\\")
 
 
+def _symbol_from_macro_name(macro_name: str) -> str:
+	return macro_name.removeprefix("CONFIG_") if macro_name.startswith("CONFIG_") else macro_name
+
+
 def _infer_path_clue(source_path: Path) -> dict[str, str | None]:
 	name = source_path.name
 	if not name.endswith("_defconfig"):
@@ -733,6 +755,31 @@ def _infer_path_clue(source_path: Path) -> dict[str, str | None]:
 def _normalize_clue_value(value: str) -> str:
 	normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip().lower())
 	return normalized.strip("_")
+
+
+def _select_preferred_board(candidates: Sequence[str], *, preferred_hint: str | None = None) -> str | None:
+	if not candidates:
+		return None
+	if preferred_hint is not None:
+		for candidate in candidates:
+			if candidate == preferred_hint:
+				return candidate
+	return max(candidates, key=lambda candidate: (candidate.count("_"), len(candidate), candidate))
+
+
+def _filter_board_candidates(candidates: Sequence[str], *, preferred_hint: str | None) -> tuple[str, ...]:
+	if preferred_hint is None:
+		return tuple(candidates)
+	filtered = tuple(candidate for candidate in candidates if _matches_board_hint(candidate, preferred_hint))
+	return filtered or tuple(candidates)
+
+
+def _matches_board_hint(candidate: str, preferred_hint: str) -> bool:
+	return (
+		candidate == preferred_hint
+		or preferred_hint.startswith(f"{candidate}_")
+		or candidate.startswith(f"{preferred_hint}_")
+	)
 
 
 def _unique_strings(values: Sequence[str]) -> list[str]:
