@@ -705,18 +705,18 @@ TODO：
 
 ### X3-01 Workspace connector
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`C1-06`、`S2-01`
 
 TODO：
 
-- [ ] 扫描 Active workspace 顶层 area。
-- [ ] 识别 repo/submodule 边界和 commit map。
-- [ ] 生成 file inventory。
-- [ ] 应用 include/exclude 规则。
-- [ ] 所有读取经过 path guard。
+- [x] 扫描 Active workspace 顶层 area。
+- [x] 识别 repo/submodule 边界和 commit map。
+- [x] 生成 file inventory。
+- [x] 应用 include/exclude 规则。
+- [x] 所有读取经过 path guard。
 
 验收标准：
 
