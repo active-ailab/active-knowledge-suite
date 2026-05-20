@@ -334,6 +334,22 @@ class ReplacementResolution:
 
 
 @dataclass(frozen=True)
+class RelationValidationIssue:
+    """One relation consistency issue discovered by logical validation."""
+
+    issue_code: str
+    relation_id: str
+    source_index: StorageSourceIndex
+    level: StorageWarningLevel
+    message: str
+    src_entity_id: str
+    dst_entity_id: str
+    resolved_src_entity_id: str | None = None
+    resolved_dst_entity_id: str | None = None
+    metadata: StorageMetadata = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class LogicalChunk:
     """Chunk returned from the merged logical view."""
 
@@ -562,6 +578,9 @@ class StorageReader(Protocol):
 
     def logical_evidence(self, scope: QueryScope) -> Iterable[LogicalEvidence]:
         """Iterate merged evidence after tombstone and replacement filtering."""
+
+    def validate_relations(self, scope: QueryScope) -> Iterable[RelationValidationIssue]:
+        """Return relation consistency issues such as orphan endpoints."""
 
     def resolve_replacement(
         self,

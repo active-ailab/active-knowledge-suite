@@ -30,6 +30,7 @@ from active_knowledge_server.storage.base import (
     ProfileRecord,
     QueryScope,
     RelationRecord,
+    RelationValidationIssue,
     ReplacementRecord,
     ReplacementResolution,
     SnapshotRecord,
@@ -1284,6 +1285,16 @@ class SQLiteStorageReader:
                 )
                 if self.is_tombstoned("relation", record.relation_id, object_scope):
                     continue
+                relation_resolution = self.resolve_replacement(
+                    "relation",
+                    record.relation_id,
+                    object_scope,
+                )
+                if relation_resolution.replaced and self._relation_exists(
+                    relation_resolution.resolved_object_id,
+                    scope,
+                ):
+                    continue
                 src = self.resolve_replacement("entity", record.src_entity_id, object_scope)
                 dst = self.resolve_replacement("entity", record.dst_entity_id, object_scope)
                 if not self._logical_object_exists("entity", src.resolved_object_id, scope):
@@ -1299,13 +1310,20 @@ class SQLiteStorageReader:
                         dst_entity_id=dst.resolved_object_id,
                     )
                     merged_source = "merged"
+                if source == "baseline" and (
+                    self._logical_entity_source(src.resolved_object_id, scope) == "overlay"
+                    or self._logical_entity_source(dst.resolved_object_id, scope) == "overlay"
+                ):
+                    merged_source = "merged"
                 items.append(
                     LogicalRelation(
                         logical_object_id=record.relation_id,
                         physical_object_id=record.relation_id,
                         source_index=merged_source,
                         record=relation,
-                        replaced_from=tuple(src.chain + dst.chain),
+                        replaced_from=tuple(
+                            relation_resolution.chain + src.chain + dst.chain
+                        ),
                     )
                 )
                 seen.add(record.relation_id)
@@ -1363,6 +1381,63 @@ class SQLiteStorageReader:
                 )
                 seen.add(record.evidence_id)
         return tuple(items)
+
+    def validate_relations(self, scope: QueryScope) -> tuple[RelationValidationIssue, ...]:
+        live_entities = {item.logical_object_id for item in self.logical_entities(scope)}
+        issues: list[RelationValidationIssue] = []
+        seen: set[str] = set()
+        for source_index, path in (
+            ("overlay", self._overlay_metadata_path),
+            ("baseline", self._baseline_metadata_path),
+        ):
+            source = cast(StorageSourceIndex, source_index)
+            for record in self.iter_relations_from_source(path, scope):
+                if source == "baseline" and record.relation_id in seen:
+                    continue
+                object_scope = scope_for_record(
+                    record.snapshot_id,
+                    record.profile_id,
+                    record.source_scope,
+                    scope,
+                )
+                if self.is_tombstoned("relation", record.relation_id, object_scope):
+                    continue
+                relation_resolution = self.resolve_replacement(
+                    "relation",
+                    record.relation_id,
+                    object_scope,
+                )
+                if relation_resolution.replaced and self._relation_exists(
+                    relation_resolution.resolved_object_id,
+                    scope,
+                ):
+                    continue
+                src = self.resolve_replacement("entity", record.src_entity_id, object_scope)
+                dst = self.resolve_replacement("entity", record.dst_entity_id, object_scope)
+                missing_src = src.resolved_object_id not in live_entities
+                missing_dst = dst.resolved_object_id not in live_entities
+                if missing_src or missing_dst:
+                    issues.append(
+                        RelationValidationIssue(
+                            issue_code="storage.orphan_relation",
+                            relation_id=record.relation_id,
+                            source_index=source,
+                            level="degraded",
+                            message=(
+                                "Relation endpoint points to a missing or hidden logical entity."
+                            ),
+                            src_entity_id=record.src_entity_id,
+                            dst_entity_id=record.dst_entity_id,
+                            resolved_src_entity_id=src.resolved_object_id,
+                            resolved_dst_entity_id=dst.resolved_object_id,
+                            metadata={
+                                "missing_src": missing_src,
+                                "missing_dst": missing_dst,
+                            },
+                        )
+                    )
+                seen.add(record.relation_id)
+        return tuple(issues)
 
     def resolve_replacement(
         self,
@@ -1813,6 +1888,38 @@ class SQLiteStorageReader:
         if self._entity_hidden(entity, scope):
             return False
         return self._record_path_matches(scope, entity.file_id)
+
+    def _relation_exists(self, relation_id: str, scope: QueryScope) -> bool:
+        record = self.get_relation(relation_id)
+        if record is None or record.snapshot_id != scope.snapshot_id:
+            return False
+        if scope.profile_id != ALL_SCOPE and record.profile_id not in (
+            ALL_SCOPE,
+            scope.profile_id,
+        ):
+            return False
+        if scope.source_scope != ALL_SCOPE and record.source_scope not in (
+            ALL_SCOPE,
+            scope.source_scope,
+        ):
+            return False
+        object_scope = scope_for_record(
+            record.snapshot_id,
+            record.profile_id,
+            record.source_scope,
+            scope,
+        )
+        return not self.is_tombstoned("relation", relation_id, object_scope)
+
+    def _logical_entity_source(
+        self,
+        entity_id: str,
+        scope: QueryScope,
+    ) -> StorageSourceIndex | None:
+        for item in self.logical_entities(scope):
+            if item.logical_object_id == entity_id:
+                return item.source_index
+        return None
 
     def _chunk_hidden(self, record: ChunkRecord, scope: QueryScope) -> bool:
         object_scope = scope_for_record(
@@ -2437,8 +2544,14 @@ def scope_for_record(
 ) -> QueryScope:
     return QueryScope(
         snapshot_id=snapshot_id,
-        profile_id=profile_id,
-        source_scope=source_scope,
+        profile_id=(
+            query_scope.profile_id if query_scope.profile_id != ALL_SCOPE else profile_id
+        ),
+        source_scope=(
+            query_scope.source_scope
+            if query_scope.source_scope != ALL_SCOPE
+            else source_scope
+        ),
         path_scope=query_scope.path_scope,
         include_inactive=query_scope.include_inactive,
     )

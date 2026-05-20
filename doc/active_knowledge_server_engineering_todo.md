@@ -622,22 +622,22 @@ TODO：
 
 ### S2-06 跨库 relation 解析
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`S2-05`
 
 TODO：
 
-- [ ] relation endpoint 支持 baseline entity 和 overlay entity。
-- [ ] 查询时解析 logical entity ID。
-- [ ] replacement 后关系自动指向新对象或返回降级 warning。
-- [ ] tombstone 后 dangling relation 被过滤或标记。
+- [x] relation endpoint 支持 baseline entity 和 overlay entity。
+- [x] 查询时解析 logical entity ID。
+- [x] replacement 后关系自动指向新对象或返回降级 warning。
+- [x] tombstone 后 dangling relation 被过滤或标记。
 
 验收标准：
 
-- `validate` 可发现 orphan relation。
-- graph traversal 不返回被 tombstone 屏蔽的节点。
+- [x] `validate` 可发现 orphan relation。
+- [x] graph traversal 不返回被 tombstone 屏蔽的节点。
 
 ### S2-07 Job 状态与锁
 
