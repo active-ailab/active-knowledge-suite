@@ -1,5 +1,11 @@
 """Indexing pipeline and job orchestration."""
 
+from active_knowledge_server.indexing.code_indexer import (
+    CODE_INDEXER_SCHEMA_VERSION,
+    CodeIndexer,
+    CodeIndexingWarning,
+    IndexedCode,
+)
 from active_knowledge_server.indexing.doc_indexer import (
     DOC_INDEXER_SCHEMA_VERSION,
     DocumentIndexer,
@@ -30,14 +36,18 @@ from active_knowledge_server.indexing.snapshot import (
 )
 
 __all__ = [
+    "CODE_INDEXER_SCHEMA_VERSION",
     "CURRENT_SNAPSHOT_ID",
     "DOC_INDEXER_SCHEMA_VERSION",
     "PROFILE_COLLECTOR_SCHEMA_VERSION",
     "SNAPSHOT_COLLECTOR_SCHEMA_VERSION",
+    "CodeIndexer",
+    "CodeIndexingWarning",
     "CollectedProfiles",
     "CollectedSnapshot",
     "DocumentIndexer",
     "DocumentIndexingWarning",
+    "IndexedCode",
     "IndexedDocuments",
     "ProfileCandidate",
     "ProfileCollector",

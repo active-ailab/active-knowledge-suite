@@ -917,17 +917,17 @@ TODO：
 
 ### P4-04 代码结构索引流水线
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-06`、`X3-07`、`S2-03`
 
 TODO：
 
-- [ ] 写入 Directory、Module、File、Symbol entities。
-- [ ] 写入 contains、defines、belongs_to_module、guarded_by_macro relations。
-- [ ] 为 function/macro/type/file header 生成 code chunks。
-- [ ] 关系记录 confidence 和 extractor。
+- [x] 写入 Directory、Module、File、Symbol entities。
+- [x] 写入 contains、defines、belongs_to_module、guarded_by_macro relations。
+- [x] 为 function/macro/type/file header 生成 code chunks。
+- [x] 关系记录 confidence 和 extractor。
 
 验收标准：
 
