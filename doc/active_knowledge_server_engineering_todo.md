@@ -724,18 +724,18 @@ TODO：
 
 ### X3-02 Source docs connector
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`C1-06`
 
 TODO：
 
-- [ ] 扫描 `knowledge-sources/`。
-- [ ] 支持 api、widgets、engineering、product、design、project、qa、release、learned-seeds。
-- [ ] 生成 source doc manifest。
-- [ ] 计算 source docs hash。
-- [ ] source docs 不存在时创建空目录并 warning。
+- [x] 扫描 `knowledge-sources/`。
+- [x] 支持 api、widgets、engineering、product、design、project、qa、release、learned-seeds。
+- [x] 生成 source doc manifest。
+- [x] 计算 source docs hash。
+- [x] source docs 不存在时创建空目录并 warning。
 
 验收标准：
 
