@@ -23,6 +23,7 @@ from active_knowledge_server.storage.base import (
     FTSMatch,
     FTSQuery,
     JobRecord,
+    JobStatus,
     LogicalChunk,
     LogicalEntity,
     LogicalEvidence,
@@ -2578,6 +2579,7 @@ def primary_key_for_table(table: str) -> str:
         "evidence": "evidence_id",
         "vector_ref": "vector_ref_id",
         "job": "job_id",
+        "job_lock": "lock_id",
         "tombstone": "tombstone_id",
         "replacement": "replacement_id",
     }
@@ -2888,7 +2890,7 @@ def row_to_job_record(row: sqlite3.Row) -> JobRecord:
     return JobRecord(
         job_id=str(row["job_id"]),
         job_type=str(row["job_type"]),
-        status=str(row["status"]),
+        status=cast(JobStatus, str(row["status"])),
         write_target=cast(Literal["overlay", "baseline"], str(row["write_target"])),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),

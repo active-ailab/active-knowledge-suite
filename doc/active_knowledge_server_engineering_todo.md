@@ -641,22 +641,22 @@ TODO：
 
 ### S2-07 Job 状态与锁
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`S2-02`
 
 TODO：
 
-- [ ] 实现 job 状态机：pending、discovering、parsing、extracting、embedding、reporting、ready、failed、partial_ready。
-- [ ] 实现 SQLite job lock 或 lock file。
-- [ ] 防止多个 index job 同时写 overlay。
-- [ ] 支持 job resume 和 retry。
+- [x] 实现 job 状态机：pending、discovering、parsing、extracting、embedding、reporting、ready、failed、partial_ready。
+- [x] 实现 SQLite job lock 或 lock file。
+- [x] 防止多个 index job 同时写 overlay。
+- [x] 支持 job resume 和 retry。
 
 验收标准：
 
-- 并发启动两个 index job 时只有一个获得写锁。
-- 单文件解析失败可进入 partial_ready。
+- [x] 并发启动两个 index job 时只有一个获得写锁。
+- [x] 单文件解析失败可进入 partial_ready。
 
 ### S2-08 存储一致性 validate
 

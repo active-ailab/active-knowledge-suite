@@ -31,6 +31,17 @@ StorageFTSTable = Literal["chunk_fts", "entity_fts", "doc_fts", "code_fts"]
 StorageWriteTarget = Literal["overlay", "baseline"]
 StorageOperationMode = Literal["normal", "baseline_publish"]
 StorageWarningLevel = Literal["info", "caution", "degraded", "blocked"]
+JobStatus = Literal[
+    "pending",
+    "discovering",
+    "parsing",
+    "extracting",
+    "embedding",
+    "reporting",
+    "ready",
+    "failed",
+    "partial_ready",
+]
 
 ALL_SCOPE = "all"
 
@@ -278,7 +289,7 @@ class JobRecord:
 
     job_id: str
     job_type: str
-    status: str
+    status: JobStatus
     write_target: StorageWriteTarget
     created_at: str
     updated_at: str
