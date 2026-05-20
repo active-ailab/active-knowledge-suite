@@ -602,23 +602,23 @@ TODO：
 
 ### S2-05 Tombstone 与 replacement
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-05`、`S2-02`
 
 TODO：
 
-- [ ] 实现 tombstone 表和 API。
-- [ ] 实现 replacement 表和 API。
-- [ ] 本地删除 baseline 文件或 chunk 时写 tombstone。
-- [ ] 本地修改 baseline 对象时写 replacement。
-- [ ] 查询 logical view 中屏蔽 tombstone、优先 replacement。
+- [x] 实现 tombstone 表和 API。
+- [x] 实现 replacement 表和 API。
+- [x] 本地删除 baseline 文件或 chunk 时写 tombstone。
+- [x] 本地修改 baseline 对象时写 replacement。
+- [x] 查询 logical view 中屏蔽 tombstone、优先 replacement。
 
 验收标准：
 
-- 删除 baseline 中存在的文件后，查询不再返回旧 evidence。
-- 修改 baseline 中存在的 symbol 后，查询返回 overlay 新对象并标记 `source_index=overlay` 或 `merged`。
+- [x] 删除 baseline 中存在的文件后，查询不再返回旧 evidence。
+- [x] 修改 baseline 中存在的 symbol 后，查询返回 overlay 新对象并标记 `source_index=overlay` 或 `merged`。
 
 ### S2-06 跨库 relation 解析
 

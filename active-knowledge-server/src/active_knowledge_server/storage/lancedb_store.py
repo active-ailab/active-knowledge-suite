@@ -240,7 +240,11 @@ class LanceDBVectorReader:
 
         ordered = sorted(
             candidates.values(),
-            key=lambda item: (-item.score, -_SOURCE_PRIORITY[item.source_index], item.logical_object_id),
+            key=lambda item: (
+                -item.score,
+                -_SOURCE_PRIORITY[item.source_index],
+                item.logical_object_id,
+            ),
         )
         return VectorSearchResult(
             matches=tuple(ordered[: request.top_k]),
@@ -267,12 +271,21 @@ class LanceDBVectorReader:
             request.scope.source_scope,
         ):
             return None
-        if self._metadata_reader.is_tombstoned(row.object_type, row.object_id, request.scope):
+        row_scope = QueryScope(
+            snapshot_id=request.scope.snapshot_id,
+            profile_id=row.profile_id,
+            source_scope=row.source_scope,
+            path_scope=request.scope.path_scope,
+            include_inactive=request.scope.include_inactive,
+        )
+        if self._metadata_reader.is_tombstoned(row.object_type, row.object_id, row_scope):
+            return None
+        if self._metadata_reader.is_tombstoned("vector_ref", row.vector_ref_id, row_scope):
             return None
         resolution = self._metadata_reader.resolve_replacement(
             row.object_type,
             row.object_id,
-            request.scope,
+            row_scope,
         )
         if resolution.replaced:
             return None
@@ -384,7 +397,9 @@ class LanceDBVectorWriter:
     @property
     def _target_root(self) -> Path:
         return (
-            self._delta_vector_path if self._request.target == "overlay" else self._baseline_vector_path
+            self._delta_vector_path
+            if self._request.target == "overlay"
+            else self._baseline_vector_path
         )
 
 
@@ -516,11 +531,18 @@ def load_collection_rows(root: Path, object_type: VectorObjectType) -> tuple[_Ve
     return tuple(vector_row_from_dict(item) for item in raw if isinstance(item, dict))
 
 
-def write_collection_rows(root: Path, object_type: VectorObjectType, rows: Sequence[_VectorRow]) -> None:
+def write_collection_rows(
+    root: Path,
+    object_type: VectorObjectType,
+    rows: Sequence[_VectorRow],
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
     path = collection_path(root, object_type)
     payload = [vector_row_to_dict(row) for row in rows]
-    path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     write_manifest(root)
 
 

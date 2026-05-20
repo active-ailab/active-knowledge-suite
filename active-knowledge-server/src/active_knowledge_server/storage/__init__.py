@@ -41,7 +41,14 @@ from active_knowledge_server.storage.base import (
     VectorStoreReader,
     VectorStoreWriter,
     default_write_request,
+    make_replacement_id,
+    make_tombstone_id,
     validate_write_request,
+)
+from active_knowledge_server.storage.lancedb_store import (
+    LATEST_VECTOR_SCHEMA_VERSION,
+    LanceDBVectorAdapter,
+    configured_lancedb_paths,
 )
 from active_knowledge_server.storage.sqlite_store import (
     LATEST_SQLITE_SCHEMA_VERSION,
@@ -54,11 +61,6 @@ from active_knowledge_server.storage.sqlite_store import (
     migrate_local_sqlite_stores,
     migrate_sqlite_store,
     plan_sqlite_migration,
-)
-from active_knowledge_server.storage.lancedb_store import (
-    LATEST_VECTOR_SCHEMA_VERSION,
-    LanceDBVectorAdapter,
-    configured_lancedb_paths,
 )
 
 __all__ = [
@@ -112,6 +114,8 @@ __all__ = [
     "configured_sqlite_paths",
     "configured_lancedb_paths",
     "default_write_request",
+    "make_replacement_id",
+    "make_tombstone_id",
     "migrate_local_sqlite_stores",
     "migrate_sqlite_store",
     "plan_sqlite_migration",

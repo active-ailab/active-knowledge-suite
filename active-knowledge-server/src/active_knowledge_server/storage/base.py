@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
@@ -434,6 +436,57 @@ def require_writable_store(mode: str, field_name: str) -> None:
         raise StorageAccessError(f"{field_name} must be readwrite for this operation.")
 
 
+def make_tombstone_id(
+    object_type: StorageObjectType,
+    object_id: str,
+    *,
+    scope: QueryScope,
+    reason: str,
+    baseline_id: str | None = None,
+) -> str:
+    """Return a stable tombstone ID for idempotent local delete jobs."""
+
+    payload = {
+        "baseline_id": baseline_id,
+        "object_id": object_id,
+        "object_type": object_type,
+        "profile_id": scope.profile_id,
+        "reason": reason,
+        "snapshot_id": scope.snapshot_id,
+        "source_scope": scope.source_scope,
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"ts:{digest}"
+
+
+def make_replacement_id(
+    object_type: StorageObjectType,
+    old_object_id: str,
+    new_object_id: str,
+    *,
+    scope: QueryScope,
+    reason: str,
+) -> str:
+    """Return a stable replacement ID for idempotent local change jobs."""
+
+    payload = {
+        "new_object_id": new_object_id,
+        "object_type": object_type,
+        "old_object_id": old_object_id,
+        "path_scope": scope.path_scope,
+        "profile_id": scope.profile_id,
+        "reason": reason,
+        "snapshot_id": scope.snapshot_id,
+        "source_scope": scope.source_scope,
+    }
+    digest = hashlib.sha1(
+        json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"rp:{digest}"
+
+
 @runtime_checkable
 class StorageReader(Protocol):
     """Read contract for physical records and merged logical views."""
@@ -573,6 +626,40 @@ class StorageWriter(Protocol):
 
     def upsert_replacement(self, record: ReplacementRecord) -> None:
         """Insert or update one replacement record."""
+
+    def tombstone_file(
+        self,
+        file_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+    ) -> tuple[TombstoneRecord, ...]:
+        """Write overlay tombstones for a file and its indexed dependents."""
+
+    def tombstone_chunk(
+        self,
+        chunk_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+    ) -> tuple[TombstoneRecord, ...]:
+        """Write overlay tombstones for a chunk and attached evidence/vectors."""
+
+    def replace_object(
+        self,
+        object_type: StorageObjectType,
+        old_object_id: str,
+        new_object_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+        baseline_id: str | None = None,
+        metadata: StorageMetadata | None = None,
+    ) -> ReplacementRecord:
+        """Write an overlay replacement from an old logical object to a new one."""
 
     def flush(self) -> None:
         """Persist pending writes and make them visible to subsequent readers."""

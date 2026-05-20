@@ -34,6 +34,7 @@ from active_knowledge_server.storage.base import (
     ReplacementResolution,
     SnapshotRecord,
     SourceRecord,
+    StorageAccessError,
     StorageFTSTable,
     StorageMetadata,
     StorageObjectType,
@@ -41,6 +42,8 @@ from active_knowledge_server.storage.base import (
     StorageWriteRequest,
     TombstoneRecord,
     VectorRefRecord,
+    make_replacement_id,
+    make_tombstone_id,
     validate_write_request,
 )
 
@@ -1169,12 +1172,18 @@ class SQLiteStorageReader:
                 record=record,
             )
             for record in self.iter_chunks_from_source(self._overlay_metadata_path, scope)
-            if not self.is_tombstoned("chunk", record.chunk_id, scope)
+            if not self._chunk_hidden(record, scope)
         )
         seen = {item.logical_object_id for item in overlay}
         baseline_items: list[LogicalChunk] = []
         for record in self.iter_chunks_from_source(self._baseline_metadata_path, scope):
-            resolution = self.resolve_replacement("chunk", record.chunk_id, scope)
+            object_scope = scope_for_record(
+                record.snapshot_id,
+                record.profile_id,
+                record.source_scope,
+                scope,
+            )
+            resolution = self.resolve_replacement("chunk", record.chunk_id, object_scope)
             logical_id = resolution.resolved_object_id
             if logical_id in seen:
                 continue
@@ -1192,7 +1201,7 @@ class SQLiteStorageReader:
                 )
                 seen.add(logical_id)
                 continue
-            if self.is_tombstoned("chunk", record.chunk_id, scope):
+            if self._chunk_hidden(record, scope):
                 continue
             baseline_items.append(
                 LogicalChunk(
@@ -1214,12 +1223,18 @@ class SQLiteStorageReader:
                 record=record,
             )
             for record in self.iter_entities_from_source(self._overlay_metadata_path, scope)
-            if not self.is_tombstoned("entity", record.entity_id, scope)
+            if not self._entity_hidden(record, scope)
         )
         seen = {item.logical_object_id for item in overlay}
         baseline_items: list[LogicalEntity] = []
         for record in self.iter_entities_from_source(self._baseline_metadata_path, scope):
-            resolution = self.resolve_replacement("entity", record.entity_id, scope)
+            object_scope = scope_for_record(
+                record.snapshot_id,
+                record.profile_id,
+                record.source_scope,
+                scope,
+            )
+            resolution = self.resolve_replacement("entity", record.entity_id, object_scope)
             logical_id = resolution.resolved_object_id
             if logical_id in seen:
                 continue
@@ -1237,7 +1252,7 @@ class SQLiteStorageReader:
                 )
                 seen.add(logical_id)
                 continue
-            if self.is_tombstoned("entity", record.entity_id, scope):
+            if self._entity_hidden(record, scope):
                 continue
             baseline_items.append(
                 LogicalEntity(
@@ -1261,10 +1276,16 @@ class SQLiteStorageReader:
             for record in self.iter_relations_from_source(path, scope):
                 if source == "baseline" and record.relation_id in seen:
                     continue
-                if self.is_tombstoned("relation", record.relation_id, scope):
+                object_scope = scope_for_record(
+                    record.snapshot_id,
+                    record.profile_id,
+                    record.source_scope,
+                    scope,
+                )
+                if self.is_tombstoned("relation", record.relation_id, object_scope):
                     continue
-                src = self.resolve_replacement("entity", record.src_entity_id, scope)
-                dst = self.resolve_replacement("entity", record.dst_entity_id, scope)
+                src = self.resolve_replacement("entity", record.src_entity_id, object_scope)
+                dst = self.resolve_replacement("entity", record.dst_entity_id, object_scope)
                 if not self._logical_object_exists("entity", src.resolved_object_id, scope):
                     continue
                 if not self._logical_object_exists("entity", dst.resolved_object_id, scope):
@@ -1301,16 +1322,45 @@ class SQLiteStorageReader:
             for record in self.iter_evidence_from_source(path, scope):
                 if source == "baseline" and record.evidence_id in seen:
                     continue
-                if self.is_tombstoned("evidence", record.evidence_id, scope):
+                if self._evidence_hidden(record, scope):
                     continue
+                object_scope = scope_for_record(
+                    record.snapshot_id,
+                    record.profile_id,
+                    record.source_scope,
+                    scope,
+                )
+                resolution = self.resolve_replacement(
+                    record.object_type,
+                    record.object_id,
+                    object_scope,
+                )
+                evidence = record
+                merged_source = source
+                replaced_from: tuple[str, ...] = ()
+                if resolution.replaced:
+                    if record.object_type not in {"chunk", "entity"}:
+                        continue
+                    if not self._logical_object_exists(
+                        cast(Literal["chunk", "entity"], record.object_type),
+                        resolution.resolved_object_id,
+                        scope,
+                    ):
+                        continue
+                    evidence = replace(evidence, object_id=resolution.resolved_object_id)
+                    if evidence.chunk_id == resolution.requested_object_id:
+                        evidence = replace(evidence, chunk_id=resolution.resolved_object_id)
+                    merged_source = "merged"
+                    replaced_from = (record.object_id, *resolution.chain)
                 items.append(
-                        LogicalEvidence(
-                            logical_object_id=record.evidence_id,
-                            physical_object_id=record.evidence_id,
-                            source_index=source,
-                            record=record,
-                        )
+                    LogicalEvidence(
+                        logical_object_id=record.evidence_id,
+                        physical_object_id=record.evidence_id,
+                        source_index=merged_source,
+                        record=evidence,
+                        replaced_from=replaced_from,
                     )
+                )
                 seen.add(record.evidence_id)
         return tuple(items)
 
@@ -1631,7 +1681,15 @@ class SQLiteStorageReader:
         )
 
     def _fts_candidate_from_raw(self, raw: _FTSRow, scope: QueryScope) -> FTSMatch | None:
-        resolution = self.resolve_replacement(raw.object_type, raw.object_id, scope)
+        object_scope = scope_for_record(
+            raw.snapshot_id,
+            raw.profile_id,
+            raw.source_scope,
+            scope,
+        )
+        if raw.file_id is not None and self.is_tombstoned("file", raw.file_id, object_scope):
+            return None
+        resolution = self.resolve_replacement(raw.object_type, raw.object_id, object_scope)
         if resolution.replaced:
             logical_id = resolution.resolved_object_id
             if not self._logical_object_exists(raw.object_type, logical_id, scope):
@@ -1640,7 +1698,7 @@ class SQLiteStorageReader:
             replaced_from = (raw.object_id, *resolution.chain)
         else:
             logical_id = raw.object_id
-            if self.is_tombstoned(raw.object_type, logical_id, scope):
+            if self.is_tombstoned(raw.object_type, logical_id, object_scope):
                 return None
             if raw.source_index == "baseline" and self._overlay_object_live(
                 raw.object_type,
@@ -1651,7 +1709,11 @@ class SQLiteStorageReader:
             source_index = raw.source_index
             replaced_from = ()
 
-        if source_index == "merged" and self.is_tombstoned(raw.object_type, logical_id, scope):
+        if source_index == "merged" and self.is_tombstoned(
+            raw.object_type,
+            logical_id,
+            scope,
+        ):
             return None
 
         return FTSMatch(
@@ -1743,14 +1805,77 @@ class SQLiteStorageReader:
         ):
             return False
         if object_type == "chunk":
-            return self._record_path_matches(scope, cast(ChunkRecord, record).file_id)
-        return self._record_path_matches(scope, cast(EntityRecord, record).file_id)
+            chunk = cast(ChunkRecord, record)
+            if self._chunk_hidden(chunk, scope):
+                return False
+            return self._record_path_matches(scope, chunk.file_id)
+        entity = cast(EntityRecord, record)
+        if self._entity_hidden(entity, scope):
+            return False
+        return self._record_path_matches(scope, entity.file_id)
+
+    def _chunk_hidden(self, record: ChunkRecord, scope: QueryScope) -> bool:
+        object_scope = scope_for_record(
+            record.snapshot_id,
+            record.profile_id,
+            record.source_scope,
+            scope,
+        )
+        return self.is_tombstoned("chunk", record.chunk_id, object_scope) or self.is_tombstoned(
+            "file",
+            record.file_id,
+            object_scope,
+        )
+
+    def _entity_hidden(self, record: EntityRecord, scope: QueryScope) -> bool:
+        object_scope = scope_for_record(
+            record.snapshot_id,
+            record.profile_id,
+            record.source_scope,
+            scope,
+        )
+        return self.is_tombstoned("entity", record.entity_id, object_scope) or self.is_tombstoned(
+            "file",
+            record.file_id,
+            object_scope,
+        )
+
+    def _evidence_hidden(self, record: EvidenceRecord, scope: QueryScope) -> bool:
+        object_scope = scope_for_record(
+            record.snapshot_id,
+            record.profile_id,
+            record.source_scope,
+            scope,
+        )
+        if self.is_tombstoned("evidence", record.evidence_id, object_scope):
+            return True
+        if self.is_tombstoned("file", record.file_id, object_scope):
+            return True
+        if record.chunk_id is not None and self.is_tombstoned(
+            "chunk",
+            record.chunk_id,
+            object_scope,
+        ):
+            return True
+        return record.object_type in {"chunk", "entity", "relation"} and self.is_tombstoned(
+            record.object_type,
+            record.object_id,
+            object_scope,
+        )
 
     def _vector_ref_matches_scope(
         self,
         record: VectorRefRecord,
         scope: QueryScope,
     ) -> bool:
+        object_scope = scope_for_record(
+            scope.snapshot_id,
+            record.profile_id,
+            record.source_scope,
+            scope,
+        )
+        if self.is_tombstoned("vector_ref", record.vector_ref_id, object_scope):
+            return False
         if scope.profile_id != ALL_SCOPE and record.profile_id not in (
             ALL_SCOPE,
             scope.profile_id,
@@ -1927,10 +2052,86 @@ class SQLiteStorageWriter:
         self._upsert_path(self._jobs_path, "job", job_record_values(record))
 
     def upsert_tombstone(self, record: TombstoneRecord) -> None:
+        self._require_overlay_control_write("tombstone")
         self._upsert_metadata("tombstone", tombstone_record_values(record))
 
     def upsert_replacement(self, record: ReplacementRecord) -> None:
+        self._require_overlay_control_write("replacement")
         self._upsert_metadata("replacement", replacement_record_values(record))
+
+    def tombstone_file(
+        self,
+        file_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+    ) -> tuple[TombstoneRecord, ...]:
+        self._require_overlay_control_write("tombstone")
+        records = collect_file_tombstones(
+            baseline_metadata_path=self._baseline_metadata_path,
+            overlay_metadata_path=self._overlay_metadata_path,
+            file_id=file_id,
+            scope=scope,
+            reason=reason,
+            created_by_job=created_by_job,
+        )
+        self._upsert_tombstones(records)
+        return records
+
+    def tombstone_chunk(
+        self,
+        chunk_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+    ) -> tuple[TombstoneRecord, ...]:
+        self._require_overlay_control_write("tombstone")
+        records = collect_chunk_tombstones(
+            baseline_metadata_path=self._baseline_metadata_path,
+            overlay_metadata_path=self._overlay_metadata_path,
+            chunk_id=chunk_id,
+            scope=scope,
+            reason=reason,
+            created_by_job=created_by_job,
+        )
+        self._upsert_tombstones(records)
+        return records
+
+    def replace_object(
+        self,
+        object_type: StorageObjectType,
+        old_object_id: str,
+        new_object_id: str,
+        *,
+        scope: QueryScope,
+        reason: str,
+        created_by_job: str,
+        baseline_id: str | None = None,
+        metadata: StorageMetadata | None = None,
+    ) -> ReplacementRecord:
+        self._require_overlay_control_write("replacement")
+        record = ReplacementRecord(
+            replacement_id=make_replacement_id(
+                object_type,
+                old_object_id,
+                new_object_id,
+                scope=scope,
+                reason=reason,
+            ),
+            object_type=object_type,
+            old_object_id=old_object_id,
+            new_object_id=new_object_id,
+            baseline_id=baseline_id,
+            reason=reason,
+            created_by_job=created_by_job,
+            created_at=utc_now(),
+            scope=scope,
+            metadata={} if metadata is None else metadata,
+        )
+        self.upsert_replacement(record)
+        return record
 
     def flush(self) -> None:
         return None
@@ -1951,6 +2152,18 @@ class SQLiteStorageWriter:
             upsert_row(connection, table, values)
             connection.commit()
 
+    def _upsert_tombstones(self, records: tuple[TombstoneRecord, ...]) -> None:
+        if not records:
+            return
+        with sqlite_connection(self._overlay_metadata_path) as connection:
+            for record in records:
+                upsert_row(connection, "tombstone", tombstone_record_values(record))
+            connection.commit()
+
+    def _require_overlay_control_write(self, table: str) -> None:
+        if self._request.target != "overlay":
+            raise StorageAccessError(f"{table} records must be written to the overlay store.")
+
 
 def sqlite_connection(path: Path) -> sqlite3.Connection:
     """Open one SQLite connection with row access by column name."""
@@ -1960,6 +2173,214 @@ def sqlite_connection(path: Path) -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def collect_file_tombstones(
+    *,
+    baseline_metadata_path: Path,
+    overlay_metadata_path: Path,
+    file_id: str,
+    scope: QueryScope,
+    reason: str,
+    created_by_job: str,
+) -> tuple[TombstoneRecord, ...]:
+    """Build file-level cascade tombstones without mutating physical baseline rows."""
+
+    collector = _TombstoneCollector(reason=reason, created_by_job=created_by_job)
+    chunk_ids: set[str] = set()
+    entity_ids: set[str] = set()
+    evidence_ids: set[str] = set()
+    for source_index, path in source_paths_with_baseline_first(
+        baseline_metadata_path,
+        overlay_metadata_path,
+    ):
+        baseline = source_index == "baseline"
+        files = query_scoped_rows_by_column(path, "file", "file_id", file_id, scope)
+        for row in files:
+            file_record = row_to_file_record(row)
+            collector.add(
+                "file",
+                file_record.file_id,
+                scope_for_record(
+                    file_record.snapshot_id,
+                    file_record.profile_id,
+                    file_record.source_scope,
+                    scope,
+                ),
+                baseline=baseline,
+            )
+        chunks = query_scoped_rows_by_column(path, "chunk", "file_id", file_id, scope)
+        for row in chunks:
+            chunk = row_to_chunk_record(row)
+            chunk_ids.add(chunk.chunk_id)
+            collector.add(
+                "chunk",
+                chunk.chunk_id,
+                scope_for_record(chunk.snapshot_id, chunk.profile_id, chunk.source_scope, scope),
+                baseline=baseline,
+            )
+        entities = query_scoped_rows_by_column(path, "entity", "file_id", file_id, scope)
+        for row in entities:
+            entity = row_to_entity_record(row)
+            entity_ids.add(entity.entity_id)
+            collector.add(
+                "entity",
+                entity.entity_id,
+                scope_for_record(entity.snapshot_id, entity.profile_id, entity.source_scope, scope),
+                baseline=baseline,
+            )
+        evidence = query_scoped_rows_by_column(path, "evidence", "file_id", file_id, scope)
+        for row in evidence:
+            item = row_to_evidence_record(row)
+            evidence_ids.add(item.evidence_id)
+            collector.add(
+                "evidence",
+                item.evidence_id,
+                scope_for_record(item.snapshot_id, item.profile_id, item.source_scope, scope),
+                baseline=baseline,
+            )
+        for relation in query_relations_for_entities(path, entity_ids, scope):
+            collector.add(
+                "relation",
+                relation.relation_id,
+                scope_for_record(
+                    relation.snapshot_id,
+                    relation.profile_id,
+                    relation.source_scope,
+                    scope,
+                ),
+                baseline=baseline,
+            )
+        vector_refs = query_vector_refs_for_objects(
+            path,
+            chunk_ids=chunk_ids,
+            entity_ids=entity_ids,
+            evidence_ids=evidence_ids,
+            scope=scope,
+        )
+        for vector_ref in vector_refs:
+            collector.add(
+                "vector_ref",
+                vector_ref.vector_ref_id,
+                scope_for_record(
+                    scope.snapshot_id,
+                    vector_ref.profile_id,
+                    vector_ref.source_scope,
+                    scope,
+                ),
+                baseline=baseline,
+            )
+    return collector.records
+
+
+def collect_chunk_tombstones(
+    *,
+    baseline_metadata_path: Path,
+    overlay_metadata_path: Path,
+    chunk_id: str,
+    scope: QueryScope,
+    reason: str,
+    created_by_job: str,
+) -> tuple[TombstoneRecord, ...]:
+    """Build chunk-level cascade tombstones for local rechunk/delete jobs."""
+
+    collector = _TombstoneCollector(reason=reason, created_by_job=created_by_job)
+    evidence_ids: set[str] = set()
+    for source_index, path in source_paths_with_baseline_first(
+        baseline_metadata_path,
+        overlay_metadata_path,
+    ):
+        baseline = source_index == "baseline"
+        chunks = query_scoped_rows_by_column(path, "chunk", "chunk_id", chunk_id, scope)
+        for row in chunks:
+            chunk = row_to_chunk_record(row)
+            collector.add(
+                "chunk",
+                chunk.chunk_id,
+                scope_for_record(chunk.snapshot_id, chunk.profile_id, chunk.source_scope, scope),
+                baseline=baseline,
+            )
+        evidence = query_evidence_for_chunk(path, chunk_id, scope)
+        for row in evidence:
+            item = row_to_evidence_record(row)
+            evidence_ids.add(item.evidence_id)
+            collector.add(
+                "evidence",
+                item.evidence_id,
+                scope_for_record(item.snapshot_id, item.profile_id, item.source_scope, scope),
+                baseline=baseline,
+            )
+        vector_refs = query_vector_refs_for_objects(
+            path,
+            chunk_ids={chunk_id},
+            entity_ids=set(),
+            evidence_ids=evidence_ids,
+            scope=scope,
+        )
+        for vector_ref in vector_refs:
+            collector.add(
+                "vector_ref",
+                vector_ref.vector_ref_id,
+                scope_for_record(
+                    scope.snapshot_id,
+                    vector_ref.profile_id,
+                    vector_ref.source_scope,
+                    scope,
+                ),
+                baseline=baseline,
+            )
+    return collector.records
+
+
+@dataclass
+class _TombstoneCollector:
+    reason: str
+    created_by_job: str
+
+    def __post_init__(self) -> None:
+        self._records: dict[str, TombstoneRecord] = {}
+
+    @property
+    def records(self) -> tuple[TombstoneRecord, ...]:
+        return tuple(self._records.values())
+
+    def add(
+        self,
+        object_type: StorageObjectType,
+        object_id: str,
+        scope: QueryScope,
+        *,
+        baseline: bool,
+    ) -> None:
+        baseline_id = object_id if baseline else None
+        tombstone_id = make_tombstone_id(
+            object_type,
+            object_id,
+            scope=scope,
+            reason=self.reason,
+            baseline_id=baseline_id,
+        )
+        if tombstone_id in self._records:
+            return
+        self._records[tombstone_id] = TombstoneRecord(
+            tombstone_id=tombstone_id,
+            object_type=object_type,
+            object_id=object_id,
+            baseline_id=baseline_id,
+            snapshot_id=scope.snapshot_id,
+            profile_id=scope.profile_id,
+            source_scope=scope.source_scope,
+            reason=self.reason,
+            created_by_job=self.created_by_job,
+            created_at=utc_now(),
+        )
+
+
+def source_paths_with_baseline_first(
+    baseline_metadata_path: Path,
+    overlay_metadata_path: Path,
+) -> tuple[tuple[Literal["baseline", "overlay"], Path], ...]:
+    return (("baseline", baseline_metadata_path), ("overlay", overlay_metadata_path))
 
 
 def source_paths_for_filter(
@@ -2008,6 +2429,21 @@ def normalize_path_scope(path_scope: str) -> str:
     return path_scope.strip("/").replace("\\", "/")
 
 
+def scope_for_record(
+    snapshot_id: str,
+    profile_id: str,
+    source_scope: str,
+    query_scope: QueryScope,
+) -> QueryScope:
+    return QueryScope(
+        snapshot_id=snapshot_id,
+        profile_id=profile_id,
+        source_scope=source_scope,
+        path_scope=query_scope.path_scope,
+        include_inactive=query_scope.include_inactive,
+    )
+
+
 def normalize_fts_query(raw_query: str) -> str:
     tokens = _FTS_QUERY_TOKEN_RE.findall(raw_query)
     return " ".join(token for token in tokens if token)
@@ -2033,6 +2469,131 @@ def primary_key_for_table(table: str) -> str:
         "replacement": "replacement_id",
     }
     return mapping[table]
+
+
+def query_scoped_rows_by_column(
+    path: Path,
+    table: str,
+    column: str,
+    value: str,
+    scope: QueryScope,
+) -> tuple[sqlite3.Row, ...]:
+    if not path.exists():
+        return ()
+    query = f"SELECT * FROM {table} WHERE {column} = ? AND snapshot_id = ?"
+    params: list[Any] = [value, scope.snapshot_id]
+    query_parts: list[str] = []
+    add_scope_filters(query_parts, params, scope)
+    query += "".join(query_parts)
+    query += f" ORDER BY {primary_key_for_table(table)} ASC"
+    with sqlite_connection(path) as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return cast(tuple[sqlite3.Row, ...], tuple(rows))
+
+
+def query_evidence_for_chunk(
+    path: Path,
+    chunk_id: str,
+    scope: QueryScope,
+) -> tuple[sqlite3.Row, ...]:
+    if not path.exists():
+        return ()
+    query = """
+        SELECT *
+        FROM evidence
+        WHERE snapshot_id = ?
+          AND (chunk_id = ? OR (object_type = 'chunk' AND object_id = ?))
+    """
+    params: list[Any] = [scope.snapshot_id, chunk_id, chunk_id]
+    query_parts: list[str] = []
+    add_scope_filters(query_parts, params, scope)
+    query += "".join(query_parts)
+    query += " ORDER BY evidence_id ASC"
+    with sqlite_connection(path) as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return cast(tuple[sqlite3.Row, ...], tuple(rows))
+
+
+def query_relations_for_entities(
+    path: Path,
+    entity_ids: set[str],
+    scope: QueryScope,
+) -> tuple[RelationRecord, ...]:
+    if not path.exists() or not entity_ids:
+        return ()
+    placeholders = ", ".join("?" for _ in entity_ids)
+    query = f"""
+        SELECT *
+        FROM relation
+        WHERE snapshot_id = ?
+          AND (src_entity_id IN ({placeholders}) OR dst_entity_id IN ({placeholders}))
+    """
+    ordered_ids = sorted(entity_ids)
+    params: list[Any] = [scope.snapshot_id, *ordered_ids, *ordered_ids]
+    query_parts: list[str] = []
+    add_scope_filters(query_parts, params, scope)
+    query += "".join(query_parts)
+    query += " ORDER BY relation_id ASC"
+    with sqlite_connection(path) as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return tuple(row_to_relation_record(cast(sqlite3.Row, row)) for row in rows)
+
+
+def query_vector_refs_for_objects(
+    path: Path,
+    *,
+    chunk_ids: set[str],
+    entity_ids: set[str],
+    evidence_ids: set[str],
+    scope: QueryScope,
+) -> tuple[VectorRefRecord, ...]:
+    if not path.exists():
+        return ()
+    clauses: list[str] = []
+    params: list[Any] = []
+    add_vector_ref_clause(clauses, params, "chunk", chunk_ids)
+    add_vector_ref_clause(clauses, params, "entity", entity_ids)
+    add_vector_ref_clause(clauses, params, "evidence", evidence_ids)
+    if not clauses:
+        return ()
+    query = f"SELECT * FROM vector_ref WHERE ({' OR '.join(clauses)})"
+    if scope.profile_id != ALL_SCOPE:
+        query += " AND (profile_id = ? OR profile_id = ?)"
+        params.extend([scope.profile_id, ALL_SCOPE])
+    if scope.source_scope != ALL_SCOPE:
+        query += " AND (source_scope = ? OR source_scope = ?)"
+        params.extend([scope.source_scope, ALL_SCOPE])
+    query += " ORDER BY vector_ref_id ASC"
+    with sqlite_connection(path) as connection:
+        rows = connection.execute(query, tuple(params)).fetchall()
+    return tuple(row_to_vector_ref_record(cast(sqlite3.Row, row)) for row in rows)
+
+
+def add_vector_ref_clause(
+    clauses: list[str],
+    params: list[Any],
+    object_type: str,
+    object_ids: set[str],
+) -> None:
+    if not object_ids:
+        return
+    placeholders = ", ".join("?" for _ in object_ids)
+    clauses.append(f"(object_type = ? AND object_id IN ({placeholders}))")
+    params.append(object_type)
+    params.extend(sorted(object_ids))
+
+
+def add_scope_filters(
+    query_parts: list[str],
+    params: list[Any],
+    scope: QueryScope,
+) -> None:
+    if scope.profile_id != ALL_SCOPE:
+        query_parts.append(" AND (profile_id = ? OR profile_id = ?)")
+        params.extend([scope.profile_id, ALL_SCOPE])
+    if scope.source_scope != ALL_SCOPE:
+        query_parts.append(" AND (source_scope = ? OR source_scope = ?)")
+        params.extend([scope.source_scope, ALL_SCOPE])
 
 
 def encode_metadata(metadata: StorageMetadata) -> str:

@@ -6,12 +6,15 @@ from pathlib import Path
 from active_knowledge_server.storage import (
     ChunkRecord,
     EntityRecord,
+    EvidenceRecord,
     FileRecord,
     FTSQuery,
     QueryScope,
+    RelationRecord,
     ReplacementRecord,
     StorageWriteRequest,
     TombstoneRecord,
+    VectorRefRecord,
 )
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
@@ -369,3 +372,165 @@ def test_replacement_maps_old_entity_hit_to_merged_candidate(tmp_path: Path) -> 
     assert matches[0].logical_object_id == "entity-new"
     assert matches[0].physical_object_id == "entity-old"
     assert matches[0].source_index == "merged"
+
+
+def test_tombstone_file_cascades_and_hides_baseline_evidence(tmp_path: Path) -> None:
+    adapter, baseline_path, overlay_path = build_adapter(tmp_path)
+    seed_file(
+        adapter,
+        target="baseline",
+        file_id="file-runtime",
+        relative_path="knowledge-sources/engineering/runtime.md",
+        language="md",
+    )
+    baseline_writer = adapter.writer(StorageWriteRequest(target="baseline"))
+    baseline_writer.upsert_chunk(
+        ChunkRecord(
+            chunk_id="chunk-runtime",
+            snapshot_id="current",
+            file_id="file-runtime",
+            content_hash="hash:runtime",
+            chunk_type="doc_section",
+            ordinal=0,
+            text="Runtime queue handler evidence lives here.",
+            metadata={"domain": "engineering", "doc_type": "engineering"},
+        )
+    )
+    baseline_writer.upsert_entity(
+        EntityRecord(
+            entity_id="entity-runtime",
+            snapshot_id="current",
+            file_id="file-runtime",
+            entity_type="symbol",
+            name="runtime_queue_handler",
+            qualified_name="runtime_queue_handler",
+            path="knowledge-sources/engineering/runtime.md#runtime_queue_handler",
+        )
+    )
+    baseline_writer.upsert_relation(
+        RelationRecord(
+            relation_id="rel-runtime-self",
+            snapshot_id="current",
+            relation_type="mentions",
+            src_entity_id="entity-runtime",
+            dst_entity_id="entity-runtime",
+        )
+    )
+    baseline_writer.upsert_evidence(
+        EvidenceRecord(
+            evidence_id="ev-runtime",
+            snapshot_id="current",
+            object_type="chunk",
+            object_id="chunk-runtime",
+            file_id="file-runtime",
+            chunk_id="chunk-runtime",
+            excerpt="Runtime queue handler evidence lives here.",
+        )
+    )
+    baseline_writer.upsert_vector_ref(
+        VectorRefRecord(
+            vector_ref_id="vec-runtime",
+            object_type="chunk",
+            object_id="chunk-runtime",
+            chunk_id="chunk-runtime",
+            embedding_model_version="bge-m3",
+            content_hash="hash:runtime",
+        )
+    )
+
+    records = adapter.writer(StorageWriteRequest(target="overlay")).tombstone_file(
+        "file-runtime",
+        scope=QueryScope(snapshot_id="current"),
+        reason="deleted",
+        created_by_job="job-delete-file",
+    )
+
+    assert {record.object_type for record in records} == {
+        "file",
+        "chunk",
+        "entity",
+        "relation",
+        "evidence",
+        "vector_ref",
+    }
+    assert table_count(overlay_path, "tombstone") == 6
+    assert table_count(baseline_path, "chunk") == 1
+    assert table_count(baseline_path, "evidence") == 1
+
+    reader = adapter.reader()
+    scope = QueryScope(snapshot_id="current")
+    assert reader.logical_chunks(scope) == ()
+    assert reader.logical_entities(scope) == ()
+    assert reader.logical_relations(scope) == ()
+    assert reader.logical_evidence(scope) == ()
+    assert reader.iter_vector_refs(scope) == ()
+    assert reader.search_fts(
+        FTSQuery(index_name="doc_fts", query="queue handler", scope=scope)
+    ) == ()
+
+
+def test_replace_object_api_prefers_overlay_symbol_for_old_baseline_id(
+    tmp_path: Path,
+) -> None:
+    adapter, _baseline_path, _overlay_path = build_adapter(tmp_path)
+    seed_file(
+        adapter,
+        target="baseline",
+        file_id="file-symbol-old",
+        relative_path="drivers/sensor.c",
+        language="c",
+    )
+    seed_file(
+        adapter,
+        target="overlay",
+        file_id="file-symbol-new",
+        relative_path="drivers/sensor_v2.c",
+        language="c",
+    )
+    adapter.writer(StorageWriteRequest(target="baseline")).upsert_entity(
+        EntityRecord(
+            entity_id="entity-symbol-old",
+            snapshot_id="current",
+            file_id="file-symbol-old",
+            entity_type="function",
+            name="sensor_register",
+            qualified_name="sensor_register",
+            path="drivers/sensor.c#sensor_register",
+            metadata={"domain": "engineering", "summary": "Old registration function."},
+        )
+    )
+    overlay_writer = adapter.writer(StorageWriteRequest(target="overlay"))
+    overlay_writer.upsert_entity(
+        EntityRecord(
+            entity_id="entity-symbol-new",
+            snapshot_id="current",
+            file_id="file-symbol-new",
+            entity_type="function",
+            name="sensor_attach",
+            qualified_name="sensor_attach",
+            path="drivers/sensor_v2.c#sensor_attach",
+            metadata={"domain": "engineering", "summary": "New attach function."},
+        )
+    )
+    replacement = overlay_writer.replace_object(
+        "entity",
+        "entity-symbol-old",
+        "entity-symbol-new",
+        scope=QueryScope(snapshot_id="current"),
+        reason="symbol_moved",
+        created_by_job="job-replace-symbol",
+        baseline_id="entity-symbol-old",
+    )
+
+    reader = adapter.reader()
+    resolution = reader.resolve_replacement(
+        "entity",
+        "entity-symbol-old",
+        QueryScope(snapshot_id="current"),
+    )
+    logical_entities = reader.logical_entities(QueryScope(snapshot_id="current"))
+
+    assert replacement.replacement_id.startswith("rp:")
+    assert resolution.resolved_object_id == "entity-symbol-new"
+    assert [entity.logical_object_id for entity in logical_entities] == ["entity-symbol-new"]
+    assert logical_entities[0].source_index == "overlay"
