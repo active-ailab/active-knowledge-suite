@@ -762,19 +762,19 @@ TODO：
 
 ### X3-04 Markdown/HTML/front matter parser
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-02`
 
 TODO：
 
-- [ ] 解析 Markdown heading tree。
-- [ ] 解析 YAML front matter。
-- [ ] 支持 API 文档字段：module、version、code_symbols、profiles、authority_level。
-- [ ] 支持 widget 文档字段：widget、ui_framework、code_paths、tags、authority_level。
-- [ ] 支持 product/project/design 扩展字段预留。
-- [ ] HTML 先支持标题、正文、表格基础抽取。
+- [x] 解析 Markdown heading tree。
+- [x] 解析 YAML front matter。
+- [x] 支持 API 文档字段：module、version、code_symbols、profiles、authority_level。
+- [x] 支持 widget 文档字段：widget、ui_framework、code_paths、tags、authority_level。
+- [x] 支持 product/project/design 扩展字段预留。
+- [x] HTML 先支持标题、正文、表格基础抽取。
 
 验收标准：
 
