@@ -878,18 +878,18 @@ TODO：
 
 ### P4-02 Profile collector 与 auto 选择
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-06`、`X3-03`、`X3-05`
 
 TODO：
 
-- [ ] 实现 profile discovery。
-- [ ] 实现 `default_profile=auto` 选择算法。
-- [ ] 支持多 `.config` 候选排序。
-- [ ] profile unresolved 时不阻断非 profile-sensitive 查询。
-- [ ] 写入 profile manifest。
+- [x] 实现 profile discovery。
+- [x] 实现 `default_profile=auto` 选择算法。
+- [x] 支持多 `.config` 候选排序。
+- [x] profile unresolved 时不阻断非 profile-sensitive 查询。
+- [x] 写入 profile manifest。
 
 验收标准：
 
