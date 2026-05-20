@@ -898,18 +898,18 @@ TODO：
 
 ### P4-03 文档索引流水线
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-04`、`S2-03`、`S2-04`
 
 TODO：
 
-- [ ] 将 Markdown/HTML parse result 转成 doc chunks。
-- [ ] 抽取 API item、widget item。
-- [ ] 写入 source、file、chunk、entity、evidence、FTS。
-- [ ] 对选中 chunk 构建 embedding。
-- [ ] 记录 doc_type、domain、version、authority_level、freshness。
+- [x] 将 Markdown/HTML parse result 转成 doc chunks。
+- [x] 抽取 API item、widget item。
+- [x] 写入 source、file、chunk、entity、evidence、FTS。
+- [x] 对选中 chunk 构建 embedding。
+- [x] 记录 doc_type、domain、version、authority_level、freshness。
 
 验收标准：
 

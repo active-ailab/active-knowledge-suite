@@ -182,7 +182,7 @@ class LanceDBVectorReader:
             item.logical_object_id: live_entity(item)
             for item in self._metadata_reader.logical_entities(request.scope)
         }
-        live_evidence = {
+        live_evidence_objects = {
             item.logical_object_id: live_evidence(item)
             for item in self._metadata_reader.logical_evidence(request.scope)
         }
@@ -229,7 +229,7 @@ class LanceDBVectorReader:
                     source_index=source_index,
                     live_chunks=live_chunks,
                     live_entities=live_entities,
-                    live_evidence=live_evidence,
+                    live_evidence=live_evidence_objects,
                 )
                 if match is None:
                     continue
