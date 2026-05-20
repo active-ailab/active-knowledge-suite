@@ -32,6 +32,7 @@ from active_knowledge_server.security.config import (
     validate_startup_security,
 )
 from active_knowledge_server.server import server_name
+from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.validation import validate_storage_consistency
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
@@ -155,6 +156,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     validate_parser.set_defaults(handler=handle_validate)
+
+    clean_parser = subparsers.add_parser(
+        "clean",
+        parents=[common],
+        help="Clean local runtime cache, tmp, jobs, snapshots, or compact overlay metadata.",
+    )
+    clean_parser.add_argument("--cache", action="store_true", help="Clean local cache files.")
+    clean_parser.add_argument("--tmp", action="store_true", help="Clean local tmp files.")
+    clean_parser.add_argument(
+        "--old-jobs",
+        action="store_true",
+        help="Delete old terminal jobs while preserving active jobs.",
+    )
+    clean_parser.add_argument(
+        "--old-snapshots",
+        action="store_true",
+        help="Delete old local overlay snapshots.",
+    )
+    clean_parser.add_argument(
+        "--compact-overlay",
+        action="store_true",
+        help="Compact local overlay control rows and rebuild overlay FTS.",
+    )
+    clean_parser.add_argument(
+        "--keep",
+        type=int,
+        default=3,
+        help="Number of old jobs or snapshots to keep.",
+    )
+    clean_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    clean_parser.set_defaults(handler=handle_clean)
 
     return parser
 
@@ -336,6 +373,37 @@ def handle_validate(args: argparse.Namespace) -> int:
                 f"{storage_check.check_code} - {storage_check.message}"
             )
     return 1 if errors or storage_report.status == "blocked" else 0
+
+
+def handle_clean(args: argparse.Namespace) -> int:
+    """Clean local runtime state without touching baseline assets."""
+
+    resolved = resolve_from_args(args)
+    report = clean_local_state(
+        resolved.model,
+        cwd=Path.cwd(),
+        clean_cache=bool(args.cache),
+        clean_tmp=bool(args.tmp),
+        old_jobs_keep=int(args.keep) if args.old_jobs else None,
+        old_snapshots_keep=int(args.keep) if args.old_snapshots else None,
+        compact_overlay=bool(args.compact_overlay),
+    )
+    payload = {
+        "command": "clean",
+        "status": "ok",
+        "clean_report": report.to_dict(),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print("Clean completed")
+        print(f"Deleted files: {report.deleted_files}")
+        print(f"Deleted dirs: {report.deleted_dirs}")
+        print(f"Deleted jobs: {report.deleted_jobs}")
+        print(f"Deleted snapshots: {report.deleted_snapshots}")
+        if report.compact:
+            print(f"Compact: {report.compact}")
+    return 0
 
 
 def resolve_from_args(

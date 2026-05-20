@@ -52,6 +52,7 @@ from active_knowledge_server.storage.lancedb_store import (
     LanceDBVectorAdapter,
     configured_lancedb_paths,
 )
+from active_knowledge_server.storage.maintenance import CleanReport, clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
     LATEST_SQLITE_SCHEMA_VERSION,
     SQLiteMigrationError,
@@ -74,6 +75,7 @@ __all__ = [
     "ALL_SCOPE",
     "BaselineWriteBlockedError",
     "ChunkRecord",
+    "CleanReport",
     "EntityRecord",
     "EvidenceRecord",
     "FTSMatch",
@@ -124,6 +126,7 @@ __all__ = [
     "LanceDBVectorAdapter",
     "configured_sqlite_paths",
     "configured_lancedb_paths",
+    "clean_local_state",
     "default_write_request",
     "make_replacement_id",
     "make_tombstone_id",

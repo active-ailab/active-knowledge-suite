@@ -680,24 +680,24 @@ TODO：
 
 ### S2-09 Clean 与 compact 策略
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`D0-05`、`S2-08`
 
 TODO：
 
-- [ ] 实现 `clean --cache`。
-- [ ] 实现 `clean --tmp`。
-- [ ] 实现 `clean --old-jobs --keep N`。
-- [ ] 实现 `clean --old-snapshots --keep N`。
-- [ ] 实现 overlay compact：合并过期 tombstone/replacement，重建 logical view 相关索引。
-- [ ] 禁止普通 clean 删除 baseline。
+- [x] 实现 `clean --cache`。
+- [x] 实现 `clean --tmp`。
+- [x] 实现 `clean --old-jobs --keep N`。
+- [x] 实现 `clean --old-snapshots --keep N`。
+- [x] 实现 overlay compact：合并过期 tombstone/replacement，重建 logical view 相关索引。
+- [x] 禁止普通 clean 删除 baseline。
 
 验收标准：
 
-- 清理不会破坏 baseline。
-- compact 前后查询结果一致。
+- [x] 清理不会破坏 baseline。
+- [x] compact 前后查询结果一致。
 
 ---
 

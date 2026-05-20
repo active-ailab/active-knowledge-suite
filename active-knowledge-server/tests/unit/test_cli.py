@@ -9,7 +9,7 @@ from active_knowledge_server.cli import main
 
 
 def test_subcommands_have_help() -> None:
-    for command in ("init", "serve", "index", "status", "validate"):
+    for command in ("init", "serve", "index", "status", "validate", "clean"):
         result = subprocess.run(
             [sys.executable, "-m", "active_knowledge_server.cli", command, "--help"],
             check=True,
