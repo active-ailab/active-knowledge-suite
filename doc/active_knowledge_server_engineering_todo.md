@@ -838,17 +838,17 @@ TODO：
 
 ### X3-08 Secret scan
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`SEC`、`IMPL`、`TEST`
 - 依赖：`C1-07`
 
 TODO：
 
-- [ ] 在索引前扫描密钥、私钥、token、密码、证书。
-- [ ] 命中后默认跳过 embedding。
-- [ ] evidence excerpt 脱敏。
-- [ ] index report 记录文件和原因，不记录敏感原文。
+- [x] 在索引前扫描密钥、私钥、token、密码、证书。
+- [x] 命中后默认跳过 embedding。
+- [x] evidence excerpt 脱敏。
+- [x] index report 记录文件和原因，不记录敏感原文。
 
 验收标准：
 
