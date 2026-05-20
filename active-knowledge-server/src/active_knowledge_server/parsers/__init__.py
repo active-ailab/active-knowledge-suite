@@ -1,6 +1,16 @@
 """Document, build, and code parsers."""
 
 from active_knowledge_server.parsers.api_docs import parse_api_doc
+from active_knowledge_server.parsers.ctags import (
+	C_FAMILY_PARSER_SCHEMA_VERSION,
+	CodeParseWarning,
+	ParsedCodeComment,
+	ParsedCodeFile,
+	ParsedCodeInclude,
+	ParsedCodeSymbol,
+	ParsedFileHeader,
+	parse_c_family_file,
+)
 from active_knowledge_server.parsers.kconfig import (
 	KCONFIG_PARSER_SCHEMA_VERSION,
 	KconfigParseWarning,
@@ -41,16 +51,23 @@ from active_knowledge_server.parsers.markdown import (
 from active_knowledge_server.parsers.widget_docs import parse_widget_doc
 
 __all__ = [
+	"C_FAMILY_PARSER_SCHEMA_VERSION",
 	"DOC_PARSER_SCHEMA_VERSION",
 	"KCONFIG_PARSER_SCHEMA_VERSION",
 	"MAKEFILE_PARSER_SCHEMA_VERSION",
+	"CodeParseWarning",
 	"DocumentParseWarning",
 	"KconfigParseWarning",
 	"MakefileParseWarning",
 	"ParsedBuildModule",
+	"ParsedCodeComment",
+	"ParsedCodeFile",
+	"ParsedCodeInclude",
+	"ParsedCodeSymbol",
 	"ParsedConfigFile",
 	"ParsedChunk",
 	"ParsedDocument",
+	"ParsedFileHeader",
 	"ParsedFrontMatter",
 	"ParsedHeading",
 	"ParsedKconfigFile",
@@ -65,6 +82,7 @@ __all__ = [
 	"compute_profile_macro_summary_hash",
 	"merge_macro_assignments",
 	"parse_api_doc",
+	"parse_c_family_file",
 	"parse_defconfig",
 	"parse_dotconfig",
 	"parse_html_document",

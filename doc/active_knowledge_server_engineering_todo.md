@@ -819,18 +819,18 @@ TODO：
 
 ### X3-07 C/C++/H 基础 parser
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-01`
 
 TODO：
 
-- [ ] V1 接入 ctags 或 Tree-sitter。
-- [ ] 抽取函数、宏、类型、include、注释、文件头。
-- [ ] 标记 extractor 和 confidence。
-- [ ] 不承诺高置信跨 translation unit ref。
-- [ ] 缺 compile DB 时产生 `compile_db.missing` warning。
+- [x] V1 接入 ctags 或 Tree-sitter。
+- [x] 抽取函数、宏、类型、include、注释、文件头。
+- [x] 标记 extractor 和 confidence。
+- [x] 不承诺高置信跨 translation unit ref。
+- [x] 缺 compile DB 时产生 `compile_db.missing` warning。
 
 验收标准：
 
