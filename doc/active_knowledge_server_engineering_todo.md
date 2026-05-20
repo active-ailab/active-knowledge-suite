@@ -782,18 +782,18 @@ TODO：
 
 ### X3-05 Kconfig/Config.in/defconfig/.config parser
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-03`
 
 TODO：
 
-- [ ] 解析 defconfig 宏。
-- [ ] 解析 `.config` 宏。
-- [ ] 抽取 app、board、feature 线索。
-- [ ] 解析 Config.in/Kconfig symbol、depends、select。
-- [ ] 生成 profile macro summary。
+- [x] 解析 defconfig 宏。
+- [x] 解析 `.config` 宏。
+- [x] 抽取 app、board、feature 线索。
+- [x] 解析 Config.in/Kconfig symbol、depends、select。
+- [x] 生成 profile macro summary。
 
 验收标准：
 
