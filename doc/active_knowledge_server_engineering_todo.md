@@ -860,17 +860,17 @@ TODO：
 
 ### P4-01 Snapshot collector
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`X3-01`、`S2-02`
 
 TODO：
 
-- [ ] 生成 snapshot 记录。
-- [ ] 记录 baseline branch、git head、repo manifest hash、created_at、status。
-- [ ] 支持 current snapshot。
-- [ ] snapshot ID 可复现。
+- [x] 生成 snapshot 记录。
+- [x] 记录 baseline branch、git head、repo manifest hash、created_at、status。
+- [x] 支持 current snapshot。
+- [x] snapshot ID 可复现。
 
 验收标准：
 
