@@ -37,6 +37,7 @@ from active_knowledge_server.indexing.relation_extractor import (
     profile_config_hash,
 )
 from active_knowledge_server.indexing.snapshot import CURRENT_SNAPSHOT_ID
+from active_knowledge_server.indexing.workspace_map import WorkspaceMapBuilder
 from active_knowledge_server.storage import (
     ALL_SCOPE,
     ChunkRecord,
@@ -246,6 +247,7 @@ class IncrementalIndexPipeline:
         doc_indexer: DocumentIndexer | None = None,
         profile_collector: ProfileCollector | None = None,
         profile_relation_extractor: ProfileConditionedRelationExtractor | None = None,
+        workspace_map_builder: WorkspaceMapBuilder | None = None,
     ) -> None:
         self._config = config
         self._cwd = (cwd or Path.cwd()).expanduser()
@@ -274,6 +276,10 @@ class IncrementalIndexPipeline:
         )
         self._profile_relation_extractor = (
             profile_relation_extractor or ProfileConditionedRelationExtractor()
+        )
+        self._workspace_map_builder = workspace_map_builder or WorkspaceMapBuilder.from_config(
+            config,
+            cwd=self._cwd,
         )
 
     @property
@@ -640,6 +646,28 @@ class IncrementalIndexPipeline:
                     )
                 )
 
+        if _workspace_map_refresh_required(plan):
+            try:
+                self._workspace_map_builder.collect_and_write(
+                    snapshot_id=snapshot_id,
+                    workspace_inventory=plan.workspace_inventory,
+                    reader=self._metadata_adapter.reader(),
+                    profiles=plan.collected_profiles.profile_records,
+                    profile_resolution=plan.collected_profiles.resolution.to_dict(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed = True
+                warnings.append(
+                    IncrementalIndexWarning(
+                        code="index.workspace_map_failed",
+                        message=(
+                            "Workspace map projection failed to refresh; previous "
+                            "workspace navigation artifact remains live."
+                        ),
+                        details={"error": str(exc)},
+                    )
+                )
+
         if not failed:
             self.save_state(plan.current_state)
 
@@ -968,6 +996,20 @@ def _diff_maps(
     )
     deleted = tuple(sorted(path for path in previous if path not in current))
     return changed, deleted
+
+
+def _workspace_map_refresh_required(plan: IncrementalIndexPlan) -> bool:
+    return bool(
+        plan.source in {"all", "code"}
+        and (
+            plan.reindex_all_code
+            or plan.changed_code_paths
+            or plan.deleted_code_paths
+            or plan.rebuild_profile_conditioned_relations
+            or plan.changed_profile_ids
+            or plan.removed_profile_ids
+        )
+    )
 
 
 def _filter_source_docs_manifest(

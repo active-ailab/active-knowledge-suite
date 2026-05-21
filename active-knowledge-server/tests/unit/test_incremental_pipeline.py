@@ -393,6 +393,13 @@ def test_incremental_pipeline_rebuilds_profile_relations_when_dotconfig_changes(
     states_by_profile = {state.profile_id: state for state in states}
     assert states_by_profile["mhs003_watch"].status == "disabled"
 
+    workspace_map_path = (
+        Path(config.storage.local_artifacts_root) / "workspace-maps" / "current.json"
+    )
+    payload = json.loads(workspace_map_path.read_text(encoding="utf-8"))
+    profile_items = {item["name"]: item for item in payload["views"]["profile"]["items"]}
+    assert profile_items["mhs003_watch"]["metadata"]["counts"]["disabled"] > 0
+
 
 def test_incremental_pipeline_rebuilds_doc_vectors_on_embedding_model_change(
     tmp_path: Path,

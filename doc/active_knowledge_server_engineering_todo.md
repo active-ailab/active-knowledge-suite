@@ -974,21 +974,22 @@ TODO：
 
 ### P4-07 Workspace map 与视角投影
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`P4-04`、`P4-05`
+- 输出：已新增 `indexing/workspace_map.py`，生成 workspace tree、`workspace/layer/domain/feature/profile` 五类投影，并在增量索引后写出 `local/artifacts/workspace-maps/current.json`。
 
 TODO：
 
-- [ ] 生成 workspace tree。
-- [ ] 生成 layer/domain/feature/profile 初版投影。
-- [ ] 使用 Active path mapping：packages/services、packages/apps、ui、uiframework、framework/engine 等。
-- [ ] 输出 artifacts/workspace-maps。
+- [x] 生成 workspace tree。
+- [x] 生成 layer/domain/feature/profile 初版投影。
+- [x] 使用 Active path mapping：packages/services、packages/apps、ui、uiframework、framework/engine 等。
+- [x] 输出 artifacts/workspace-maps。
 
 验收标准：
 
-- `workspace_view(view=workspace|layer|domain|feature|profile)` 有基础可用结果。
+- [x] 已生成可被 `workspace_view(view=workspace|layer|domain|feature|profile)` 直接消费的基础可用结果。
 
 ---
 

@@ -55,6 +55,15 @@ from active_knowledge_server.indexing.snapshot import (
     root_git_head,
     snapshot_aliases,
 )
+from active_knowledge_server.indexing.workspace_map import (
+    WORKSPACE_MAP_SCHEMA_VERSION,
+    WorkspaceMapArtifact,
+    WorkspaceMapBuilder,
+    WorkspaceMapWriteResult,
+    WorkspaceProjectionView,
+    WorkspaceTreeNode,
+    WorkspaceViewItem,
+)
 
 __all__ = [
     "CODE_INDEXER_SCHEMA_VERSION",
@@ -64,6 +73,7 @@ __all__ = [
     "INCREMENTAL_INDEX_STATE_SCHEMA_VERSION",
     "PROFILE_COLLECTOR_SCHEMA_VERSION",
     "SNAPSHOT_COLLECTOR_SCHEMA_VERSION",
+    "WORKSPACE_MAP_SCHEMA_VERSION",
     "CodeIndexer",
     "CodeIndexingWarning",
     "CollectedProfiles",
@@ -86,6 +96,12 @@ __all__ = [
     "ProfileResolution",
     "SnapshotCollector",
     "VectorWrite",
+    "WorkspaceMapArtifact",
+    "WorkspaceMapBuilder",
+    "WorkspaceMapWriteResult",
+    "WorkspaceProjectionView",
+    "WorkspaceTreeNode",
+    "WorkspaceViewItem",
     "compute_profile_manifest_hash",
     "compute_profile_record_id",
     "compute_repo_manifest_hash",
