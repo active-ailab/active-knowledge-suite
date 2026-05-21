@@ -1167,18 +1167,18 @@ TODO：
 
 ### Q5-10 Evidence Packager
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`Q5-07`
 
 TODO：
 
-- [ ] 加载 evidence excerpt。
-- [ ] 限制 excerpt 长度。
-- [ ] 返回相对路径、行号、hash、authority_level。
-- [ ] 支持 evidence bundle by entity/query。
-- [ ] 敏感内容脱敏。
+- [x] 加载 evidence excerpt。
+- [x] 限制 excerpt 长度。
+- [x] 返回相对路径、行号、hash、authority_level。
+- [x] 支持 evidence bundle by entity/query。
+- [x] 敏感内容脱敏。
 
 验收标准：
 

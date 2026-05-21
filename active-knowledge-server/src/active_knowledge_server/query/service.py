@@ -9,6 +9,7 @@ from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.models.evidence import EvidenceRef
 from active_knowledge_server.models.query import QueryIntent, QueryRequest
 from active_knowledge_server.models.responses import QueryResult, SuggestedFilter, Warning
+from active_knowledge_server.query.evidence_packager import EvidencePackager
 from active_knowledge_server.models.routing import RouterDecision
 from active_knowledge_server.query.profile_query import (
 	build_profile_matrix_result,
@@ -74,6 +75,7 @@ class QueryService:
 		vector_retriever: VectorRetriever | None = None,
 		graph_retriever: GraphRetriever | None = None,
 		reranker: CandidateReranker | None = None,
+		evidence_packager: EvidencePackager | None = None,
 	) -> None:
 		self._config = config
 		self._router = router
@@ -83,6 +85,10 @@ class QueryService:
 		self._vector_retriever = vector_retriever
 		self._graph_retriever = graph_retriever
 		self._reranker = reranker or build_reranker(config.query.hybrid.rerank)
+		self._evidence_packager = evidence_packager or EvidencePackager.from_config(
+			config,
+			metadata_adapter=metadata_adapter,
+		)
 
 	@classmethod
 	def from_config(
@@ -97,6 +103,7 @@ class QueryService:
 		vector_retriever: VectorRetriever | None = None,
 		graph_retriever: GraphRetriever | None = None,
 		reranker: CandidateReranker | None = None,
+		evidence_packager: EvidencePackager | None = None,
 	) -> QueryService:
 		resolved_router = router or QueryRouter.from_config(config)
 		resolved_symbol = symbol_retriever or SymbolRetriever.from_storage(metadata_adapter)
@@ -122,6 +129,26 @@ class QueryService:
 			vector_retriever=resolved_vector,
 			graph_retriever=resolved_graph,
 			reranker=reranker,
+			evidence_packager=evidence_packager,
+		)
+
+	def bundle_evidence_for_query(self, request: QueryRequest) -> tuple[EvidenceRef, ...]:
+		"""Return the packaged evidence refs for one query request."""
+
+		return self.search(request).evidence_refs
+
+	def bundle_evidence_for_entity(
+		self,
+		entity_id: str,
+		*,
+		snapshot_id: str = "current",
+		profile_id: str = ALL_SCOPE,
+	) -> tuple[EvidenceRef, ...]:
+		"""Return packaged evidence refs for one entity ID."""
+
+		return self._evidence_packager.bundle_for_entity(
+			scope=QueryScope(snapshot_id=snapshot_id, profile_id=profile_id),
+			entity_id=entity_id,
 		)
 
 	def search(self, request: QueryRequest) -> QueryResult:
@@ -252,7 +279,7 @@ class QueryService:
 			requested_profile_id=scope.profile_id,
 		)
 		limited = reranked[: self._config.query.default_top_k]
-		evidence_refs, evidence_trace = self._build_evidence_refs(limited)
+		evidence_refs, evidence_trace = self._build_evidence_refs(limited, scope=scope)
 		index_status = _extract_partial_ready_index_status(warnings)
 		base_confidence = round(
 			min(1.0, (decision.confidence * 0.85) + 0.15),
@@ -503,51 +530,10 @@ class QueryService:
 	def _build_evidence_refs(
 		self,
 		candidates: Sequence[FusionCandidate],
+		*,
+		scope: QueryScope,
 	) -> tuple[tuple[EvidenceRef, ...], list[dict[str, object]]]:
-		evidence_by_key: dict[tuple[str, str, int | None, int | None], EvidenceRef] = {}
-		evidence_trace_by_key: dict[tuple[str, str, int | None, int | None], dict[str, object]] = {}
-		for candidate in candidates:
-			path = candidate.relative_path or _metadata_text(candidate.metadata, "path") or candidate.title or candidate.candidate_id
-			start_line = _metadata_int(candidate.metadata, "start_line")
-			end_line = _metadata_int(candidate.metadata, "end_line")
-			evidence_type = _evidence_type(candidate)
-			dedupe_key = (evidence_type, path, start_line, end_line)
-			evidence_ref = evidence_by_key.get(dedupe_key)
-			if evidence_ref is None:
-				evidence_ref = EvidenceRef(
-					evidence_id=candidate.evidence_keys[0] if candidate.evidence_keys else f"synthetic:{candidate.candidate_id}",
-					type=evidence_type,
-					path=path,
-					start_line=start_line,
-					end_line=end_line,
-					authority_level=candidate.authority_level,
-					excerpt=candidate.snippet,
-					content_hash=_metadata_text(candidate.metadata, "content_hash"),
-					source_index=(
-						candidate.source_index
-						if candidate.source_index in {"baseline", "overlay", "merged"}
-						else None
-					),
-				)
-				evidence_by_key[dedupe_key] = evidence_ref
-				evidence_trace_by_key[dedupe_key] = {
-					"evidence_id": evidence_ref.evidence_id,
-					"type": evidence_ref.type,
-					"path": evidence_ref.path,
-					"score": round(candidate.rerank_score, 6),
-					"retrieval_sources": sorted({signal.retriever for signal in candidate.retrieval_signals}),
-					"candidate_ids": [candidate.candidate_id],
-				}
-				continue
-			trace = evidence_trace_by_key[dedupe_key]
-			trace["score"] = max(float(trace["score"]), round(candidate.rerank_score, 6))
-			trace["retrieval_sources"] = sorted(
-				set(trace["retrieval_sources"]) | {signal.retriever for signal in candidate.retrieval_signals}
-			)
-			trace["candidate_ids"] = sorted(set(trace["candidate_ids"]) | {candidate.candidate_id})
-		limited_refs = tuple(evidence_by_key.values())[: self._config.query.max_evidence_items]
-		limited_trace = list(evidence_trace_by_key.values())[: self._config.query.max_evidence_items]
-		return limited_refs, limited_trace
+		return self._evidence_packager.bundle_for_query(scope=scope, candidates=candidates)
 
 
 def _resolved_profile_id(decision: RouterDecision, request: QueryRequest) -> str:
