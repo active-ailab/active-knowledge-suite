@@ -1211,21 +1211,21 @@ TODO：
 
 ### M6-02 V1 查询 tools
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`Q5-02` 至 `Q5-10`
 
 TODO：
 
-- [ ] `kb_search`
-- [ ] `docs_search`
-- [ ] `code_resolve`
-- [ ] `code_context`
-- [ ] `code_trace` 初版可先返回 unsupported 或基础 graph trace，但 schema 稳定。
-- [ ] `config_impact`
-- [ ] `workspace_view`
-- [ ] `evidence_bundle`
+- [x] `kb_search`
+- [x] `docs_search`
+- [x] `code_resolve`
+- [x] `code_context`
+- [x] `code_trace` 初版可先返回 unsupported 或基础 graph trace，但 schema 稳定。
+- [x] `config_impact`
+- [x] `workspace_view`
+- [x] `evidence_bundle`
 
 验收标准：
 
@@ -1682,9 +1682,9 @@ V1 可以发布的最低功能边界：
 - [ ] LanceDB 可选启用，禁用时 FTS 路径可用。
 - [ ] workspace、module、file、symbol 基础结构索引可用。
 - [ ] `profile auto` 有确定性行为，无法判断时 warning。
-- [ ] `kb_search`、`docs_search`、`code_resolve`、`code_context`、`workspace_view`、`evidence_bundle` 可用。
-- [ ] `config_impact` 有 profile/macro 初版能力。
-- [ ] 所有查询返回 evidence、warnings、schema_version。
+- [x] `kb_search`、`docs_search`、`code_resolve`、`code_context`、`workspace_view`、`evidence_bundle` 可用。
+- [x] `config_impact` 有 profile/macro 初版能力。
+- [x] 所有查询返回 evidence、warnings、schema_version。
 - [x] 零结果、多结果、歧义、低置信、partial_ready、blocked 契约测试通过。
 - [ ] fail-safe remote security 测试通过。
 - [ ] V1 eval quality/performance/stability gates 达标。

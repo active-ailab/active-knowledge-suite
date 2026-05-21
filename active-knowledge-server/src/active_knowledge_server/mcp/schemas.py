@@ -16,6 +16,17 @@ from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.security.audit import AuditLogger
 
 BOOTSTRAP_TOOL_NAMES: Final[tuple[str, ...]] = ("ping", "server_info")
+QUERY_TOOL_NAMES: Final[tuple[str, ...]] = (
+	"kb_search",
+	"docs_search",
+	"code_resolve",
+	"code_context",
+	"code_trace",
+	"config_impact",
+	"workspace_view",
+	"evidence_bundle",
+)
+ALL_TOOL_NAMES: Final[tuple[str, ...]] = BOOTSTRAP_TOOL_NAMES + QUERY_TOOL_NAMES
 BOOTSTRAP_RESOURCE_URIS: Final[tuple[str, ...]] = (
 	"active://config/current",
 	"active://server/runtime",
@@ -88,6 +99,7 @@ class MCPServerInfoResult(BaseModel):
 	workdir: str
 	source_docs_root: str
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
+	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
 
 
@@ -113,6 +125,7 @@ class MCPServerRuntimeResource(BaseModel):
 	expose_ops_tools: bool
 	audit_enabled: bool
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
+	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
 	workspace_root: str
 	workdir: str

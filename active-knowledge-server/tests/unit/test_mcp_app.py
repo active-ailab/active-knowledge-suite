@@ -5,10 +5,11 @@ from pathlib import Path
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.mcp import create_fastmcp_app
 from active_knowledge_server.mcp.schemas import (
+	ALL_TOOL_NAMES,
     BOOTSTRAP_RESOURCE_URIS,
-    BOOTSTRAP_TOOL_NAMES,
     MCPPingResult,
     MCPServerInfoResult,
+    QUERY_TOOL_NAMES,
 )
 
 
@@ -53,10 +54,11 @@ def test_create_fastmcp_app_registers_bootstrap_tools_and_resources(tmp_path: Pa
     runtime = create_fastmcp_app(resolved, cwd=tmp_path)
     handlers = {tool.name: tool.handler for tool in runtime.inventory.tools}
 
-    assert runtime.inventory.tool_names == BOOTSTRAP_TOOL_NAMES
+    assert runtime.inventory.tool_names == ALL_TOOL_NAMES
     assert runtime.inventory.resource_uris == BOOTSTRAP_RESOURCE_URIS
     assert isinstance(handlers["ping"](), MCPPingResult)
     assert isinstance(handlers["server_info"](), MCPServerInfoResult)
+    assert QUERY_TOOL_NAMES == runtime.inventory.tool_names[2:]
 
 
 def test_run_uses_stdio_transport_by_default(tmp_path: Path, monkeypatch) -> None:

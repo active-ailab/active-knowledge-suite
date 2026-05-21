@@ -12,7 +12,7 @@ from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import layout_from_config
 from active_knowledge_server.mcp.resources import register_bootstrap_resources
 from active_knowledge_server.mcp.schemas import MCPAppContext, MCPComponentInventory, normalize_mcp_path
-from active_knowledge_server.mcp.tools import register_bootstrap_tools
+from active_knowledge_server.mcp.tools import LazyQueryToolRuntime, register_bootstrap_tools, register_query_tools
 from active_knowledge_server.observability.logging import configure_logging
 from active_knowledge_server.security.audit import AuditLogger
 
@@ -36,6 +36,7 @@ class ActiveKnowledgeFastMCPApp:
 	mcp: Any
 	context: MCPAppContext
 	inventory: MCPComponentInventory
+	query_runtime: LazyQueryToolRuntime | None = None
 
 	def describe(self) -> dict[str, object]:
 		"""Return a machine-readable summary of the current runtime wiring."""
@@ -88,7 +89,7 @@ def create_fastmcp_app(
 	*,
 	cwd: Path | None = None,
 ) -> ActiveKnowledgeFastMCPApp:
-	"""Create the configured FastMCP application and register bootstrap surfaces."""
+	"""Create the configured FastMCP application and register bootstrap/query surfaces."""
 
 	if FastMCP is None:
 		raise RuntimeError(
@@ -128,12 +129,18 @@ def create_fastmcp_app(
 		mask_error_details=True,
 	)
 	_register_health_route(mcp, context)
-	tools = register_bootstrap_tools(mcp, context)
+	query_runtime = LazyQueryToolRuntime(context)
+	tools = register_bootstrap_tools(mcp, context) + register_query_tools(
+		mcp,
+		context,
+		runtime=query_runtime,
+	)
 	resources = register_bootstrap_resources(mcp, context)
 	return ActiveKnowledgeFastMCPApp(
 		mcp=mcp,
 		context=context,
 		inventory=MCPComponentInventory(tools=tools, resources=resources),
+		query_runtime=query_runtime,
 	)
 
 
@@ -158,7 +165,7 @@ def _server_instructions() -> str:
 	"""Return concise server instructions surfaced to MCP clients."""
 
 	return (
-		"Local-first Active Knowledge bootstrap server. "
-		"Use ping for readiness and server_info for runtime metadata before invoking "
-		"query tools added in later milestones."
+		"Local-first Active Knowledge server. "
+		"Use ping or server_info for readiness and runtime metadata, then invoke the V1 "
+		"query tools for hybrid retrieval, workspace projections, and evidence packaging."
 	)
