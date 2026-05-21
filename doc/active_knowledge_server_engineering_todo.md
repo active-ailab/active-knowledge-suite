@@ -1015,22 +1015,23 @@ TODO：
 
 ### Q5-02 Query Router
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`D0-01`、`D0-02`、`Q5-01`
+- 输出：已新增 `models/routing.py` 中的稳定路由决策模型，并在 `query/router.py` 实现规则型 Query Router，覆盖 query normalization、intent signals、view/granularity 选择、retriever 权重、profile auto 解析、tool plan 与 route trace；同时补充 `tests/unit/test_query_router.py` 与 `tests/fixtures/query_intents.yaml` 的 fixture 驱动正反例回归。
 
 TODO：
 
-- [ ] 实现 query normalization。
-- [ ] 实现 intent classifier。
-- [ ] 选择 view、granularity、retriever 权重。
-- [ ] 执行 profile resolution。
-- [ ] 输出 matched signals 和 route trace。
+- [x] 实现 query normalization。
+- [x] 实现 intent classifier。
+- [x] 选择 view、granularity、retriever 权重。
+- [x] 执行 profile resolution。
+- [x] 输出 matched signals 和 route trace。
 
 验收标准：
 
-- intent 分类正反例测试通过。
+- [x] intent 分类正反例测试通过。
 
 ### Q5-03 SymbolRetriever
 

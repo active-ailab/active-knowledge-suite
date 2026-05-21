@@ -9,6 +9,13 @@ from active_knowledge_server.models.query import (
 	QueryRequest,
 	QueryView,
 )
+from active_knowledge_server.models.routing import (
+	MatchedSignal,
+	RouteTraceEntry,
+	RouterDecision,
+	ToolChainStep,
+	ToolPlan,
+)
 from active_knowledge_server.models.responses import (
 	QUERY_RESULT_SCHEMA_VERSION,
 	Candidate,
@@ -22,6 +29,7 @@ __all__ = [
 	"CallerTool",
 	"Candidate",
 	"EvidenceRef",
+	"MatchedSignal",
 	"QUERY_RESULT_SCHEMA_VERSION",
 	"QueryDomain",
 	"QueryGranularity",
@@ -29,7 +37,11 @@ __all__ = [
 	"QueryRequest",
 	"QueryResult",
 	"QueryView",
+	"RouteTraceEntry",
+	"RouterDecision",
 	"SuggestedFilter",
+	"ToolChainStep",
+	"ToolPlan",
 	"Warning",
 	"confidence_to_band",
 ]

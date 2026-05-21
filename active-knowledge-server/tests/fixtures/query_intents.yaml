@@ -1,0 +1,499 @@
+- id: code_exact_macro_definition
+  input:
+    query: "CONFIG_HEALTH_SLEEP 在哪里定义？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: kb_search
+    client_context: {}
+  expect:
+    intent: code_exact
+    min_confidence: 0.70
+    selected_view: code
+    selected_granularity: symbol
+    primary_tool: code_resolve
+    route_mode: direct
+    required_signal_types: [macro_name, lookup_phrase]
+    forbidden_intents: [profile_diff]
+
+- id: code_exact_file_module_lookup
+  input:
+    query: "drivers/hr/ppg_sensor.c 这个文件属于哪个模块？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: code_exact
+    min_confidence: 0.70
+    selected_view: code
+    selected_granularity: file
+    primary_tool: code_resolve
+    route_mode: direct
+    required_signal_types: [path_like, lookup_phrase]
+    forbidden_intents: [workspace_nav]
+
+- id: profile_diff_macro_impact
+  input:
+    query: "CONFIG_GNSS 打开后影响哪些模块？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: kb_search
+    client_context: {}
+  expect:
+    intent: profile_diff
+    min_confidence: 0.60
+    selected_view: profile
+    selected_granularity: profile
+    primary_tool: config_impact
+    route_mode: chain
+    required_signal_types: [macro_name, profile_keyword]
+    forbidden_intents: [code_exact]
+
+- id: code_concept_module_responsibility
+  input:
+    query: "packages/services/notification 主要负责什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: code_concept
+    min_confidence: 0.60
+    selected_view: code
+    selected_granularity: module
+    primary_tool: code_context
+    route_mode: direct
+    required_signal_types: [path_like, concept_phrase]
+    forbidden_intents: [workspace_nav]
+
+- id: code_concept_mechanism_question
+  input:
+    query: "Active 的运动数据缓存机制是怎么实现的？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: code_concept
+    min_confidence: 0.60
+    selected_view: domain
+    selected_granularity: module
+    primary_tool: kb_search
+    route_mode: explore
+    required_signal_types: [concept_phrase]
+    forbidden_intents: [code_exact]
+
+- id: call_trace_function_chain
+  input:
+    query: "app_manager_start() 到 screen_create() 的调用链怎么走？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: kb_search
+    client_context: {}
+  expect:
+    intent: call_trace
+    min_confidence: 0.85
+    selected_view: code
+    selected_granularity: flow
+    primary_tool: code_resolve
+    route_mode: chain
+    required_signal_types: [symbol_like, trace_phrase]
+    forbidden_intents: [code_exact]
+
+- id: call_trace_reverse_lookup
+  input:
+    query: "谁调用了 health_service_publish_event？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: call_trace
+    min_confidence: 0.75
+    selected_view: code
+    selected_granularity: flow
+    primary_tool: code_resolve
+    route_mode: chain
+    required_signal_types: [symbol_like, trace_phrase]
+    forbidden_intents: [code_exact]
+
+- id: runtime_flow_isr_to_task
+  input:
+    query: "PPG 中断之后事件如何进入 health task？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: runtime_flow
+    min_confidence: 0.80
+    selected_view: runtime
+    selected_granularity: flow
+    primary_tool: workspace_view
+    route_mode: chain
+    required_signal_types: [runtime_keyword, runtime_phrase]
+    forbidden_intents: [call_trace]
+
+- id: runtime_flow_startup_order
+  input:
+    query: "启动时 timer service 的初始化顺序是什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: runtime_flow
+    min_confidence: 0.75
+    selected_view: runtime
+    selected_granularity: flow
+    primary_tool: workspace_view
+    route_mode: chain
+    required_signal_types: [runtime_keyword, runtime_phrase]
+    forbidden_intents: [code_exact]
+
+- id: api_lookup_usage
+  input:
+    query: "sensor.subscribe API 怎么用？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: api_lookup
+    min_confidence: 0.80
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [api_keyword, symbol_like]
+    forbidden_intents: [code_exact]
+
+- id: api_lookup_parameter_question
+  input:
+    query: "Active 蓝牙 API 的参数和返回值是什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: api_lookup
+    min_confidence: 0.80
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [api_keyword]
+    forbidden_intents: [project_context]
+
+- id: code_exact_from_api_negative
+  input:
+    query: "sensor_service.c 里 subscribe 在哪定义？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: code_exact
+    min_confidence: 0.60
+    selected_view: code
+    selected_granularity: symbol
+    primary_tool: code_resolve
+    route_mode: direct
+    required_signal_types: [symbol_like, lookup_phrase]
+    forbidden_intents: [api_lookup]
+
+- id: widget_lookup_properties
+  input:
+    query: "Active Text widget 支持哪些属性？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: widget_lookup
+    min_confidence: 0.80
+    selected_view: feature
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [widget_keyword]
+    forbidden_intents: [api_lookup]
+
+- id: widget_lookup_binding_example
+  input:
+    query: "progress ring 控件怎么绑定数据？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: widget_lookup
+    min_confidence: 0.70
+    selected_view: feature
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [widget_keyword]
+    forbidden_intents: [runtime_flow]
+
+- id: runtime_flow_from_widget_negative
+  input:
+    query: "按钮点击后事件如何进入 app task？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: runtime_flow
+    min_confidence: 0.70
+    selected_view: runtime
+    selected_granularity: flow
+    primary_tool: workspace_view
+    route_mode: chain
+    required_signal_types: [runtime_keyword, runtime_phrase]
+    forbidden_intents: [widget_lookup]
+
+- id: workspace_nav_newcomer_dirs
+  input:
+    query: "新同事要看蓝牙功能应该从哪些目录开始？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: workspace_nav
+    min_confidence: 0.80
+    selected_view: workspace
+    selected_granularity: directory
+    primary_tool: workspace_view
+    route_mode: direct
+    required_signal_types: [navigation_phrase]
+    forbidden_intents: [code_concept]
+
+- id: workspace_nav_boundary
+  input:
+    query: "ui 和 uiframework 的职责边界是什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: workspace_nav
+    min_confidence: 0.70
+    selected_view: layer
+    selected_granularity: module
+    primary_tool: workspace_view
+    route_mode: direct
+    required_signal_types: [navigation_phrase]
+    forbidden_intents: [code_concept]
+
+- id: product_context_feature_scope
+  input:
+    query: "睡眠功能 V1 的产品范围是什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: product_context
+    min_confidence: 0.50
+    selected_view: feature
+    selected_granularity: feature
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [product_keyword]
+    forbidden_intents: [project_context]
+
+- id: product_context_with_evidence_modifier
+  input:
+    query: "睡眠功能范围是什么？请带证据。"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: product_context
+    min_confidence: 0.50
+    selected_view: feature
+    selected_granularity: feature
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [product_keyword]
+    forbidden_intents: [evidence_lookup]
+
+- id: project_context_delivery_risk
+  input:
+    query: "mhs003 本周有哪些交付风险？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: project_context
+    min_confidence: 0.80
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [project_keyword]
+    forbidden_intents: [product_context]
+
+- id: project_context_release_plan
+  input:
+    query: "下一版 Active release 计划包含哪些事项？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: project_context
+    min_confidence: 0.55
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: docs_search
+    route_mode: direct
+    required_signal_types: [project_keyword]
+    forbidden_intents: [product_context]
+
+- id: evidence_lookup_bundle
+  input:
+    query: "给我 app_manager_start 的证据包。"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: evidence_lookup
+    min_confidence: 0.50
+    selected_view: evidence
+    selected_granularity: symbol
+    primary_tool: evidence_bundle
+    route_mode: direct
+    required_signal_types: [evidence_keyword, symbol_like]
+    forbidden_intents: [call_trace]
+
+- id: evidence_lookup_source_reference
+  input:
+    query: "上面结论的出处是什么？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: evidence_lookup
+    min_confidence: 0.50
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: evidence_bundle
+    route_mode: direct
+    required_signal_types: [evidence_keyword]
+    forbidden_intents: [product_context]
+
+- id: unknown_short_pronoun
+  input:
+    query: "这个为什么不行？"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: unknown
+    min_confidence: 0.00
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: kb_search
+    route_mode: explore
+    required_signal_types: [vague_query]
+    forbidden_intents: []
+
+- id: unknown_pointer_query
+  input:
+    query: "帮我看看这里。"
+    domain: auto
+    view: auto
+    granularity: auto
+    profile_id: auto
+    snapshot_id: current
+    caller_tool: client
+    client_context: {}
+  expect:
+    intent: unknown
+    min_confidence: 0.00
+    selected_view: evidence
+    selected_granularity: doc_section
+    primary_tool: kb_search
+    route_mode: explore
+    required_signal_types: [vague_query]
+    forbidden_intents: []
