@@ -1,0 +1,444 @@
+{
+  "$defs": {
+    "Candidate": {
+      "additionalProperties": false,
+      "description": "Stable disambiguation candidate contract.",
+      "properties": {
+        "disambiguation_key": {
+          "minLength": 1,
+          "title": "Disambiguation Key",
+          "type": "string"
+        },
+        "entity_type": {
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "match_reason": {
+          "minLength": 1,
+          "title": "Match Reason",
+          "type": "string"
+        },
+        "module": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Module"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "profile_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile Id"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "disambiguation_key",
+        "entity_type",
+        "match_reason",
+        "score"
+      ],
+      "title": "Candidate",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "additionalProperties": false,
+      "description": "Stable short evidence reference returned by query tools.",
+      "properties": {
+        "authority_level": {
+          "minLength": 1,
+          "title": "Authority Level",
+          "type": "string"
+        },
+        "content_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Hash"
+        },
+        "end_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End Line"
+        },
+        "evidence_id": {
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "excerpt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excerpt"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "source_index": {
+          "anyOf": [
+            {
+              "enum": [
+                "baseline",
+                "overlay",
+                "merged"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Index"
+        },
+        "start_line": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start Line"
+        },
+        "type": {
+          "enum": [
+            "code",
+            "doc",
+            "config",
+            "graph",
+            "workspace",
+            "profile"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "type",
+        "path",
+        "authority_level"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "SuggestedFilter": {
+      "additionalProperties": false,
+      "description": "Recommended filter refinement for follow-up queries.",
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "value"
+      ],
+      "title": "SuggestedFilter",
+      "type": "object"
+    },
+    "Warning": {
+      "additionalProperties": false,
+      "description": "Shared warning contract for query results.",
+      "properties": {
+        "actionable": {
+          "title": "Actionable",
+          "type": "boolean"
+        },
+        "affected_sources": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Affected Sources",
+          "type": "array"
+        },
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        },
+        "evidence_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "level": {
+          "enum": [
+            "info",
+            "caution",
+            "degraded",
+            "blocked"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "suggested_action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suggested Action"
+        }
+      },
+      "required": [
+        "level",
+        "code",
+        "message",
+        "actionable"
+      ],
+      "title": "Warning",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Stable outer contract shared by all V1 query tools.",
+  "properties": {
+    "candidates": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Candidate"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "confidence_band": {
+      "anyOf": [
+        {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence Band"
+    },
+    "diagnostics": {
+      "additionalProperties": true,
+      "title": "Diagnostics",
+      "type": "object"
+    },
+    "entities": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Entities",
+      "type": "array"
+    },
+    "evidence_refs": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EvidenceRef"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "items": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "next_queries": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Next Queries",
+      "type": "array"
+    },
+    "profile_id": {
+      "minLength": 1,
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "query_intent": {
+      "enum": [
+        "code_exact",
+        "code_concept",
+        "call_trace",
+        "runtime_flow",
+        "profile_diff",
+        "api_lookup",
+        "widget_lookup",
+        "workspace_nav",
+        "product_context",
+        "project_context",
+        "evidence_lookup",
+        "unknown"
+      ],
+      "title": "Query Intent",
+      "type": "string"
+    },
+    "relations": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Relations",
+      "type": "array"
+    },
+    "result_status": {
+      "enum": [
+        "ok",
+        "zero_result",
+        "multi_result",
+        "ambiguous",
+        "low_confidence",
+        "partial_ready",
+        "blocked",
+        "error"
+      ],
+      "title": "Result Status",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "query_result.v1",
+      "default": "query_result.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "minLength": 1,
+      "title": "Snapshot Id",
+      "type": "string"
+    },
+    "suggested_filters": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SuggestedFilter"
+      },
+      "title": "Suggested Filters",
+      "type": "array"
+    },
+    "summary": {
+      "minLength": 1,
+      "title": "Summary",
+      "type": "string"
+    },
+    "tool_name": {
+      "minLength": 1,
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Warning"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "tool_name",
+    "result_status",
+    "confidence",
+    "query_intent",
+    "snapshot_id",
+    "profile_id",
+    "summary"
+  ],
+  "title": "QueryResult",
+  "type": "object"
+}

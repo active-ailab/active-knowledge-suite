@@ -1,0 +1,71 @@
+{
+  "additionalProperties": false,
+  "description": "Stable disambiguation candidate contract.",
+  "properties": {
+    "disambiguation_key": {
+      "minLength": 1,
+      "title": "Disambiguation Key",
+      "type": "string"
+    },
+    "entity_type": {
+      "minLength": 1,
+      "title": "Entity Type",
+      "type": "string"
+    },
+    "match_reason": {
+      "minLength": 1,
+      "title": "Match Reason",
+      "type": "string"
+    },
+    "module": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Module"
+    },
+    "path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Path"
+    },
+    "profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Id"
+    },
+    "score": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Score",
+      "type": "number"
+    }
+  },
+  "required": [
+    "disambiguation_key",
+    "entity_type",
+    "match_reason",
+    "score"
+  ],
+  "title": "Candidate",
+  "type": "object"
+}

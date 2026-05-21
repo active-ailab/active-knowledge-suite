@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
+from active_knowledge_server.models import QueryResult, Warning as QueryWarning
 
 
 @dataclass(frozen=True)
@@ -20,19 +21,24 @@ class SecurityBlockedWarning:
     suggested_action: str
     details: Mapping[str, Any] | None = None
 
+    def to_warning(self) -> QueryWarning:
+        """Return the shared warning model used by QueryResult."""
+
+        return QueryWarning(
+            level="blocked",
+            code=self.code,
+            message=self.message,
+            details=dict(self.details or {}),
+            actionable=True,
+            suggested_action=self.suggested_action,
+            affected_sources=(),
+            evidence_refs=(),
+        )
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable warning."""
 
-        return {
-            "level": "blocked",
-            "code": self.code,
-            "message": self.message,
-            "details": dict(self.details or {}),
-            "actionable": True,
-            "suggested_action": self.suggested_action,
-            "affected_sources": [],
-            "evidence_refs": [],
-        }
+        return self.to_warning().to_dict()
 
 
 @dataclass(frozen=True)
@@ -57,20 +63,18 @@ class SecurityValidationResult:
         """Return the shared structured blocked response shape."""
 
         codes = [warning.code for warning in self.warnings]
-        return {
-            "result_status": "blocked",
-            "status": "blocked",
-            "summary": "Startup was blocked by fail-safe security configuration.",
-            "items": [],
-            "candidates": [],
-            "evidence_refs": [],
-            "warnings": [warning.to_dict() for warning in self.warnings],
-            "next_queries": ["Fix the blocked security configuration and restart active-kb serve."],
-            "diagnostics": {
+        return QueryResult.blocked(
+            tool_name="serve",
+            summary="Startup was blocked by fail-safe security configuration.",
+            warnings=tuple(warning.to_warning() for warning in self.warnings),
+            next_queries=(
+                "Fix the blocked security configuration and restart active-kb serve.",
+            ),
+            diagnostics={
                 "blocked_reason": "security_config",
                 "warning_codes": codes,
             },
-        }
+        ).to_dict()
 
 
 class SecurityConfigError(ValueError):

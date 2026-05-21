@@ -1,0 +1,71 @@
+{
+  "additionalProperties": false,
+  "description": "Shared warning contract for query results.",
+  "properties": {
+    "actionable": {
+      "title": "Actionable",
+      "type": "boolean"
+    },
+    "affected_sources": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Affected Sources",
+      "type": "array"
+    },
+    "code": {
+      "minLength": 1,
+      "title": "Code",
+      "type": "string"
+    },
+    "details": {
+      "additionalProperties": true,
+      "title": "Details",
+      "type": "object"
+    },
+    "evidence_refs": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Refs",
+      "type": "array"
+    },
+    "level": {
+      "enum": [
+        "info",
+        "caution",
+        "degraded",
+        "blocked"
+      ],
+      "title": "Level",
+      "type": "string"
+    },
+    "message": {
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "suggested_action": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Suggested Action"
+    }
+  },
+  "required": [
+    "level",
+    "code",
+    "message",
+    "actionable"
+  ],
+  "title": "Warning",
+  "type": "object"
+}

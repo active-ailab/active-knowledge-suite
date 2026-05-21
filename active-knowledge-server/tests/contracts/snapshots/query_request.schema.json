@@ -1,0 +1,112 @@
+{
+  "additionalProperties": false,
+  "description": "Stable query router input contract.",
+  "properties": {
+    "caller_tool": {
+      "default": "client",
+      "enum": [
+        "kb_search",
+        "code_resolve",
+        "code_context",
+        "code_trace",
+        "config_impact",
+        "docs_search",
+        "workspace_view",
+        "evidence_bundle",
+        "skill",
+        "client"
+      ],
+      "title": "Caller Tool",
+      "type": "string"
+    },
+    "client_context": {
+      "additionalProperties": true,
+      "title": "Client Context",
+      "type": "object"
+    },
+    "domain": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "code",
+        "docs",
+        "api",
+        "widget",
+        "product",
+        "project",
+        "design",
+        "engineering"
+      ],
+      "title": "Domain",
+      "type": "string"
+    },
+    "granularity": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "workspace",
+        "directory",
+        "module",
+        "file",
+        "symbol",
+        "function",
+        "flow",
+        "feature",
+        "profile",
+        "doc_section"
+      ],
+      "title": "Granularity",
+      "type": "string"
+    },
+    "profile_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "auto",
+      "title": "Profile Id"
+    },
+    "query": {
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "snapshot_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": "current",
+      "title": "Snapshot Id"
+    },
+    "view": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "workspace",
+        "layer",
+        "domain",
+        "feature",
+        "runtime",
+        "profile",
+        "evidence",
+        "code"
+      ],
+      "title": "View",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query"
+  ],
+  "title": "QueryRequest",
+  "type": "object"
+}

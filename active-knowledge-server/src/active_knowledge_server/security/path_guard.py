@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
+from active_knowledge_server.models import QueryResult, Warning as QueryWarning
 
 
 @dataclass(frozen=True)
@@ -51,22 +52,27 @@ class PathBlockedWarning:
         "Use a path under the configured workspace, source docs, or workdir allowlist."
     )
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return a QueryResult-compatible blocked warning."""
+    def to_warning(self) -> QueryWarning:
+        """Return the shared warning model used by QueryResult."""
 
-        return {
-            "level": "blocked",
-            "code": "security.path_blocked",
-            "message": self.message,
-            "details": {
+        return QueryWarning(
+            level="blocked",
+            code="security.path_blocked",
+            message=self.message,
+            details={
                 "reason": self.reason,
                 "display_path": self.display_path,
             },
-            "actionable": True,
-            "suggested_action": self.suggested_action,
-            "affected_sources": [],
-            "evidence_refs": [],
-        }
+            actionable=True,
+            suggested_action=self.suggested_action,
+            affected_sources=(),
+            evidence_refs=(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a QueryResult-compatible blocked warning."""
+
+        return self.to_warning().to_dict()
 
 
 class PathBlockedError(ValueError):
@@ -79,19 +85,13 @@ class PathBlockedError(ValueError):
     def to_blocked_response(self) -> dict[str, Any]:
         """Return the shared structured blocked response shape."""
 
-        return {
-            "result_status": "blocked",
-            "status": "blocked",
-            "summary": "The request was blocked by the path guard.",
-            "items": [],
-            "candidates": [],
-            "evidence_refs": [],
-            "warnings": [self.warning.to_dict()],
-            "next_queries": ["Use a path under the configured allowlist."],
-            "diagnostics": {
-                "blocked_reason": self.warning.reason,
-            },
-        }
+        return QueryResult.blocked(
+            tool_name="path_guard",
+            summary="The request was blocked by the path guard.",
+            warnings=(self.warning.to_warning(),),
+            next_queries=("Use a path under the configured allowlist.",),
+            diagnostics={"blocked_reason": self.warning.reason},
+        ).to_dict()
 
 
 class PathGuard:

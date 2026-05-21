@@ -997,20 +997,21 @@ TODO：
 
 ### Q5-01 Query models 与 response schema
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-03`、`D0-04`
+- 输出：已新增 `models/query.py`、`models/evidence.py`、`models/responses.py` 中的统一查询契约模型，并让现有 blocked 响应复用同一 `QueryResult` 外壳；同时补充 `tests/contracts/test_query_model_schemas.py` 与 schema snapshot 基线，以及 `tests/unit/test_query_models.py` 的模型校验单测。
 
 TODO：
 
-- [ ] 实现 `QueryRequest`、`QueryResult`、`EvidenceRef`、`Warning`、`Candidate`。
-- [ ] 所有 tools 共享 `schema_version`、`result_status`、`confidence`、`warnings`、`evidence_refs`、`next_queries`。
-- [ ] 实现 JSON schema snapshot tests。
+- [x] 实现 `QueryRequest`、`QueryResult`、`EvidenceRef`、`Warning`、`Candidate`。
+- [x] 所有 tools 共享 `schema_version`、`result_status`、`confidence`、`warnings`、`evidence_refs`、`next_queries`。
+- [x] 实现 JSON schema snapshot tests。
 
 验收标准：
 
-- schema 变更会触发契约测试更新。
+- [x] schema 变更会触发契约测试更新。
 
 ### Q5-02 Query Router
 

@@ -1,0 +1,108 @@
+{
+  "additionalProperties": false,
+  "description": "Stable short evidence reference returned by query tools.",
+  "properties": {
+    "authority_level": {
+      "minLength": 1,
+      "title": "Authority Level",
+      "type": "string"
+    },
+    "content_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Content Hash"
+    },
+    "end_line": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "End Line"
+    },
+    "evidence_id": {
+      "minLength": 1,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "excerpt": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Excerpt"
+    },
+    "path": {
+      "minLength": 1,
+      "title": "Path",
+      "type": "string"
+    },
+    "source_index": {
+      "anyOf": [
+        {
+          "enum": [
+            "baseline",
+            "overlay",
+            "merged"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Index"
+    },
+    "start_line": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Start Line"
+    },
+    "type": {
+      "enum": [
+        "code",
+        "doc",
+        "config",
+        "graph",
+        "workspace",
+        "profile"
+      ],
+      "title": "Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evidence_id",
+    "type",
+    "path",
+    "authority_level"
+  ],
+  "title": "EvidenceRef",
+  "type": "object"
+}
