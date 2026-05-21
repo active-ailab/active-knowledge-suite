@@ -13,6 +13,15 @@ from active_knowledge_server.indexing.doc_indexer import (
     IndexedDocuments,
     VectorWrite,
 )
+from active_knowledge_server.indexing.pipeline import (
+    INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION,
+    INCREMENTAL_INDEX_STATE_SCHEMA_VERSION,
+    IncrementalIndexPipeline,
+    IncrementalIndexPlan,
+    IncrementalIndexResult,
+    IncrementalIndexState,
+    IncrementalIndexWarning,
+)
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
     CollectedProfiles,
@@ -22,17 +31,6 @@ from active_knowledge_server.indexing.profile import (
     ProfileResolution,
     compute_profile_manifest_hash,
     compute_profile_record_id,
-)
-from active_knowledge_server.indexing.snapshot import (
-    CURRENT_SNAPSHOT_ID,
-    SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
-    CollectedSnapshot,
-    SnapshotCollector,
-    compute_repo_manifest_hash,
-    compute_snapshot_id,
-    compute_workspace_revision,
-    root_git_head,
-    snapshot_aliases,
 )
 from active_knowledge_server.indexing.relation_extractor import (
     PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
@@ -46,11 +44,24 @@ from active_knowledge_server.indexing.relation_extractor import (
     summarize_entity_profile_states,
     summarize_entity_profile_states_from_reader,
 )
+from active_knowledge_server.indexing.snapshot import (
+    CURRENT_SNAPSHOT_ID,
+    SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
+    CollectedSnapshot,
+    SnapshotCollector,
+    compute_repo_manifest_hash,
+    compute_snapshot_id,
+    compute_workspace_revision,
+    root_git_head,
+    snapshot_aliases,
+)
 
 __all__ = [
     "CODE_INDEXER_SCHEMA_VERSION",
     "CURRENT_SNAPSHOT_ID",
     "DOC_INDEXER_SCHEMA_VERSION",
+    "INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION",
+    "INCREMENTAL_INDEX_STATE_SCHEMA_VERSION",
     "PROFILE_COLLECTOR_SCHEMA_VERSION",
     "SNAPSHOT_COLLECTOR_SCHEMA_VERSION",
     "CodeIndexer",
@@ -59,6 +70,11 @@ __all__ = [
     "CollectedSnapshot",
     "DocumentIndexer",
     "DocumentIndexingWarning",
+    "IncrementalIndexPipeline",
+    "IncrementalIndexPlan",
+    "IncrementalIndexResult",
+    "IncrementalIndexState",
+    "IncrementalIndexWarning",
     "IndexedCode",
     "IndexedDocuments",
     "ProfileCandidate",

@@ -953,19 +953,19 @@ TODO：
 
 ### P4-06 增量索引
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-05`、`S2-07`、`P4-03`、`P4-04`
 
 TODO：
 
-- [ ] 文件 hash 变化时重建该文件 chunks/entities/relations/evidence/FTS。
-- [ ] `.config` 变化时重算 profile 和 profile-conditioned relations。
-- [ ] parser/extractor version 变化时重建对应产物。
-- [ ] embedding model 变化时重建向量。
-- [ ] 删除 baseline 对象时写 tombstone。
-- [ ] 修改 baseline 对象时写 replacement。
+- [x] 文件 hash 变化时重建该文件 chunks/entities/relations/evidence/FTS。
+- [x] `.config` 变化时重算 profile 和 profile-conditioned relations。
+- [x] parser/extractor version 变化时重建对应产物。
+- [x] embedding model 变化时重建向量。
+- [x] 删除 baseline 对象时写 tombstone。
+- [x] 修改 baseline 对象时写 replacement。
 
 验收标准：
 
