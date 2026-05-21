@@ -1191,18 +1191,19 @@ TODO：
 
 ### M6-01 FastMCP app
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`Q5-01`
+- 输出：已实现 `mcp/app.py` FastMCP 装配层，注册基础 bootstrap tools/resources、HTTP health route，并将 `active-kb serve` 接到真实 stdio / streamable-http runtime；同时补充 `tests/unit/test_mcp_app.py` 与 CLI 回归覆盖结构化输出、transport 参数透传和运行入口。
 
 TODO：
 
-- [ ] 初始化 FastMCP server。
-- [ ] 注册 tools/resources。
-- [ ] 支持 stdio。
-- [ ] 支持 streamable-http。
-- [ ] 工具返回 Pydantic 结构化对象。
+- [x] 初始化 FastMCP server。
+- [x] 注册 tools/resources。
+- [x] 支持 stdio。
+- [x] 支持 streamable-http。
+- [x] 工具返回 Pydantic 结构化对象。
 
 验收标准：
 

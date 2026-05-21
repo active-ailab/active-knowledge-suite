@@ -107,6 +107,42 @@ def test_serve_returns_blocked_json_for_insecure_local_http(capsys) -> None:
     assert payload["warnings"][0]["code"] == "security.remote_insecure_config"
 
 
+def test_serve_json_reports_registered_mcp_components(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    exit_code = main(
+        [
+            "serve",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--transport",
+            "http",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ready"
+    assert payload["mcp"]["components"]["tools"] == ["ping", "server_info"]
+    assert payload["mcp"]["components"]["resources"] == [
+        "active://config/current",
+        "active://server/runtime",
+    ]
+    assert payload["mcp"]["http_endpoint"] == "http://127.0.0.1:8765/mcp"
+
+
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(
     tmp_path: Path,
     capsys,
@@ -123,3 +159,36 @@ def test_serve_returns_blocked_json_for_invalid_deployment_mode(
     assert payload["result_status"] == "blocked"
     assert payload["warnings"][0]["code"] == "schema.invalid_request"
     assert "deployment_mode" in payload["warnings"][0]["message"]
+
+
+def test_serve_without_json_runs_server(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    called = {"run": False}
+
+    class DummyRuntime:
+        def describe(self) -> dict[str, object]:
+            return {"components": {"tools": [], "resources": []}}
+
+        def run(self) -> None:
+            called["run"] = True
+
+    monkeypatch.setattr("active_knowledge_server.cli.build_server_app", lambda resolved: DummyRuntime())
+
+    exit_code = main(
+        [
+            "serve",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+        ]
+    )
+
+    assert exit_code == 0
+    assert called["run"] is True

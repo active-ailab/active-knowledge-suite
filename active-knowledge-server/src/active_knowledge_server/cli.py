@@ -31,7 +31,7 @@ from active_knowledge_server.security.config import (
     SecurityValidationResult,
     validate_startup_security,
 )
-from active_knowledge_server.server import server_name
+from active_knowledge_server.server import build_server_app, server_name
 from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.validation import validate_storage_consistency
 
@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser(
         "serve",
         parents=[common],
-        help="Resolve server config and prepare the MCP server launch plan.",
+        help="Run the MCP server or emit a machine-readable launch plan with --format json.",
     )
     serve_parser.add_argument(
         "--transport",
@@ -274,21 +274,20 @@ def handle_serve(args: argparse.Namespace) -> int:
     if security_result.blocked:
         return emit_blocked_result(args, security_result)
 
+    runtime = build_server_app(resolved)
     summary = config_summary(resolved)
     payload = {
         "command": "serve",
         "status": "ready",
         "server": server_name(),
         "config": summary,
-        "note": "FastMCP runtime wiring is scheduled for M6-01; C1-02 validates CLI/config only.",
+        "mcp": runtime.describe(),
     }
     if args.format == "json":
         print_json(payload)
-    else:
-        print(f"Server plan ready for {payload['server']}")
-        print(f"Transport: {summary['transport']}")
-        print(f"Workdir: {summary['workdir']}")
-        print("MCP runtime wiring is not started by the C1-02 skeleton.")
+        return 0
+
+    runtime.run()
     return 0
 
 
