@@ -1128,22 +1128,22 @@ TODO：
 
 ### Q5-08 Profile-aware query 行为
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`D0-06`、`P4-02`、`P4-05`
 
 TODO：
 
-- [ ] 所有代码和关系查询接受 `profile_id`。
-- [ ] 未指定 profile 时执行 auto resolution。
-- [ ] unresolved 时返回候选 profile 列表和 warning。
-- [ ] multi-profile 查询返回 profile matrix。
-- [ ] `config_impact(compare_to=...)` 输出差异宏和影响范围。
+- [x] 所有代码和关系查询接受 `profile_id`。
+- [x] 未指定 profile 时执行 auto resolution。
+- [x] unresolved 时返回候选 profile 列表和 warning。
+- [x] multi-profile 查询返回 profile matrix。
+- [x] `config_impact(compare_to=...)` 输出差异宏和影响范围。
 
 验收标准：
 
-- profile correct gate 达标。
+- [x] profile correct gate 达标；已验证 `tests/unit/test_query_service.py tests/unit/test_query_router.py`，并通过 `tests/unit/test_profile_collector.py tests/unit/test_profile_conditioned_relations.py tests/unit/test_query_router.py tests/unit/test_symbol_retriever.py tests/unit/test_fulltext_retriever.py tests/unit/test_vector_retriever.py tests/unit/test_graph_retriever.py tests/unit/test_query_rerank.py tests/unit/test_query_service.py` 邻接 smoke。
 
 ### Q5-09 零结果/多结果/歧义/低置信契约测试
 

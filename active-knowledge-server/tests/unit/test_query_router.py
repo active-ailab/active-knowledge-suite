@@ -195,6 +195,21 @@ def test_query_router_resolves_profile_with_real_profile_collector(tmp_path: Pat
     assert decision.tool_plan.primary_tool == "config_impact"
 
 
+def test_query_router_passes_compare_to_into_config_impact_args(router: QueryRouter) -> None:
+    decision = router.route(
+        QueryRequest(
+            query="CONFIG_BT 在 watch 和 sensorhub 的差异是什么？",
+            profile_id="mhs003_watch",
+            client_context={"compare_to": "mhs003_sensorhub"},
+        )
+    )
+
+    assert decision.intent == "profile_diff"
+    assert decision.tool_plan.primary_tool == "config_impact"
+    assert decision.tool_plan.primary_args["profile_id"] == "mhs003_watch"
+    assert decision.tool_plan.primary_args["compare_to"] == "mhs003_sensorhub"
+
+
 def test_query_router_respects_hybrid_feature_switches(tmp_path: Path) -> None:
     config = resolve_model(
         tmp_path,

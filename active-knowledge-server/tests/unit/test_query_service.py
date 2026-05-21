@@ -8,6 +8,7 @@ from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.models.query import QueryRequest
 from active_knowledge_server.models.routing import RouteTraceEntry, RouterDecision, ToolPlan
 from active_knowledge_server.query import QueryService
+from active_knowledge_server.storage import EntityRecord, LogicalEntity, ProfileRecord, QueryScope, RelationRecord
 from active_knowledge_server.query.retrievers import (
     FullTextMatchResult,
     FullTextSearchRequest,
@@ -83,6 +84,32 @@ class StubGraphRetriever:
             self.requests = []
         self.requests.append(request)
         return self.result
+
+
+@dataclass
+class StubProfileAwareReader:
+    profiles: tuple[ProfileRecord, ...]
+    entities: tuple[LogicalEntity, ...]
+    relations: tuple[RelationRecord, ...]
+
+    def iter_profiles(self, snapshot_id: str | None = None) -> tuple[ProfileRecord, ...]:
+        if snapshot_id is None:
+            return self.profiles
+        return tuple(profile for profile in self.profiles if profile.snapshot_id == snapshot_id)
+
+    def logical_entities(self, scope: QueryScope) -> tuple[LogicalEntity, ...]:
+        return tuple(entity for entity in self.entities if entity.record.snapshot_id == scope.snapshot_id)
+
+    def iter_relations(self, scope: QueryScope) -> tuple[RelationRecord, ...]:
+        return tuple(relation for relation in self.relations if relation.snapshot_id == scope.snapshot_id)
+
+
+@dataclass
+class StubMetadataAdapter:
+    stub_reader: StubProfileAwareReader
+
+    def reader(self) -> StubProfileAwareReader:
+        return self.stub_reader
 
 
 def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
@@ -449,6 +476,222 @@ def test_query_service_returns_zero_result_contract(tmp_path: Path) -> None:
     assert result.evidence_refs == ()
     assert any(warning.code == "retrieval.zero_result" for warning in result.warnings)
     assert result.next_queries
+
+
+def test_query_service_returns_profile_candidates_for_unresolved_profile_sensitive_query(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        RouterDecision(
+            normalized_query="CONFIG_BT impact",
+            intent="profile_diff",
+            confidence=0.88,
+            selected_view="profile",
+            selected_granularity="profile",
+            profile_resolution={
+                "status": "multiple_candidates",
+                "resolved_profile_id": None,
+                "candidates": [
+                    {
+                        "profile_id": "mhs003_watch",
+                        "profile_record_id": "profile:watch",
+                        "dotconfig_path": "build/.config",
+                        "app": "watch",
+                        "confidence": 0.93,
+                    },
+                    {
+                        "profile_id": "mhs003_sensorhub",
+                        "profile_record_id": "profile:sensorhub",
+                        "dotconfig_path": "build/out_hub/.config",
+                        "app": "sensorhub",
+                        "confidence": 0.91,
+                    },
+                ],
+                "warnings": [
+                    {
+                        "level": "caution",
+                        "code": "profile.multiple_candidates",
+                        "message": "Multiple profile candidates were found; no profile was selected automatically.",
+                        "details": {"candidate_count": 2},
+                    }
+                ],
+            },
+            retriever_weights={"symbol": 0.15, "fts": 0.30, "graph": 0.55},
+            tool_plan=ToolPlan(route_mode="chain", primary_tool="config_impact"),
+            route_trace=(RouteTraceEntry(stage="route", summary="stub", details={}),),
+            warnings=(),
+        )
+    )
+    service = QueryService(config, router=router)
+
+    result = service.search(QueryRequest(query="CONFIG_BT 影响哪些模块？"))
+
+    assert result.result_status == "multi_result"
+    assert result.profile_id == "unresolved"
+    assert [candidate.profile_id for candidate in result.candidates] == [
+        "mhs003_watch",
+        "mhs003_sensorhub",
+    ]
+    assert any(warning.code == "profile.multiple_candidates" for warning in result.warnings)
+    assert result.suggested_filters[0].field == "profile_id"
+
+
+def test_query_service_returns_profile_matrix_for_compare_to_queries(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        RouterDecision(
+            normalized_query="CONFIG_HEALTH_BT diff",
+            intent="profile_diff",
+            confidence=0.89,
+            selected_view="profile",
+            selected_granularity="profile",
+            profile_resolution={
+                "status": "resolved",
+                "resolved_profile_id": "mhs003_watch",
+                "warnings": [],
+            },
+            retriever_weights={"symbol": 0.15, "fts": 0.30, "graph": 0.55},
+            tool_plan=ToolPlan(
+                route_mode="chain",
+                primary_tool="config_impact",
+                primary_args={
+                    "macro_or_config": "CONFIG_HEALTH_BT",
+                    "profile_id": "mhs003_watch",
+                    "compare_to": "mhs003_sensorhub",
+                },
+            ),
+            route_trace=(RouteTraceEntry(stage="route", summary="stub", details={}),),
+            warnings=(),
+        )
+    )
+    reader = StubProfileAwareReader(
+        profiles=(
+            ProfileRecord(
+                profile_record_id="profile:watch",
+                snapshot_id="current",
+                profile_id="mhs003_watch",
+                defconfig_path="configs/mhs003_watch_defconfig",
+                dotconfig_path="build/.config",
+                metadata={
+                    "macro_assignments": {
+                        "CONFIG_HEALTH_BT": {
+                            "value": "y",
+                            "enabled": True,
+                            "value_type": "bool",
+                        }
+                    }
+                },
+            ),
+            ProfileRecord(
+                profile_record_id="profile:sensorhub",
+                snapshot_id="current",
+                profile_id="mhs003_sensorhub",
+                defconfig_path="configs/mhs003_sensorhub_defconfig",
+                dotconfig_path="build/out_hub/.config",
+                metadata={
+                    "macro_assignments": {
+                        "CONFIG_HEALTH_BT": {
+                            "value": "n",
+                            "enabled": False,
+                            "value_type": "bool",
+                        }
+                    }
+                },
+            ),
+        ),
+        entities=(
+            LogicalEntity(
+                logical_object_id="entity:module:health_core",
+                physical_object_id="entity:module:health_core",
+                source_index="baseline",
+                record=EntityRecord(
+                    entity_id="entity:module:health_core",
+                    snapshot_id="current",
+                    file_id="file:module:health",
+                    entity_type="Module",
+                    name="health_core",
+                    qualified_name="components/health/module.mk::health_core",
+                    path="components/health/module.mk::health_core",
+                ),
+            ),
+            LogicalEntity(
+                logical_object_id="entity:file:bt.c",
+                physical_object_id="entity:file:bt.c",
+                source_index="baseline",
+                record=EntityRecord(
+                    entity_id="entity:file:bt.c",
+                    snapshot_id="current",
+                    file_id="file:bt",
+                    entity_type="File",
+                    name="bt.c",
+                    qualified_name="components/health/bt.c",
+                    path="components/health/bt.c",
+                ),
+            ),
+        ),
+        relations=(
+            RelationRecord(
+                relation_id="rel:watch:module",
+                snapshot_id="current",
+                relation_type="enabled_by",
+                src_entity_id="entity:module:health_core",
+                dst_entity_id="entity:macro:CONFIG_HEALTH_BT",
+                profile_id="mhs003_watch",
+                metadata={
+                    "macro_name": "CONFIG_HEALTH_BT",
+                    "condition_expr": "CONFIG_HEALTH_BT",
+                },
+            ),
+            RelationRecord(
+                relation_id="rel:watch:file",
+                snapshot_id="current",
+                relation_type="enabled_by",
+                src_entity_id="entity:file:bt.c",
+                dst_entity_id="entity:macro:CONFIG_HEALTH_BT",
+                profile_id="mhs003_watch",
+                metadata={
+                    "macro_name": "CONFIG_HEALTH_BT",
+                    "condition_expr": "CONFIG_HEALTH_BT",
+                },
+            ),
+            RelationRecord(
+                relation_id="rel:sensorhub:module",
+                snapshot_id="current",
+                relation_type="disabled_by",
+                src_entity_id="entity:module:health_core",
+                dst_entity_id="entity:macro:CONFIG_HEALTH_BT",
+                profile_id="mhs003_sensorhub",
+                metadata={
+                    "macro_name": "CONFIG_HEALTH_BT",
+                    "condition_expr": "CONFIG_HEALTH_BT",
+                },
+            ),
+        ),
+    )
+    service = QueryService(
+        config,
+        router=router,
+        metadata_adapter=StubMetadataAdapter(reader),
+    )
+
+    result = service.search(
+        QueryRequest(
+            query="CONFIG_HEALTH_BT 在 watch 和 sensorhub 的差异是什么？",
+            profile_id="mhs003_watch",
+            client_context={"compare_to": "mhs003_sensorhub"},
+        )
+    )
+
+    assert result.result_status == "ok"
+    assert result.profile_id == "multi"
+    items_by_profile = {item["profile_id"]: item for item in result.items}
+    assert items_by_profile["mhs003_watch"]["status"] == "enabled"
+    assert items_by_profile["mhs003_sensorhub"]["status"] == "disabled"
+    assert items_by_profile["mhs003_watch"]["macro_diff"][0]["compare_to"] == "n"
+    assert "health_core" in items_by_profile["mhs003_watch"]["affected_modules"]
+    assert result.evidence_refs
+    assert result.diagnostics["profile_matrix"]["compare_to"] == "mhs003_sensorhub"
 
 
 def make_decision(

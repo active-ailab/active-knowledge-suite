@@ -1227,6 +1227,7 @@ class QueryRouter:
 				build_profile_args(
 					matched_signals=matched_signals,
 					profile_resolution=profile_resolution,
+					client_context=request.client_context,
 				)
 			)
 			fallback_tools = ["code_resolve", "workspace_view", "evidence_bundle"]
@@ -1480,12 +1481,45 @@ def build_profile_args(
 	*,
 	matched_signals: Iterable[MatchedSignal],
 	profile_resolution: Mapping[str, object],
+	client_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
 	"""Build config_impact-style primary args from matched signals."""
 
+	resolved_profile_id = profile_resolution.get("resolved_profile_id")
+	compare_to = _compare_to_profile_arg(
+		client_context,
+		primary_profile_id=resolved_profile_id if isinstance(resolved_profile_id, str) else None,
+	)
 	return {
 		"macro_or_config": first_signal_value(matched_signals, "macro_name")
 		or first_signal_value(matched_signals, "profile_keyword"),
-		"profile_id": profile_resolution.get("resolved_profile_id"),
+		"profile_id": resolved_profile_id,
+		"compare_to": compare_to,
 		"resolution_status": profile_resolution.get("status"),
 	}
+
+
+def _compare_to_profile_arg(
+	client_context: Mapping[str, object] | None,
+	*,
+	primary_profile_id: str | None,
+) -> str | None:
+	"""Return an explicit compare_to profile from client context when present."""
+
+	if client_context is None:
+		return None
+	compare_to = client_context.get("compare_to")
+	if isinstance(compare_to, str):
+		value = compare_to.strip()
+		if value and value != primary_profile_id:
+			return value
+	profile_ids = client_context.get("profile_ids")
+	if not isinstance(profile_ids, (list, tuple)):
+		return None
+	for item in profile_ids:
+		if not isinstance(item, str):
+			continue
+		value = item.strip()
+		if value and value != primary_profile_id:
+			return value
+	return None

@@ -10,6 +10,12 @@ from active_knowledge_server.models.evidence import EvidenceRef
 from active_knowledge_server.models.query import QueryIntent, QueryRequest
 from active_knowledge_server.models.responses import QueryResult, SuggestedFilter, Warning
 from active_knowledge_server.models.routing import RouterDecision
+from active_knowledge_server.query.profile_query import (
+	build_profile_matrix_result,
+	build_profile_resolution_result,
+	execution_scope_profile_id,
+	reported_profile_id,
+)
 from active_knowledge_server.query.rerank import (
 	CandidateReranker,
 	FusionCandidate,
@@ -62,6 +68,7 @@ class QueryService:
 		config: ActiveKnowledgeConfig,
 		*,
 		router: QueryRouter,
+		metadata_adapter: StorageAdapter | None = None,
 		symbol_retriever: SymbolRetriever | None = None,
 		fulltext_retriever: FullTextRetriever | None = None,
 		vector_retriever: VectorRetriever | None = None,
@@ -70,6 +77,7 @@ class QueryService:
 	) -> None:
 		self._config = config
 		self._router = router
+		self._metadata_adapter = metadata_adapter
 		self._symbol_retriever = symbol_retriever
 		self._fulltext_retriever = fulltext_retriever
 		self._vector_retriever = vector_retriever
@@ -108,6 +116,7 @@ class QueryService:
 		return cls(
 			config,
 			router=resolved_router,
+			metadata_adapter=metadata_adapter,
 			symbol_retriever=resolved_symbol,
 			fulltext_retriever=resolved_fulltext,
 			vector_retriever=resolved_vector,
@@ -117,12 +126,29 @@ class QueryService:
 
 	def search(self, request: QueryRequest) -> QueryResult:
 		decision = self._router.route(request)
+		result_profile_id = reported_profile_id(decision, request)
+		warnings: list[Warning] = list(decision.warnings)
+		resolution_result = build_profile_resolution_result(
+			request=request,
+			decision=decision,
+			warnings=warnings,
+		)
+		if resolution_result is not None:
+			return resolution_result
+		matrix_result = build_profile_matrix_result(
+			config=self._config,
+			metadata_adapter=self._metadata_adapter,
+			request=request,
+			decision=decision,
+			warnings=warnings,
+		)
+		if matrix_result is not None:
+			return matrix_result
 		scope = QueryScope(
 			snapshot_id=request.snapshot_id or "current",
-			profile_id=_resolved_profile_id(decision, request),
+			profile_id=execution_scope_profile_id(decision, request),
 		)
 		run_trace: list[dict[str, object]] = []
-		warnings: list[Warning] = list(decision.warnings)
 		ranked_lists: dict[str, tuple[FusionCandidate, ...]] = {}
 		graph_result: GraphSearchResult | None = None
 		symbol_result: SymbolSearchResult | None = None
@@ -244,7 +270,7 @@ class QueryService:
 				confidence=0.0,
 				query_intent=decision.intent,
 				snapshot_id=scope.snapshot_id,
-				profile_id=scope.profile_id,
+				profile_id=result_profile_id,
 				summary="Hybrid retrieval returned no evidence-bearing candidates.",
 				warnings=dedupe_query_warnings(warnings),
 				next_queries=_suggest_next_queries(request, decision),
@@ -278,7 +304,7 @@ class QueryService:
 			confidence=confidence,
 			query_intent=decision.intent,
 			snapshot_id=scope.snapshot_id,
-			profile_id=scope.profile_id,
+			profile_id=result_profile_id,
 			summary=_build_summary(decision, limited),
 			items=items,
 			entities=()
