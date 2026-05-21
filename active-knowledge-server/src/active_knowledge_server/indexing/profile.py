@@ -626,6 +626,26 @@ class ProfileCollector:
 				"app_candidates": list(parsed_profile.clues.app_candidates),
 				"board_candidates": list(parsed_profile.clues.board_candidates),
 				"assignment_count": len(parsed_profile.merged_assignments),
+				"enabled_macros": [
+					assignment.macro_name
+					for assignment in parsed_profile.merged_assignments
+					if assignment.enabled
+				],
+				"disabled_macros": [
+					assignment.macro_name
+					for assignment in parsed_profile.merged_assignments
+					if not assignment.enabled
+				],
+				"unknown_macros": [],
+			},
+			"macro_assignments": {
+				assignment.macro_name: {
+					"value": assignment.value,
+					"value_type": assignment.value_type,
+					"enabled": assignment.enabled,
+					"source_kind": assignment.source_kind,
+				}
+				for assignment in parsed_profile.merged_assignments
 			},
 		}
 		return ProfileCandidate(
@@ -939,5 +959,4 @@ def stable_hash(payload: object) -> str:
 
 	encoded = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
 	return f"sha256:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()}"
-
 

@@ -88,6 +88,13 @@ def test_profile_collector_resolves_single_dotconfig_candidate(tmp_path: Path) -
     assert len(collected.profile_records) == 1
     assert collected.profile_records[0].profile_id == "mhs003_watch"
     assert collected.profile_records[0].metadata["source"] == "dotconfig_scan"
+    assert collected.profile_records[0].metadata["macro_assignments"]["CONFIG_RUNTIME_READY"] == {
+        "value": "y",
+        "value_type": "bool",
+        "enabled": True,
+        "source_kind": "dotconfig",
+    }
+    assert "CONFIG_RUNTIME_READY" in collected.profile_records[0].metadata["macro_summary"]["enabled_macros"]
     assert collected.resolution.status == "resolved"
     assert collected.resolution.resolved_profile_id == "mhs003_watch"
     assert collected.resolution.source == "dotconfig_scan"

@@ -935,17 +935,17 @@ TODO：
 
 ### P4-05 Profile-conditioned relations
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`P4-02`、`P4-04`
 
 TODO：
 
-- [ ] 将 defconfig/.config 宏应用到 module/file/symbol 可达性。
-- [ ] 写入 `profile_id`、`condition_expr`、`confidence`。
-- [ ] profile hash 变化时只重算 profile-conditioned relations 和投影视图。
-- [ ] 多 profile 查询时输出 enabled/disabled/unknown。
+- [x] 将 defconfig/.config 宏应用到 module/file/symbol 可达性。
+- [x] 写入 `profile_id`、`condition_expr`、`confidence`。
+- [x] profile hash 变化时只重算 profile-conditioned relations 和投影视图。
+- [x] 多 profile 查询时输出 enabled/disabled/unknown。
 
 验收标准：
 

@@ -34,6 +34,18 @@ from active_knowledge_server.indexing.snapshot import (
     root_git_head,
     snapshot_aliases,
 )
+from active_knowledge_server.indexing.relation_extractor import (
+    PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
+    IndexedProfileConditionedRelations,
+    ProfileConditionedEntityState,
+    ProfileConditionedRelationExtractor,
+    ProfileRelationRebuildPlan,
+    plan_profile_conditioned_relation_rebuild,
+    profile_config_hash,
+    profile_macro_assignments,
+    summarize_entity_profile_states,
+    summarize_entity_profile_states_from_reader,
+)
 
 __all__ = [
     "CODE_INDEXER_SCHEMA_VERSION",
@@ -52,6 +64,9 @@ __all__ = [
     "ProfileCandidate",
     "ProfileCollector",
     "ProfileCollectorWarning",
+    "ProfileConditionedEntityState",
+    "ProfileConditionedRelationExtractor",
+    "ProfileRelationRebuildPlan",
     "ProfileResolution",
     "SnapshotCollector",
     "VectorWrite",
@@ -60,6 +75,13 @@ __all__ = [
     "compute_repo_manifest_hash",
     "compute_snapshot_id",
     "compute_workspace_revision",
+    "IndexedProfileConditionedRelations",
+    "PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION",
+    "plan_profile_conditioned_relation_rebuild",
+    "profile_config_hash",
+    "profile_macro_assignments",
     "root_git_head",
+    "summarize_entity_profile_states",
+    "summarize_entity_profile_states_from_reader",
     "snapshot_aliases",
 ]
