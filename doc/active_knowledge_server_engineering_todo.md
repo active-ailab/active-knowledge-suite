@@ -1054,20 +1054,21 @@ TODO：
 
 ### Q5-04 FullTextRetriever
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-03`、`Q5-01`
+- 输出：已在 `query/retrievers.py` 实现基于 `StorageReader.search_fts()` 的 `FullTextRetriever` 与稳定 request/result 契约，覆盖 `chunk_fts/entity_fts/doc_fts/code_fts` 聚合检索、`domain/doc_type/source_index` 透传过滤、`module` 后置过滤、`QueryScope.profile_id` profile 过滤，以及 `match_reason`/`score` 输出；同时在 `tests/unit/test_fulltext_retriever.py` 补充 API、widget、path、error-code、profile、source-index 聚焦回归。
 
 TODO：
 
-- [ ] 查询 chunk_fts/entity_fts/doc_fts/code_fts。
-- [ ] 支持 domain、doc_type、module、profile、source_index filter。
-- [ ] 输出 match reason 和 score。
+- [x] 查询 chunk_fts/entity_fts/doc_fts/code_fts。
+- [x] 支持 domain、doc_type、module、profile、source_index filter。
+- [x] 输出 match reason 和 score。
 
 验收标准：
 
-- API、控件、路径、错误码类查询有稳定召回。
+- [x] API、控件、路径、错误码类查询有稳定召回；已验证 `tests/unit/test_fulltext_retriever.py` 以及 `tests/unit/test_symbol_retriever.py tests/unit/test_fulltext_retriever.py` 邻接 smoke。
 
 ### Q5-05 VectorRetriever
 

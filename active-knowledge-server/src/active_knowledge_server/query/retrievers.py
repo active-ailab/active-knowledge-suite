@@ -1,4 +1,4 @@
-"""Symbol-first retrieval primitives for the query service."""
+"""Retrieval primitives for the query service."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Final, Literal, cast
 
 from active_knowledge_server.storage import (
 	ALL_SCOPE,
+	FTSMatch,
 	FTSQuery,
 	FileRecord,
 	LogicalEntity,
@@ -18,7 +19,9 @@ from active_knowledge_server.storage import (
 	LogicalRelation,
 	QueryScope,
 	StorageAdapter,
+	StorageFTSTable,
 	StorageReader,
+	StorageSourceIndex,
 )
 
 RequestedSymbolEntityType = Literal[
@@ -35,9 +38,17 @@ ResolvedSymbolEntityType = Literal["Function", "Macro", "Type", "File", "Module"
 SymbolMatchKind = Literal["exact", "fuzzy", "alias", "doc_mention"]
 
 _LOOKUP_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9]+")
+_FTS_LOOKUP_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9_]+")
 _DOC_MENTION_TOP_K: Final = 24
 _ENTITY_FTS_TOP_K: Final = 24
+_FULLTEXT_FTS_TOP_K: Final = 24
 _FUZZY_RATIO_THRESHOLD: Final = 0.72
+_DEFAULT_FULLTEXT_INDEXES: Final[tuple[StorageFTSTable, ...]] = (
+	"chunk_fts",
+	"entity_fts",
+	"doc_fts",
+	"code_fts",
+)
 _ENTITY_TYPE_FILTERS: Final[dict[str, tuple[ResolvedSymbolEntityType, ...]]] = {
 	"auto": ("Function", "Macro", "Type", "File", "Module", "Directory"),
 	"symbol": ("Function", "Macro", "Type"),
@@ -55,6 +66,12 @@ _ENTITY_PRIORITY: Final[dict[ResolvedSymbolEntityType, int]] = {
 	"File": 3,
 	"Module": 4,
 	"Directory": 5,
+}
+_FULLTEXT_REASON_BY_INDEX: Final[dict[StorageFTSTable, str]] = {
+	"chunk_fts": "matched chunk title/text/symbols/tags",
+	"entity_fts": "matched entity name/qualified_name/aliases/summary",
+	"doc_fts": "matched document title/text",
+	"code_fts": "matched code symbol_names/comments/code_text",
 }
 
 
@@ -168,6 +185,134 @@ class SymbolSearchResult:
 			"has_exact_match": self.has_exact_match,
 			"candidates": [item.to_dict() for item in self.candidates],
 		}
+
+
+@dataclass(frozen=True)
+class FullTextSearchRequest:
+	"""Stable request for storage-backed full-text retrieval."""
+
+	query: str
+	scope: QueryScope = field(default_factory=QueryScope)
+	indexes: tuple[StorageFTSTable, ...] = _DEFAULT_FULLTEXT_INDEXES
+	top_k: int = 12
+	domain: str | None = None
+	doc_type: str | None = None
+	module: str | None = None
+	source_index: StorageSourceIndex | None = None
+
+	def __post_init__(self) -> None:
+		if not self.query.strip():
+			raise ValueError("query must not be empty")
+		if self.top_k < 1:
+			raise ValueError("top_k must be >= 1")
+		normalized_indexes = tuple(dict.fromkeys(self.indexes))
+		if not normalized_indexes:
+			raise ValueError("indexes must not be empty")
+		invalid_indexes = [index_name for index_name in normalized_indexes if index_name not in _DEFAULT_FULLTEXT_INDEXES]
+		if invalid_indexes:
+			raise ValueError(f"unsupported FTS indexes: {', '.join(invalid_indexes)}")
+		object.__setattr__(self, "indexes", normalized_indexes)
+
+	@property
+	def normalized_query(self) -> str:
+		return normalize_fts_lookup_text(self.query)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"query": self.query,
+			"normalized_query": self.normalized_query,
+			"scope": {
+				"snapshot_id": self.scope.snapshot_id,
+				"profile_id": self.scope.profile_id,
+				"source_scope": self.scope.source_scope,
+				"path_scope": self.scope.path_scope,
+				"include_inactive": self.scope.include_inactive,
+			},
+			"indexes": list(self.indexes),
+			"top_k": self.top_k,
+			"domain": self.domain,
+			"doc_type": self.doc_type,
+			"module": self.module,
+			"source_index": self.source_index,
+		}
+
+
+@dataclass(frozen=True)
+class FullTextMatchResult:
+	"""One full-text candidate prepared for query-service fusion."""
+
+	logical_object_id: str
+	physical_object_id: str
+	object_type: Literal["chunk", "entity"]
+	primary_index: StorageFTSTable
+	matched_indexes: tuple[StorageFTSTable, ...]
+	source_index: StorageSourceIndex
+	score: float
+	match_reason: str
+	relative_path: str | None
+	title: str | None
+	snippet: str | None
+	file_id: str | None
+	chunk_id: str | None
+	entity_id: str | None
+	profile_id: str
+	source_scope: str
+	domain: str | None
+	doc_type: str | None
+	module_names: tuple[str, ...] = ()
+	metadata: dict[str, object] = field(default_factory=dict)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"logical_object_id": self.logical_object_id,
+			"physical_object_id": self.physical_object_id,
+			"object_type": self.object_type,
+			"primary_index": self.primary_index,
+			"matched_indexes": list(self.matched_indexes),
+			"source_index": self.source_index,
+			"score": self.score,
+			"match_reason": self.match_reason,
+			"relative_path": self.relative_path,
+			"title": self.title,
+			"snippet": self.snippet,
+			"file_id": self.file_id,
+			"chunk_id": self.chunk_id,
+			"entity_id": self.entity_id,
+			"profile_id": self.profile_id,
+			"source_scope": self.source_scope,
+			"domain": self.domain,
+			"doc_type": self.doc_type,
+			"module_names": list(self.module_names),
+			"metadata": dict(self.metadata),
+		}
+
+
+@dataclass(frozen=True)
+class FullTextSearchResult:
+	"""Stable output of storage-backed full-text retrieval."""
+
+	request: FullTextSearchRequest
+	matches: tuple[FullTextMatchResult, ...]
+
+	@property
+	def total_matches(self) -> int:
+		return len(self.matches)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"request": self.request.to_dict(),
+			"total_matches": self.total_matches,
+			"matches": [item.to_dict() for item in self.matches],
+		}
+
+
+@dataclass
+class _FullTextAggregate:
+	best_match: FTSMatch
+	total_score: float
+	matched_indexes: list[StorageFTSTable] = field(default_factory=list)
+	reasons: list[str] = field(default_factory=list)
+	module_names: list[str] = field(default_factory=list)
 
 
 class SymbolRetriever:
@@ -501,6 +646,149 @@ class SymbolRetriever:
 		return fts_score, "matched entity FTS candidate"
 
 
+class FullTextRetriever:
+	"""Query chunk/entity/doc/code FTS indexes through the stable storage contract."""
+
+	def __init__(self, reader: StorageReader) -> None:
+		self._reader = reader
+
+	@classmethod
+	def from_storage(cls, adapter: StorageAdapter) -> FullTextRetriever:
+		return cls(adapter.reader())
+
+	def search(self, request: FullTextSearchRequest) -> FullTextSearchResult:
+		logical_entities = tuple(self._reader.logical_entities(request.scope))
+		module_names_by_file_id = self._module_names_by_file_id(request.scope, logical_entities)
+		aggregates: dict[tuple[str, str], _FullTextAggregate] = {}
+		query_text = request.normalized_query or request.query.strip()
+
+		for index_name in request.indexes:
+			fts_matches = self._reader.search_fts(
+				FTSQuery(
+					index_name=index_name,
+					query=query_text,
+					scope=request.scope,
+					top_k=max(request.top_k * 4, _FULLTEXT_FTS_TOP_K),
+					domain=request.domain,
+					doc_type=request.doc_type,
+					source_index=request.source_index,
+				)
+			)
+			for match in fts_matches:
+				module_names = self._module_names_for_match(match, module_names_by_file_id)
+				if request.module and not module_filter_matches(request.module, module_names):
+					continue
+				aggregate_key = (match.object_type, match.logical_object_id)
+				reason = build_fulltext_match_reason(index_name, request)
+				aggregate = aggregates.get(aggregate_key)
+				if aggregate is None:
+					aggregates[aggregate_key] = _FullTextAggregate(
+						best_match=match,
+						total_score=match.score,
+						matched_indexes=[index_name],
+						reasons=[reason],
+						module_names=list(module_names),
+					)
+					continue
+				aggregate.best_match = prefer_fulltext_match(aggregate.best_match, match)
+				aggregate.total_score += match.score
+				aggregate.matched_indexes.append(index_name)
+				aggregate.reasons.append(reason)
+				aggregate.module_names.extend(module_names)
+
+		matches = tuple(
+			sorted(
+				(self._to_fulltext_match(item) for item in aggregates.values()),
+				key=lambda item: (-item.score, item.primary_index, item.logical_object_id),
+			)[: request.top_k]
+		)
+		return FullTextSearchResult(request=request, matches=matches)
+
+	def _module_names_by_file_id(
+		self,
+		scope: QueryScope,
+		logical_entities: tuple[LogicalEntity, ...],
+	) -> dict[str, tuple[str, ...]]:
+		file_entity_ids = {
+			item.logical_object_id: item.record.file_id
+			for item in logical_entities
+			if item.record.entity_type == "File"
+		}
+		module_names_by_entity_id = {
+			item.logical_object_id: item.record.qualified_name or item.record.name
+			for item in logical_entities
+			if item.record.entity_type == "Module"
+		}
+		module_names_by_file_id: dict[str, list[str]] = defaultdict(list)
+		for relation in self._reader.logical_relations(scope):
+			if relation.record.relation_type != "belongs_to_module":
+				continue
+			file_id = file_entity_ids.get(relation.record.src_entity_id)
+			module_name = module_names_by_entity_id.get(relation.record.dst_entity_id)
+			if file_id is None or module_name is None:
+				continue
+			module_names_by_file_id[file_id].append(module_name)
+		return {
+			file_id: tuple(dict.fromkeys(name for name in names if name))
+			for file_id, names in module_names_by_file_id.items()
+		}
+
+	def _module_names_for_match(
+		self,
+		match: FTSMatch,
+		module_names_by_file_id: dict[str, tuple[str, ...]],
+	) -> tuple[str, ...]:
+		module_names: list[str] = []
+		if match.file_id is not None:
+			module_names.extend(module_names_by_file_id.get(match.file_id, ()))
+		if match.object_type == "entity" and match.entity_id is not None:
+			record = self._reader.get_entity(match.entity_id)
+			if record is not None:
+				module_names.extend(metadata_text_list(record.metadata, "module"))
+				module_names.extend(metadata_text_list(record.metadata, "modules"))
+				if record.entity_type == "Module":
+					module_names.extend(
+						name
+						for name in (
+							record.name,
+							record.qualified_name,
+							*metadata_text_list(record.metadata, "aliases"),
+						)
+						if name
+					)
+		if match.object_type == "chunk" and match.chunk_id is not None:
+			record = self._reader.get_chunk(match.chunk_id)
+			if record is not None:
+				module_names.extend(metadata_text_list(record.metadata, "module"))
+				module_names.extend(metadata_text_list(record.metadata, "modules"))
+		return tuple(dict.fromkeys(name.strip() for name in module_names if name.strip()))
+
+	def _to_fulltext_match(self, aggregate: _FullTextAggregate) -> FullTextMatchResult:
+		best_match = aggregate.best_match
+		return FullTextMatchResult(
+			logical_object_id=best_match.logical_object_id,
+			physical_object_id=best_match.physical_object_id,
+			object_type=best_match.object_type,
+			primary_index=best_match.index_name,
+			matched_indexes=tuple(dict.fromkeys(aggregate.matched_indexes)),
+			source_index=best_match.source_index,
+			score=round(aggregate.total_score, 6),
+			match_reason="; ".join(dict.fromkeys(reason for reason in aggregate.reasons if reason)),
+			relative_path=best_match.relative_path,
+			title=best_match.title,
+			snippet=best_match.snippet,
+			file_id=best_match.file_id,
+			chunk_id=best_match.chunk_id,
+			entity_id=best_match.entity_id,
+			profile_id=best_match.profile_id,
+			source_scope=best_match.source_scope,
+			domain=best_match.domain,
+			doc_type=best_match.doc_type,
+			module_names=tuple(dict.fromkeys(aggregate.module_names)),
+			metadata=dict(best_match.metadata),
+		)
+
+
 def resolve_entity_filter(
 	entity_type: RequestedSymbolEntityType | str | None,
 ) -> tuple[ResolvedSymbolEntityType, ...]:
@@ -514,6 +802,13 @@ def normalize_exact_text(value: str) -> str:
 
 def normalize_lookup_text(value: str) -> str:
 	return " ".join(_LOOKUP_TOKEN_RE.findall(value.lower()))
+
+
+def normalize_fts_lookup_text(value: str) -> str:
+	tokens = _FTS_LOOKUP_TOKEN_RE.findall(value.strip())
+	if tokens:
+		return " ".join(token for token in tokens if token)
+	return " ".join(segment for segment in value.strip().split() if segment)
 
 
 def fuzzy_similarity(query: str, target: str) -> float:
@@ -575,3 +870,61 @@ def build_disambiguation_key(
 	if profile_id != ALL_SCOPE:
 		parts.append(f"profile={profile_id}")
 	return " | ".join(parts)
+
+
+def build_fulltext_match_reason(
+	index_name: StorageFTSTable,
+	request: FullTextSearchRequest,
+) -> str:
+	parts = [_FULLTEXT_REASON_BY_INDEX[index_name]]
+	if request.domain:
+		parts.append(f"domain={request.domain}")
+	if request.doc_type:
+		parts.append(f"doc_type={request.doc_type}")
+	if request.module:
+		parts.append(f"module={request.module}")
+	if request.source_index:
+		parts.append(f"source_index={request.source_index}")
+	if request.scope.profile_id != ALL_SCOPE:
+		parts.append(f"profile={request.scope.profile_id}")
+	return "; ".join(parts)
+
+
+def module_filter_matches(module_filter: str, module_names: tuple[str, ...]) -> bool:
+	if not module_names:
+		return False
+	filter_exact = normalize_exact_text(module_filter)
+	filter_lookup = normalize_lookup_text(module_filter)
+	for module_name in module_names:
+		normalized_exact = normalize_exact_text(module_name)
+		normalized_lookup = normalize_lookup_text(module_name)
+		if filter_exact and filter_exact in normalized_exact:
+			return True
+		if filter_lookup and filter_lookup in normalized_lookup:
+			return True
+	return False
+
+
+def source_priority(source_index: StorageSourceIndex) -> int:
+	if source_index == "overlay":
+		return 3
+	if source_index == "merged":
+		return 2
+	return 1
+
+
+def bm25_score(match: FTSMatch) -> float:
+	value = match.metadata.get("bm25", 0.0)
+	if isinstance(value, (int, float)):
+		return float(value)
+	return 0.0
+
+
+def prefer_fulltext_match(current: FTSMatch, candidate: FTSMatch) -> FTSMatch:
+	if source_priority(candidate.source_index) > source_priority(current.source_index):
+		return candidate
+	if source_priority(candidate.source_index) < source_priority(current.source_index):
+		return current
+	if bm25_score(candidate) < bm25_score(current):
+		return candidate
+	return current
