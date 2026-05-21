@@ -27,6 +27,7 @@ def traverse_entity_graph(
     *,
     scope: QueryScope,
     max_depth: int = 1,
+    relation_types: tuple[str, ...] | None = None,
 ) -> GraphTraversalResult:
     """Traverse live logical relations without returning tombstoned entities."""
 
@@ -50,6 +51,8 @@ def traverse_entity_graph(
             break
         next_frontier: set[str] = set()
         for relation in all_relations:
+            if relation_types is not None and relation.record.relation_type not in relation_types:
+                continue
             src = relation.record.src_entity_id
             dst = relation.record.dst_entity_id
             if src not in live_entities or dst not in live_entities:

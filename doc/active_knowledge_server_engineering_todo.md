@@ -1091,21 +1091,21 @@ TODO：
 
 ### Q5-06 GraphRetriever 与 graph expansion
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-06`、`P4-07`
 
 TODO：
 
-- [ ] 支持 contains、defines、calls、guarded_by_macro、belongs_to_layer、implements_feature 等关系扩展。
-- [ ] 支持 max depth。
-- [ ] 支持 profile filter。
-- [ ] 过滤 tombstone 和 dangling relation。
+- [x] 支持 contains、defines、calls、guarded_by_macro、belongs_to_layer、implements_feature 等关系扩展。
+- [x] 支持 max depth。
+- [x] 支持 profile filter。
+- [x] 过滤 tombstone 和 dangling relation。
 
 验收标准：
 
-- module、feature、profile 视角查询能返回局部关系图。
+- [x] module、feature、profile 视角查询能返回局部关系图；已验证 `tests/unit/test_graph_retriever.py`，并通过 `tests/unit/test_graph_retriever.py tests/unit/test_sqlite_relations.py -k graph` 邻接 smoke。
 
 ### Q5-07 Fusion、rerank 与上下文组装
 

@@ -10,9 +10,12 @@ from difflib import SequenceMatcher
 from pathlib import PurePosixPath
 from typing import Final, Literal, Protocol, cast
 
+from active_knowledge_server.connectors.workspace import WorkspaceConnector
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.indexing.embeddings import LOCAL_EMBEDDING_DIMENSIONS, embed_text_locally
+from active_knowledge_server.indexing.workspace_map import WorkspaceMapBuilder
 from active_knowledge_server.models.responses import Warning
+from active_knowledge_server.query.graph import traverse_entity_graph
 from active_knowledge_server.storage import (
 	ALL_SCOPE,
 	FTSMatch,
@@ -46,6 +49,7 @@ RequestedSymbolEntityType = Literal[
 ResolvedSymbolEntityType = Literal["Function", "Macro", "Type", "File", "Module", "Directory"]
 SymbolMatchKind = Literal["exact", "fuzzy", "alias", "doc_mention"]
 VectorSearchObjectType = Literal["chunk", "entity", "evidence"]
+GraphNodeType = Literal["entity", "layer", "feature"]
 
 _LOOKUP_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9]+")
 _FTS_LOOKUP_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9_]+")
@@ -54,6 +58,22 @@ _ENTITY_FTS_TOP_K: Final = 24
 _FULLTEXT_FTS_TOP_K: Final = 24
 _VECTOR_SEARCH_TOP_K: Final = 24
 _FUZZY_RATIO_THRESHOLD: Final = 0.72
+_DEFAULT_GRAPH_RELATION_TYPES: Final[tuple[str, ...]] = (
+	"contains",
+	"defines",
+	"calls",
+	"guarded_by_macro",
+	"belongs_to_module",
+	"enabled_by",
+	"disabled_by",
+	"unknown_by",
+	"belongs_to_layer",
+	"implements_feature",
+)
+_SYNTHETIC_GRAPH_RELATION_TYPES: Final[tuple[str, ...]] = (
+	"belongs_to_layer",
+	"implements_feature",
+)
 _DEFAULT_FULLTEXT_INDEXES: Final[tuple[StorageFTSTable, ...]] = (
 	"chunk_fts",
 	"entity_fts",
@@ -487,6 +507,116 @@ class VectorSearchResult:
 			"matches": [item.to_dict() for item in self.matches],
 			"fallback_matches": [item.to_dict() for item in self.fallback_matches],
 			"warnings": [item.to_dict() for item in self.warnings],
+		}
+
+
+@dataclass(frozen=True)
+class GraphSearchRequest:
+	"""Stable request for bounded graph expansion over live logical relations."""
+
+	seed_entity_ids: tuple[str, ...]
+	scope: QueryScope = field(default_factory=QueryScope)
+	relation_types: tuple[str, ...] = _DEFAULT_GRAPH_RELATION_TYPES
+	max_depth: int = 1
+
+	def __post_init__(self) -> None:
+		if not any(entity_id.strip() for entity_id in self.seed_entity_ids):
+			raise ValueError("seed_entity_ids must not be empty")
+		if self.max_depth < 0:
+			raise ValueError("max_depth must be >= 0")
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"seed_entity_ids": list(self.seed_entity_ids),
+			"scope": {
+				"snapshot_id": self.scope.snapshot_id,
+				"profile_id": self.scope.profile_id,
+				"source_scope": self.scope.source_scope,
+				"path_scope": self.scope.path_scope,
+				"include_inactive": self.scope.include_inactive,
+			},
+			"relation_types": list(self.relation_types),
+			"max_depth": self.max_depth,
+		}
+
+
+@dataclass(frozen=True)
+class GraphNodeResult:
+	"""One graph node resolved from an entity or workspace projection view."""
+
+	node_id: str
+	node_type: GraphNodeType
+	name: str
+	depth: int
+	relative_path: str | None = None
+	entity_type: str | None = None
+	profile_id: str = ALL_SCOPE
+	module_names: tuple[str, ...] = ()
+	metadata: dict[str, object] = field(default_factory=dict)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"node_id": self.node_id,
+			"node_type": self.node_type,
+			"name": self.name,
+			"depth": self.depth,
+			"relative_path": self.relative_path,
+			"entity_type": self.entity_type,
+			"profile_id": self.profile_id,
+			"module_names": list(self.module_names),
+			"metadata": dict(self.metadata),
+		}
+
+
+@dataclass(frozen=True)
+class GraphRelationResult:
+	"""One returned edge in a local relation graph."""
+
+	relation_id: str
+	relation_type: str
+	src_node_id: str
+	dst_node_id: str
+	depth: int
+	source_index: str
+	profile_id: str = ALL_SCOPE
+	synthetic: bool = False
+	metadata: dict[str, object] = field(default_factory=dict)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"relation_id": self.relation_id,
+			"relation_type": self.relation_type,
+			"src_node_id": self.src_node_id,
+			"dst_node_id": self.dst_node_id,
+			"depth": self.depth,
+			"source_index": self.source_index,
+			"profile_id": self.profile_id,
+			"synthetic": self.synthetic,
+			"metadata": dict(self.metadata),
+		}
+
+
+@dataclass(frozen=True)
+class GraphSearchResult:
+	"""Bounded graph expansion response for query-time retrieval."""
+
+	request: GraphSearchRequest
+	nodes: tuple[GraphNodeResult, ...]
+	relations: tuple[GraphRelationResult, ...]
+	total_nodes: int
+	total_relations: int
+	skipped_relation_ids: tuple[str, ...] = ()
+	warnings: tuple[Warning, ...] = ()
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"request": self.request.to_dict(),
+			"total_nodes": self.total_nodes,
+			"total_relations": self.total_relations,
+			"skipped_relation_ids": list(self.skipped_relation_ids),
+			"warnings": [item.to_dict() for item in self.warnings],
+			"nodes": [item.to_dict() for item in self.nodes],
+			"relations": [item.to_dict() for item in self.relations],
 		}
 
 
@@ -1254,6 +1384,300 @@ class VectorRetriever:
 		return True
 
 
+class GraphRetriever:
+	"""Expand a local relation graph from seed entities over live logical views."""
+
+	def __init__(
+		self,
+		reader: StorageReader,
+		*,
+		workspace_connector: WorkspaceConnector | None = None,
+		workspace_map_builder: WorkspaceMapBuilder | None = None,
+	) -> None:
+		self._reader = reader
+		self._workspace_connector = workspace_connector
+		self._workspace_map_builder = workspace_map_builder
+
+	@classmethod
+	def from_storage(cls, adapter: StorageAdapter) -> GraphRetriever:
+		return cls(adapter.reader())
+
+	@classmethod
+	def from_config(
+		cls,
+		config: ActiveKnowledgeConfig,
+		*,
+		metadata_adapter: StorageAdapter,
+		workspace_connector: WorkspaceConnector | None = None,
+		workspace_map_builder: WorkspaceMapBuilder | None = None,
+	) -> GraphRetriever:
+		return cls(
+			metadata_adapter.reader(),
+			workspace_connector=workspace_connector or WorkspaceConnector.from_config(config),
+			workspace_map_builder=workspace_map_builder or WorkspaceMapBuilder.from_config(config),
+		)
+
+	def search(self, request: GraphSearchRequest) -> GraphSearchResult:
+		seed_entity_ids = tuple(
+			dict.fromkeys(
+				entity_id.strip()
+				for entity_id in request.seed_entity_ids
+				if entity_id and entity_id.strip()
+			)
+		)
+		relation_types = tuple(
+			dict.fromkeys(
+				relation_type.strip()
+				for relation_type in request.relation_types
+				if relation_type and relation_type.strip()
+			)
+		)
+		live_relation_types = tuple(
+			relation_type
+			for relation_type in relation_types
+			if relation_type not in _SYNTHETIC_GRAPH_RELATION_TYPES
+		)
+		traversal = traverse_entity_graph(
+			self._reader,
+			seed_entity_ids,
+			scope=request.scope,
+			max_depth=request.max_depth,
+			relation_types=live_relation_types,
+		)
+		logical_entities = {
+			item.logical_object_id: item
+			for item in self._reader.logical_entities(request.scope)
+			if item.logical_object_id in traversal.entity_ids
+		}
+		physical_to_logical_entity_ids = {
+			item.physical_object_id: item.logical_object_id for item in logical_entities.values()
+		}
+		file_records = {record.file_id: record for record in self._reader.iter_files(request.scope)}
+		nodes_by_id = {
+			logical_entity_id: self._to_graph_entity_node(
+				logical_entity,
+				depth=traversal.depth_by_entity_id.get(logical_entity_id, 0),
+				file_records=file_records,
+			)
+			for logical_entity_id, logical_entity in logical_entities.items()
+		}
+		relations = [
+			self._to_graph_relation(relation, depth_by_entity_id=traversal.depth_by_entity_id)
+			for relation in traversal.relations
+			if relation.record.src_entity_id in nodes_by_id and relation.record.dst_entity_id in nodes_by_id
+		]
+		warnings: list[Warning] = []
+		if any(relation_type in _SYNTHETIC_GRAPH_RELATION_TYPES for relation_type in relation_types):
+			synthetic_nodes, synthetic_relations, synthetic_warnings = self._build_workspace_projection_context(
+				relation_types=relation_types,
+				scope=request.scope,
+				depth_by_entity_id=traversal.depth_by_entity_id,
+				physical_to_logical_entity_ids=physical_to_logical_entity_ids,
+				max_depth=request.max_depth,
+			)
+			for node in synthetic_nodes:
+				nodes_by_id[node.node_id] = node
+			relations.extend(synthetic_relations)
+			warnings.extend(synthetic_warnings)
+		sorted_nodes = tuple(
+			sorted(nodes_by_id.values(), key=lambda item: (item.depth, item.node_type, item.node_id))
+		)
+		sorted_relations = tuple(
+			sorted(
+				relations,
+				key=lambda item: (item.depth, item.relation_type, item.src_node_id, item.dst_node_id, item.relation_id),
+			)
+		)
+		return GraphSearchResult(
+			request=request,
+			nodes=sorted_nodes,
+			relations=sorted_relations,
+			total_nodes=len(sorted_nodes),
+			total_relations=len(sorted_relations),
+			skipped_relation_ids=traversal.skipped_relation_ids,
+			warnings=dedupe_query_warnings(warnings),
+		)
+
+	def _to_graph_entity_node(
+		self,
+		logical_entity: LogicalEntity,
+		*,
+		depth: int,
+		file_records: dict[str, FileRecord],
+	) -> GraphNodeResult:
+		record = logical_entity.record
+		file_record = file_records.get(record.file_id)
+		module_names = list(metadata_text_list(record.metadata, "module"))
+		module_names.extend(metadata_text_list(record.metadata, "modules"))
+		if record.entity_type == "Module":
+			module_names.extend(name for name in (record.qualified_name, record.name) if name)
+		return GraphNodeResult(
+			node_id=logical_entity.logical_object_id,
+			node_type="entity",
+			name=record.name,
+			depth=depth,
+			relative_path=None if file_record is None else file_record.relative_path,
+			entity_type=record.entity_type,
+			profile_id=record.profile_id,
+			module_names=tuple(dict.fromkeys(name.strip() for name in module_names if name.strip())),
+			metadata={
+				"qualified_name": record.qualified_name,
+				"path": record.path,
+				"physical_entity_id": logical_entity.physical_object_id,
+				"source_index": logical_entity.source_index,
+				"source_scope": record.source_scope,
+				"file_id": record.file_id,
+				"start_line": record.start_line,
+				"end_line": record.end_line,
+				**dict(record.metadata),
+			},
+		)
+
+	def _to_graph_relation(
+		self,
+		relation: LogicalRelation,
+		*,
+		depth_by_entity_id: dict[str, int],
+	) -> GraphRelationResult:
+		return GraphRelationResult(
+			relation_id=relation.logical_object_id,
+			relation_type=relation.record.relation_type,
+			src_node_id=relation.record.src_entity_id,
+			dst_node_id=relation.record.dst_entity_id,
+			depth=max(
+				depth_by_entity_id.get(relation.record.src_entity_id, 0),
+				depth_by_entity_id.get(relation.record.dst_entity_id, 0),
+			),
+			source_index=relation.source_index,
+			profile_id=relation.record.profile_id,
+			metadata=dict(relation.record.metadata),
+		)
+
+	def _build_workspace_projection_context(
+		self,
+		*,
+		relation_types: tuple[str, ...],
+		scope: QueryScope,
+		depth_by_entity_id: dict[str, int],
+		physical_to_logical_entity_ids: dict[str, str],
+		max_depth: int,
+	) -> tuple[tuple[GraphNodeResult, ...], list[GraphRelationResult], tuple[Warning, ...]]:
+		if self._workspace_connector is None or self._workspace_map_builder is None:
+			return (), [], (
+				build_graph_warning(
+					code="graph.workspace_context_unavailable",
+					message="Workspace context expansion is unavailable, so only live entity relations were returned.",
+					details={"requested_relation_types": list(relation_types)},
+				),
+			)
+		try:
+			workspace_inventory = self._workspace_connector.scan()
+			artifact = self._workspace_map_builder.collect(
+				snapshot_id=scope.snapshot_id,
+				workspace_inventory=workspace_inventory,
+				reader=self._reader,
+			)
+		except Exception as exc:
+			return (), [], (
+				build_graph_warning(
+					code="graph.workspace_context_unavailable",
+					message="Workspace context expansion failed, so only live entity relations were returned.",
+					details={
+						"requested_relation_types": list(relation_types),
+						"error_kind": exc.__class__.__name__,
+					},
+				),
+			)
+
+		nodes_by_id: dict[str, GraphNodeResult] = {}
+		relations: list[GraphRelationResult] = []
+		layer_view = artifact.views.get("layer")
+		if layer_view is not None and "belongs_to_layer" in relation_types:
+			self._append_workspace_projection_edges(
+				nodes_by_id=nodes_by_id,
+				relations=relations,
+				relation_type="belongs_to_layer",
+				node_type="layer",
+				items=layer_view.items,
+				depth_by_entity_id=depth_by_entity_id,
+				physical_to_logical_entity_ids=physical_to_logical_entity_ids,
+				max_depth=max_depth,
+			)
+		feature_view = artifact.views.get("feature")
+		if feature_view is not None and "implements_feature" in relation_types:
+			self._append_workspace_projection_edges(
+				nodes_by_id=nodes_by_id,
+				relations=relations,
+				relation_type="implements_feature",
+				node_type="feature",
+				items=feature_view.items,
+				depth_by_entity_id=depth_by_entity_id,
+				physical_to_logical_entity_ids=physical_to_logical_entity_ids,
+				max_depth=max_depth,
+			)
+		return tuple(nodes_by_id.values()), relations, ()
+
+	def _append_workspace_projection_edges(
+		self,
+		*,
+		nodes_by_id: dict[str, GraphNodeResult],
+		relations: list[GraphRelationResult],
+		relation_type: str,
+		node_type: Literal["layer", "feature"],
+		items: tuple[object, ...],
+		depth_by_entity_id: dict[str, int],
+		physical_to_logical_entity_ids: dict[str, str],
+		max_depth: int,
+	) -> None:
+		for item in items:
+			entity_ids = tuple(
+				sorted(
+					{
+						logical_entity_id
+						for physical_entity_id in getattr(item, "entity_ids")
+						for logical_entity_id in [physical_to_logical_entity_ids.get(physical_entity_id)]
+						if logical_entity_id is not None
+						and logical_entity_id in depth_by_entity_id
+						and depth_by_entity_id[logical_entity_id] + 1 <= max_depth
+					}
+				)
+			)
+			if not entity_ids:
+				continue
+			node_id = getattr(item, "item_id")
+			nodes_by_id[node_id] = GraphNodeResult(
+				node_id=node_id,
+				node_type=node_type,
+				name=getattr(item, "name"),
+				depth=min(depth_by_entity_id[entity_id] for entity_id in entity_ids) + 1,
+				relative_path=(getattr(item, "source_paths")[0] if len(getattr(item, "source_paths")) == 1 else None),
+				module_names=getattr(item, "module_names"),
+				metadata={
+					"summary": getattr(item, "summary"),
+					"source_paths": list(getattr(item, "source_paths")),
+					"related_items": list(getattr(item, "related_items")),
+					"member_entity_ids": list(entity_ids),
+					**dict(getattr(item, "metadata")),
+				},
+			)
+			for entity_id in entity_ids:
+				relations.append(
+					GraphRelationResult(
+						relation_id=f"synthetic:{relation_type}:{entity_id}:{node_id}",
+						relation_type=relation_type,
+						src_node_id=entity_id,
+						dst_node_id=node_id,
+						depth=depth_by_entity_id[entity_id] + 1,
+						source_index="derived",
+						synthetic=True,
+						metadata={
+							"view_kind": getattr(item, "kind"),
+							"source_paths": list(getattr(item, "source_paths")),
+						},
+					)
+				)
+
+
 def resolve_entity_filter(
 	entity_type: RequestedSymbolEntityType | str | None,
 ) -> tuple[ResolvedSymbolEntityType, ...]:
@@ -1390,6 +1814,21 @@ def build_vector_warning(
 		details=details,
 		actionable=True,
 		suggested_action=_VECTOR_WARNING_ACTIONS.get(code, "Review retriever availability and retry."),
+	)
+
+
+def build_graph_warning(
+	*,
+	code: str,
+	message: str,
+	details: dict[str, object],
+) -> Warning:
+	return Warning(
+		level="caution",
+		code=code,
+		message=message,
+		details=details,
+		actionable=False,
 	)
 
 
