@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal
@@ -9,6 +12,8 @@ from typing import Final, Literal
 from active_knowledge_server.security.secret_scan import SecretScanReportEntry, SecretScanner
 
 EMBEDDING_PREPARATION_SCHEMA_VERSION: Final = "embedding_preparation.v1"
+LOCAL_EMBEDDING_DIMENSIONS: Final = 24
+_LOCAL_TOKEN_RE: Final = re.compile(r"[A-Za-z0-9_]+")
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,32 @@ class EmbeddingPreparationResult:
 			"accepted_inputs": [item.to_dict() for item in self.accepted_inputs],
 			"skipped_reports": [report.to_dict() for report in self.skipped_reports],
 		}
+
+
+def embed_text_locally(
+	text: str,
+	*,
+	dimensions: int = LOCAL_EMBEDDING_DIMENSIONS,
+) -> tuple[float, ...]:
+	"""Return a deterministic offline embedding shared by indexing and query."""
+
+	if dimensions < 1:
+		raise ValueError("dimensions must be >= 1")
+	vector = [0.0] * dimensions
+	for token in _LOCAL_TOKEN_RE.findall(text.lower()):
+		digest = hashlib.sha256(token.encode("utf-8")).digest()
+		primary = digest[0] % dimensions
+		secondary = digest[1] % dimensions
+		sign = 1.0 if digest[2] % 2 == 0 else -1.0
+		weight = 1.0 + (digest[3] / 255.0)
+		vector[primary] += sign * weight
+		vector[secondary] += sign * 0.5
+	if not any(vector):
+		vector[0] = 1.0
+	norm = math.sqrt(sum(component * component for component in vector))
+	if norm == 0.0:
+		return tuple(0.0 for _ in vector)
+	return tuple(component / norm for component in vector)
 
 
 def prepare_embedding_inputs(

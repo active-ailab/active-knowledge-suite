@@ -1072,21 +1072,22 @@ TODO：
 
 ### Q5-05 VectorRetriever
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`S2-04`、`P4-03`
+- 输出：已在 `query/retrievers.py` 实现 `LocalQueryEmbedder`、`VectorSearchRequest`/`VectorSearchResult` 与基于 `VectorStoreReader.search()` 的 `VectorRetriever`，覆盖 baseline/delta vector 合并召回、storage 层 tombstone/replacement 失效过滤、`embedding.disabled` / `embedding.version_mismatch` 场景下回退到 `FullTextRetriever` 并返回结构化 warning；同时将 deterministic local embedding 下沉到 `indexing/embeddings.py` 供 `DocumentIndexer` 与查询侧共享，并补充 `tests/unit/test_vector_retriever.py` 聚焦回归。
 
 TODO：
 
-- [ ] 查询 baseline vectors 和 delta vectors。
-- [ ] 根据 tombstone/replacement 过滤失效结果。
-- [ ] embedding 不可用时降级为 FTS，并返回 warning。
-- [ ] 支持离线 embedding provider 配置。
+- [x] 查询 baseline vectors 和 delta vectors。
+- [x] 根据 tombstone/replacement 过滤失效结果。
+- [x] embedding 不可用时降级为 FTS，并返回 warning。
+- [x] 支持离线 embedding provider 配置。
 
 验收标准：
 
-- embedding disabled 时查询仍可用。
+- [x] embedding disabled 时查询仍可用；已验证 `tests/unit/test_vector_retriever.py`，并通过 `tests/unit/test_vector_retriever.py tests/unit/test_lancedb_store.py tests/unit/test_doc_indexer.py tests/unit/test_fulltext_retriever.py` 邻接 smoke。
 
 ### Q5-06 GraphRetriever 与 graph expansion
 

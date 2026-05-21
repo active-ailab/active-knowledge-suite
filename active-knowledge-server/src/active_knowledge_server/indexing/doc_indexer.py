@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,6 +22,7 @@ from active_knowledge_server.indexing.embeddings import (
 	EMBEDDING_PREPARATION_SCHEMA_VERSION,
 	EmbeddingInput,
 	EmbeddingPreparationResult,
+	embed_text_locally,
 	prepare_embedding_inputs,
 )
 from active_knowledge_server.indexing.snapshot import CURRENT_SNAPSHOT_ID
@@ -382,21 +382,7 @@ class DocumentIndexer:
 	def embed_text(self, text: str) -> tuple[float, ...]:
 		"""Return a deterministic local embedding for one text payload."""
 
-		vector = [0.0] * self.embedding_dimensions
-		for token in _TOKEN_RE.findall(text.lower()):
-			digest = hashlib.sha256(token.encode("utf-8")).digest()
-			primary = digest[0] % self.embedding_dimensions
-			secondary = digest[1] % self.embedding_dimensions
-			sign = 1.0 if digest[2] % 2 == 0 else -1.0
-			weight = 1.0 + (digest[3] / 255.0)
-			vector[primary] += sign * weight
-			vector[secondary] += sign * 0.5
-		if not any(vector):
-			vector[0] = 1.0
-		norm = math.sqrt(sum(component * component for component in vector))
-		if norm == 0.0:
-			return tuple(0.0 for _ in vector)
-		return tuple(component / norm for component in vector)
+		return embed_text_locally(text, dimensions=self.embedding_dimensions)
 
 	def _build_source_records(self, manifest: SourceDocsManifest) -> tuple[SourceRecord, ...]:
 		root = Path(manifest.source_docs_root)
