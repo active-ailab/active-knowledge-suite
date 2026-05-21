@@ -1147,19 +1147,19 @@ TODO：
 
 ### Q5-09 零结果/多结果/歧义/低置信契约测试
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`TEST`
 - 依赖：`D0-03`、`Q5-01` 至 `Q5-08`
 
 TODO：
 
-- [ ] 构造 zero result fixture。
-- [ ] 构造 multi result fixture。
-- [ ] 构造 ambiguous fixture。
-- [ ] 构造 low confidence fixture。
-- [ ] 构造 partial_ready fixture。
-- [ ] 构造 blocked fixture。
+- [x] 构造 zero result fixture。
+- [x] 构造 multi result fixture。
+- [x] 构造 ambiguous fixture。
+- [x] 构造 low confidence fixture。
+- [x] 构造 partial_ready fixture。
+- [x] 构造 blocked fixture。
 
 验收标准：
 
@@ -1684,7 +1684,7 @@ V1 可以发布的最低功能边界：
 - [ ] `kb_search`、`docs_search`、`code_resolve`、`code_context`、`workspace_view`、`evidence_bundle` 可用。
 - [ ] `config_impact` 有 profile/macro 初版能力。
 - [ ] 所有查询返回 evidence、warnings、schema_version。
-- [ ] 零结果、多结果、歧义、低置信、partial_ready、blocked 契约测试通过。
+- [x] 零结果、多结果、歧义、低置信、partial_ready、blocked 契约测试通过。
 - [ ] fail-safe remote security 测试通过。
 - [ ] V1 eval quality/performance/stability gates 达标。
 

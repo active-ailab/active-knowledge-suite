@@ -6,6 +6,7 @@ from pathlib import Path
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.models.query import QueryRequest
+from active_knowledge_server.models.responses import Warning
 from active_knowledge_server.models.routing import RouteTraceEntry, RouterDecision, ToolPlan
 from active_knowledge_server.query import QueryService
 from active_knowledge_server.storage import EntityRecord, LogicalEntity, ProfileRecord, QueryScope, RelationRecord
@@ -158,6 +159,24 @@ def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> Active
     if overrides:
         merged = deep_merge(merged, overrides)
     return resolve_config(cli_overrides=merged, env={}, cwd=tmp_path).model
+
+
+def query_warning(
+    code: str,
+    *,
+    level: str = "caution",
+    message: str | None = None,
+    details: dict[str, object] | None = None,
+    suggested_action: str = "Refine the query and retry.",
+) -> Warning:
+    return Warning(
+        level=level,
+        code=code,
+        message=message or code,
+        details={} if details is None else dict(details),
+        actionable=True,
+        suggested_action=suggested_action,
+    )
 
 
 def test_query_service_fuses_weighted_results_and_emits_retrieval_trace(tmp_path: Path) -> None:
@@ -478,6 +497,152 @@ def test_query_service_returns_zero_result_contract(tmp_path: Path) -> None:
     assert result.next_queries
 
 
+def test_query_service_returns_low_confidence_contract_when_router_is_uncertain(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        RouterDecision(
+            normalized_query="sensor open guide",
+            intent="unknown",
+            confidence=0.32,
+            selected_view="evidence",
+            selected_granularity="doc_section",
+            profile_resolution={
+                "status": "resolved",
+                "resolved_profile_id": "watch",
+                "warnings": [],
+            },
+            warnings=(
+                query_warning(
+                    "router.low_confidence",
+                    message="Router could not classify the query with high confidence.",
+                    details={"top_intent": "api_lookup", "top_score": 0.32},
+                    suggested_action="Add a module, symbol, doc_type, or profile_id and retry.",
+                ),
+            ),
+            retriever_weights={"symbol": 0.0, "fts": 1.0, "vector": 0.0, "graph": 0.0},
+            tool_plan=ToolPlan(route_mode="explore", primary_tool="kb_search"),
+            route_trace=(RouteTraceEntry(stage="route", summary="stub", details={}),),
+        )
+    )
+    fulltext = StubFullTextRetriever(
+        FullTextSearchResult(
+            request=FullTextSearchRequest(query="sensor open guide"),
+            matches=(
+                FullTextMatchResult(
+                    logical_object_id="doc:sensor-open",
+                    physical_object_id="chunk:sensor-open",
+                    object_type="chunk",
+                    primary_index="doc_fts",
+                    matched_indexes=("doc_fts",),
+                    source_index="baseline",
+                    score=0.78,
+                    match_reason="matched API guide",
+                    relative_path="knowledge-sources/api/sensor.md",
+                    title="sensor_open",
+                    snippet="sensor_open API quick reference",
+                    file_id="file-sensor",
+                    chunk_id="chunk-sensor-open",
+                    entity_id=None,
+                    profile_id="watch",
+                    source_scope="api",
+                    domain="engineering",
+                    doc_type="api",
+                    metadata={"start_line": 12, "end_line": 24},
+                ),
+            ),
+        )
+    )
+    service = QueryService(
+        config,
+        router=router,
+        fulltext_retriever=fulltext,
+    )
+
+    result = service.search(QueryRequest(query="sensor open guide", profile_id="watch"))
+
+    assert result.result_status == "low_confidence"
+    assert result.confidence < 0.50
+    assert result.evidence_refs
+    assert any(warning.code == "router.low_confidence" for warning in result.warnings)
+    assert "verify the attached evidence" in result.summary
+
+
+def test_query_service_returns_partial_ready_when_index_is_degraded(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        make_decision(
+            intent="api_lookup",
+            weights={"symbol": 0.0, "fts": 0.70, "vector": 0.30, "graph": 0.0},
+            selected_view="evidence",
+            selected_granularity="doc_section",
+            resolved_profile_id="watch",
+            confidence=0.74,
+        )
+    )
+    fulltext = StubFullTextRetriever(
+        FullTextSearchResult(
+            request=FullTextSearchRequest(query="sensor open"),
+            matches=(
+                FullTextMatchResult(
+                    logical_object_id="doc:sensor-open",
+                    physical_object_id="chunk:sensor-open",
+                    object_type="chunk",
+                    primary_index="doc_fts",
+                    matched_indexes=("doc_fts",),
+                    source_index="baseline",
+                    score=0.86,
+                    match_reason="matched API guide",
+                    relative_path="knowledge-sources/api/sensor.md",
+                    title="sensor_open",
+                    snippet="sensor_open API quick reference",
+                    file_id="file-sensor",
+                    chunk_id="chunk-sensor-open",
+                    entity_id=None,
+                    profile_id="watch",
+                    source_scope="api",
+                    domain="engineering",
+                    doc_type="api",
+                    metadata={"start_line": 12, "end_line": 24},
+                ),
+            ),
+        )
+    )
+    vector = StubVectorRetriever(
+        VectorSearchResult(
+            request=VectorSearchRequest(query="sensor open"),
+            warnings=(
+                query_warning(
+                    "index.partial_ready",
+                    level="degraded",
+                    message="Widget and profile indexes are not ready yet.",
+                    details={
+                        "ready_sources": ["knowledge-sources/api"],
+                        "missing_sources": ["knowledge-sources/widgets"],
+                        "failed_jobs": ["job-17"],
+                        "degradation_chain": ["skip_widgets", "fts_only"],
+                    },
+                    suggested_action="Repair the failed job and rebuild the missing sources.",
+                ),
+            ),
+        )
+    )
+    service = QueryService(
+        config,
+        router=router,
+        fulltext_retriever=fulltext,
+        vector_retriever=vector,
+    )
+
+    result = service.search(QueryRequest(query="sensor open", profile_id="watch"))
+
+    assert result.result_status == "partial_ready"
+    assert result.items
+    assert any(warning.code == "index.partial_ready" for warning in result.warnings)
+    assert result.diagnostics["index_status"]["missing_sources"] == ["knowledge-sources/widgets"]
+
+
 def test_query_service_returns_profile_candidates_for_unresolved_profile_sensitive_query(
     tmp_path: Path,
 ) -> None:
@@ -535,6 +700,76 @@ def test_query_service_returns_profile_candidates_for_unresolved_profile_sensiti
     ]
     assert any(warning.code == "profile.multiple_candidates" for warning in result.warnings)
     assert result.suggested_filters[0].field == "profile_id"
+
+
+def test_query_service_returns_ambiguous_for_invalid_compare_to_profile(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        RouterDecision(
+            normalized_query="CONFIG_HEALTH_BT diff",
+            intent="profile_diff",
+            confidence=0.83,
+            selected_view="profile",
+            selected_granularity="profile",
+            profile_resolution={
+                "status": "resolved",
+                "resolved_profile_id": "mhs003_watch",
+                "warnings": [],
+            },
+            retriever_weights={"symbol": 0.15, "fts": 0.30, "graph": 0.55},
+            tool_plan=ToolPlan(
+                route_mode="chain",
+                primary_tool="config_impact",
+                primary_args={
+                    "macro_or_config": "CONFIG_HEALTH_BT",
+                    "profile_id": "mhs003_watch",
+                    "compare_to": "missing_profile",
+                },
+            ),
+            route_trace=(RouteTraceEntry(stage="route", summary="stub", details={}),),
+            warnings=(),
+        )
+    )
+    reader = StubProfileAwareReader(
+        profiles=(
+            ProfileRecord(
+                profile_record_id="profile:watch",
+                snapshot_id="current",
+                profile_id="mhs003_watch",
+                defconfig_path="configs/mhs003_watch_defconfig",
+                dotconfig_path="build/.config",
+                metadata={
+                    "macro_assignments": {
+                        "CONFIG_HEALTH_BT": {
+                            "value": "y",
+                            "enabled": True,
+                            "value_type": "bool",
+                        }
+                    }
+                },
+            ),
+        ),
+        entities=(),
+        relations=(),
+    )
+    service = QueryService(
+        config,
+        router=router,
+        metadata_adapter=StubMetadataAdapter(reader),
+    )
+
+    result = service.search(
+        QueryRequest(
+            query="CONFIG_HEALTH_BT 在 watch 和 missing_profile 的差异是什么？",
+            profile_id="mhs003_watch",
+            client_context={"compare_to": "missing_profile"},
+        )
+    )
+
+    assert result.result_status == "ambiguous"
+    assert result.diagnostics["required_context"] == ["compare_to"]
+    assert any(warning.code == "profile.invalid" for warning in result.warnings)
+    assert result.next_queries
 
 
 def test_query_service_returns_profile_matrix_for_compare_to_queries(tmp_path: Path) -> None:

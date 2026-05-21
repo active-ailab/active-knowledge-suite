@@ -253,69 +253,24 @@ class QueryService:
 		)
 		limited = reranked[: self._config.query.default_top_k]
 		evidence_refs, evidence_trace = self._build_evidence_refs(limited)
-
-		if not limited:
-			zero_warning = _build_query_warning(
-				code="retrieval.zero_result",
-				level="caution",
-				message="Hybrid fusion did not produce any ranked results.",
-				details={"intent": decision.intent},
-				actionable=True,
-				suggested_action="Add a module, path, symbol, doc_type, or profile_id and retry.",
-			)
-			warnings.append(zero_warning)
-			return QueryResult(
-				tool_name=decision.tool_plan.primary_tool,
-				result_status="zero_result",
-				confidence=0.0,
-				query_intent=decision.intent,
-				snapshot_id=scope.snapshot_id,
-				profile_id=result_profile_id,
-				summary="Hybrid retrieval returned no evidence-bearing candidates.",
-				warnings=dedupe_query_warnings(warnings),
-				next_queries=_suggest_next_queries(request, decision),
-				suggested_filters=(
-					SuggestedFilter(field="view", value=decision.selected_view),
-				),
-				diagnostics={
-					"route": decision.to_dict(),
-					"retrieval_trace": {
-						"route_trace": [item.to_dict() for item in decision.route_trace],
-						"retriever_runs": run_trace,
-						"fusion_strategy": {
-							"name": "weighted_rrf",
-							"rerank_mode": self._reranker.mode,
-							"weights": dict(decision.retriever_weights),
-						},
-						"ranked_candidates": [],
-						"evidence_trace": [],
-					},
-				},
-			)
-
-		items = tuple(self._candidate_to_item(candidate) for candidate in limited)
-		confidence = round(
+		index_status = _extract_partial_ready_index_status(warnings)
+		base_confidence = round(
 			min(1.0, (decision.confidence * 0.85) + 0.15),
 			6,
 		)
-		return QueryResult(
-			tool_name=decision.tool_plan.primary_tool,
-			result_status="ok",
-			confidence=confidence,
-			query_intent=decision.intent,
-			snapshot_id=scope.snapshot_id,
-			profile_id=result_profile_id,
-			summary=_build_summary(decision, limited),
-			items=items,
-			entities=()
-			if graph_result is None
-			else tuple(node.to_dict() for node in graph_result.nodes[: self._config.query.default_top_k]),
-			relations=()
-			if graph_result is None
-			else tuple(relation.to_dict() for relation in graph_result.relations[: self._config.query.default_top_k]),
-			evidence_refs=evidence_refs,
-			warnings=dedupe_query_warnings(warnings),
-			diagnostics={
+
+		if not limited:
+			if index_status is None:
+				zero_warning = _build_query_warning(
+					code="retrieval.zero_result",
+					level="caution",
+					message="Hybrid fusion did not produce any ranked results.",
+					details={"intent": decision.intent},
+					actionable=True,
+					suggested_action="Add a module, path, symbol, doc_type, or profile_id and retry.",
+				)
+				warnings.append(zero_warning)
+			diagnostics = {
 				"route": decision.to_dict(),
 				"retrieval_trace": {
 					"route_trace": [item.to_dict() for item in decision.route_trace],
@@ -325,10 +280,78 @@ class QueryService:
 						"rerank_mode": self._reranker.mode,
 						"weights": dict(decision.retriever_weights),
 					},
-					"ranked_candidates": [candidate.to_dict() for candidate in limited],
-					"evidence_trace": evidence_trace,
+					"ranked_candidates": [],
+					"evidence_trace": [],
 				},
+			}
+			result_status = "zero_result"
+			summary = "Hybrid retrieval returned no evidence-bearing candidates."
+			if index_status is not None:
+				result_status = "partial_ready"
+				summary = _build_partial_ready_summary(decision, ())
+				diagnostics["index_status"] = index_status
+			return QueryResult(
+				tool_name=decision.tool_plan.primary_tool,
+				result_status=result_status,
+				confidence=0.0 if result_status == "zero_result" else base_confidence,
+				query_intent=decision.intent,
+				snapshot_id=scope.snapshot_id,
+				profile_id=result_profile_id,
+				summary=summary,
+				warnings=dedupe_query_warnings(warnings),
+				next_queries=_suggest_next_queries(request, decision),
+				suggested_filters=(
+					SuggestedFilter(field="view", value=decision.selected_view),
+				),
+				diagnostics=diagnostics,
+			)
+
+		items = tuple(self._candidate_to_item(candidate) for candidate in limited)
+		result_status = "ok"
+		summary = _build_summary(decision, limited)
+		confidence = base_confidence
+		if index_status is not None:
+			result_status = "partial_ready"
+			summary = _build_partial_ready_summary(decision, limited)
+		elif _should_return_low_confidence(decision, warnings):
+			warnings = _ensure_low_confidence_warning(decision, warnings)
+			result_status = "low_confidence"
+			summary = _build_low_confidence_summary(decision, limited)
+			confidence = min(base_confidence, 0.49)
+		diagnostics = {
+			"route": decision.to_dict(),
+			"retrieval_trace": {
+				"route_trace": [item.to_dict() for item in decision.route_trace],
+				"retriever_runs": run_trace,
+				"fusion_strategy": {
+					"name": "weighted_rrf",
+					"rerank_mode": self._reranker.mode,
+					"weights": dict(decision.retriever_weights),
+				},
+				"ranked_candidates": [candidate.to_dict() for candidate in limited],
+				"evidence_trace": evidence_trace,
 			},
+		}
+		if index_status is not None:
+			diagnostics["index_status"] = index_status
+		return QueryResult(
+			tool_name=decision.tool_plan.primary_tool,
+			result_status=result_status,
+			confidence=confidence,
+			query_intent=decision.intent,
+			snapshot_id=scope.snapshot_id,
+			profile_id=result_profile_id,
+			summary=summary,
+			items=items,
+			entities=()
+			if graph_result is None
+			else tuple(node.to_dict() for node in graph_result.nodes[: self._config.query.default_top_k]),
+			relations=()
+			if graph_result is None
+			else tuple(relation.to_dict() for relation in graph_result.relations[: self._config.query.default_top_k]),
+			evidence_refs=evidence_refs,
+			warnings=dedupe_query_warnings(warnings),
+			diagnostics=diagnostics,
 		)
 
 	def _symbol_candidates_to_fusion(
@@ -596,17 +619,97 @@ def _suggest_next_queries(request: QueryRequest, decision: RouterDecision) -> tu
 	)
 
 
+def _extract_partial_ready_index_status(
+	warnings: Sequence[Warning],
+) -> dict[str, object] | None:
+	required_keys = {
+		"ready_sources",
+		"missing_sources",
+		"failed_jobs",
+		"degradation_chain",
+	}
+	for warning in warnings:
+		if warning.code != "index.partial_ready":
+			continue
+		if required_keys.issubset(warning.details):
+			return dict(warning.details)
+	return None
+
+
+def _should_return_low_confidence(
+	decision: RouterDecision,
+	warnings: Sequence[Warning],
+) -> bool:
+	return decision.confidence < 0.50 or any(
+		warning.code in {"router.low_confidence", "retrieval.low_confidence"}
+		for warning in warnings
+	)
+
+
+def _ensure_low_confidence_warning(
+	decision: RouterDecision,
+	warnings: Sequence[Warning],
+) -> list[Warning]:
+	if any(
+		warning.code in {"router.low_confidence", "retrieval.low_confidence"}
+		for warning in warnings
+	):
+		return list(warnings)
+	return [
+		*warnings,
+		_build_query_warning(
+			code="retrieval.low_confidence",
+			level="caution",
+			message="Ranked candidates are available, but the supporting evidence remains low-confidence.",
+			details={
+				"intent": decision.intent,
+				"router_confidence": round(decision.confidence, 3),
+			},
+			actionable=True,
+			suggested_action="Add a module, path, symbol, doc_type, or profile_id and retry.",
+		),
+	]
+
+
 def _build_summary(decision: RouterDecision, candidates: Sequence[FusionCandidate]) -> str:
-	sources = sorted(
+	sources = _summary_sources(candidates)
+	return (
+		f"Hybrid fusion returned {len(candidates)} ranked candidates for intent={decision.intent} "
+		f"using {', '.join(sources)}."
+	)
+
+
+def _build_low_confidence_summary(
+	decision: RouterDecision,
+	candidates: Sequence[FusionCandidate],
+) -> str:
+	sources = _summary_sources(candidates)
+	return (
+		f"Low-confidence retrieval returned {len(candidates)} candidate leads for intent={decision.intent} "
+		f"using {', '.join(sources)}; verify the attached evidence before treating this as a conclusion."
+	)
+
+
+def _build_partial_ready_summary(
+	decision: RouterDecision,
+	candidates: Sequence[FusionCandidate],
+) -> str:
+	if not candidates:
+		return "Partial index availability prevented a complete answer; no ranked evidence-bearing candidates were produced."
+	sources = _summary_sources(candidates)
+	return (
+		f"Partial index availability returned {len(candidates)} ranked candidates for intent={decision.intent} "
+		f"using {', '.join(sources)}; missing sources may hide additional evidence."
+	)
+
+
+def _summary_sources(candidates: Sequence[FusionCandidate]) -> list[str]:
+	return sorted(
 		{
 			signal.retriever
 			for candidate in candidates
 			for signal in candidate.retrieval_signals
 		}
-	)
-	return (
-		f"Hybrid fusion returned {len(candidates)} ranked candidates for intent={decision.intent} "
-		f"using {', '.join(sources)}."
 	)
 
 
