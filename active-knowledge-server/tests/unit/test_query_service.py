@@ -1,0 +1,491 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from active_knowledge_server.config.loader import ConfigDict, resolve_config
+from active_knowledge_server.config.schema import ActiveKnowledgeConfig
+from active_knowledge_server.models.query import QueryRequest
+from active_knowledge_server.models.routing import RouteTraceEntry, RouterDecision, ToolPlan
+from active_knowledge_server.query import QueryService
+from active_knowledge_server.query.retrievers import (
+    FullTextMatchResult,
+    FullTextSearchRequest,
+    FullTextSearchResult,
+    GraphNodeResult,
+    GraphRelationResult,
+    GraphSearchRequest,
+    GraphSearchResult,
+    SymbolCandidate,
+    SymbolSearchRequest,
+    SymbolSearchResult,
+    VectorMatchResult,
+    VectorSearchRequest,
+    VectorSearchResult,
+)
+
+
+@dataclass
+class StubRouter:
+    decision: RouterDecision
+    requests: list[QueryRequest] | None = None
+
+    def route(self, request: QueryRequest) -> RouterDecision:
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        return self.decision
+
+
+@dataclass
+class StubSymbolRetriever:
+    result: SymbolSearchResult
+    requests: list[SymbolSearchRequest] | None = None
+
+    def search(self, request: SymbolSearchRequest) -> SymbolSearchResult:
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        return self.result
+
+
+@dataclass
+class StubFullTextRetriever:
+    result: FullTextSearchResult
+    requests: list[FullTextSearchRequest] | None = None
+
+    def search(self, request: FullTextSearchRequest) -> FullTextSearchResult:
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        return self.result
+
+
+@dataclass
+class StubVectorRetriever:
+    result: VectorSearchResult
+    requests: list[VectorSearchRequest] | None = None
+
+    def search(self, request: VectorSearchRequest) -> VectorSearchResult:
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        return self.result
+
+
+@dataclass
+class StubGraphRetriever:
+    result: GraphSearchResult
+    requests: list[GraphSearchRequest] | None = None
+
+    def search(self, request: GraphSearchRequest) -> GraphSearchResult:
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        return self.result
+
+
+def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
+    workspace = tmp_path / "workspace"
+    docs = tmp_path / "knowledge-sources"
+    workspace.mkdir()
+    docs.mkdir()
+    merged: ConfigDict = {
+        "runtime": {
+            "workdir": str(tmp_path / ".active-kb"),
+            "baseline_dir": str(tmp_path / ".active-kb" / "baseline"),
+            "local_dir": str(tmp_path / ".active-kb" / "local"),
+            "source_docs_root": str(docs),
+        },
+        "project": {
+            "workspace_root": str(workspace),
+            "default_profile": "auto",
+        },
+        "storage": {
+            "baseline": {
+                "manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")
+            },
+            "metadata": {
+                "path": str(tmp_path / ".active-kb" / "baseline" / "db" / "metadata.db"),
+                "mode": "readwrite",
+            },
+            "overlay": {
+                "path": str(tmp_path / ".active-kb" / "local" / "db" / "overlay.db"),
+                "mode": "readwrite",
+            },
+            "jobs": {
+                "path": str(tmp_path / ".active-kb" / "local" / "db" / "jobs.db"),
+                "mode": "readwrite",
+            },
+            "vector": {
+                "path": str(tmp_path / ".active-kb" / "baseline" / "vectors"),
+                "mode": "readwrite",
+            },
+            "vector_delta": {
+                "path": str(tmp_path / ".active-kb" / "local" / "vectors"),
+                "mode": "readwrite",
+            },
+            "cache_root": str(tmp_path / ".active-kb" / "local" / "cache"),
+        },
+    }
+    if overrides:
+        merged = deep_merge(merged, overrides)
+    return resolve_config(cli_overrides=merged, env={}, cwd=tmp_path).model
+
+
+def test_query_service_fuses_weighted_results_and_emits_retrieval_trace(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        make_decision(
+            intent="code_exact",
+            weights={"symbol": 0.55, "fts": 0.30, "vector": 0.05, "graph": 0.10},
+            selected_view="code",
+            selected_granularity="symbol",
+            resolved_profile_id="watch",
+        )
+    )
+    symbol = StubSymbolRetriever(
+        SymbolSearchResult(
+            request=SymbolSearchRequest(query="alpha"),
+            candidates=(
+                SymbolCandidate(
+                    logical_entity_id="entity:alpha",
+                    physical_entity_id="entity:alpha",
+                    source_index="baseline",
+                    entity_type="Function",
+                    name="alpha",
+                    qualified_name="src/alpha.c::alpha",
+                    path="src/alpha.c#alpha",
+                    relative_path="src/alpha.c",
+                    file_id="file-alpha",
+                    profile_id="watch",
+                    source_scope="workspace",
+                    start_line=10,
+                    end_line=18,
+                    score=0.96,
+                    match_kinds=("exact",),
+                    match_reason="symbol exact",
+                    disambiguation_key="Function|src/alpha.c",
+                ),
+            ),
+            total_candidates=1,
+        )
+    )
+    fulltext = StubFullTextRetriever(
+        FullTextSearchResult(
+            request=FullTextSearchRequest(query="alpha"),
+            matches=(
+                FullTextMatchResult(
+                    logical_object_id="entity:beta",
+                    physical_object_id="entity:beta",
+                    object_type="entity",
+                    primary_index="entity_fts",
+                    matched_indexes=("entity_fts",),
+                    source_index="baseline",
+                    score=0.94,
+                    match_reason="fts beta",
+                    relative_path="src/beta.c",
+                    title="beta",
+                    snippet="beta symbol",
+                    file_id="file-beta",
+                    chunk_id=None,
+                    entity_id="entity:beta",
+                    profile_id="watch",
+                    source_scope="workspace",
+                    domain=None,
+                    doc_type=None,
+                    metadata={"start_line": 4, "end_line": 8},
+                ),
+                FullTextMatchResult(
+                    logical_object_id="entity:alpha",
+                    physical_object_id="entity:alpha",
+                    object_type="entity",
+                    primary_index="entity_fts",
+                    matched_indexes=("entity_fts",),
+                    source_index="baseline",
+                    score=0.80,
+                    match_reason="fts alpha",
+                    relative_path="src/alpha.c",
+                    title="alpha",
+                    snippet="alpha fallback",
+                    file_id="file-alpha",
+                    chunk_id=None,
+                    entity_id="entity:alpha",
+                    profile_id="watch",
+                    source_scope="workspace",
+                    domain=None,
+                    doc_type=None,
+                    metadata={"start_line": 10, "end_line": 18},
+                ),
+            ),
+        )
+    )
+    vector = StubVectorRetriever(
+        VectorSearchResult(
+            request=VectorSearchRequest(query="alpha"),
+            matches=(
+                VectorMatchResult(
+                    logical_object_id="entity:gamma",
+                    physical_object_id="entity:gamma",
+                    vector_ref_id="vec-gamma",
+                    object_type="entity",
+                    source_index="baseline",
+                    score=0.88,
+                    match_reason="vector gamma",
+                    file_id="file-gamma",
+                    relative_path="src/gamma.c",
+                    title="gamma",
+                    snippet="gamma semantic",
+                    chunk_id=None,
+                    entity_id="entity:gamma",
+                    evidence_id=None,
+                    profile_id="watch",
+                    source_scope="workspace",
+                    domain=None,
+                    doc_type=None,
+                    embedding_model_version="bge-m3",
+                    content_hash="hash-gamma",
+                ),
+            ),
+        )
+    )
+    graph = StubGraphRetriever(
+        GraphSearchResult(
+            request=GraphSearchRequest(seed_entity_ids=("entity:alpha",)),
+            nodes=(
+                GraphNodeResult(
+                    node_id="entity:alpha",
+                    node_type="entity",
+                    name="alpha",
+                    depth=0,
+                    relative_path="src/alpha.c",
+                    entity_type="Function",
+                    profile_id="watch",
+                    metadata={"start_line": 10, "end_line": 18},
+                ),
+            ),
+            relations=(
+                GraphRelationResult(
+                    relation_id="rel-alpha-beta",
+                    relation_type="calls",
+                    src_node_id="entity:alpha",
+                    dst_node_id="entity:beta",
+                    depth=1,
+                    source_index="baseline",
+                    profile_id="watch",
+                ),
+            ),
+            total_nodes=1,
+            total_relations=1,
+        )
+    )
+
+    service = QueryService(
+        config,
+        router=router,
+        symbol_retriever=symbol,
+        fulltext_retriever=fulltext,
+        vector_retriever=vector,
+        graph_retriever=graph,
+    )
+
+    result = service.search(QueryRequest(query="alpha", profile_id="watch"))
+
+    assert result.result_status == "ok"
+    assert result.items[0]["candidate_id"] == "entity:alpha"
+    assert set(result.items[0]["retrieval_sources"]) == {"symbol", "fts", "graph"}
+    assert graph.requests is not None
+    assert graph.requests[0].seed_entity_ids == ("entity:alpha",)
+    trace = result.diagnostics["retrieval_trace"]
+    assert trace["fusion_strategy"]["name"] == "weighted_rrf"
+    assert trace["fusion_strategy"]["weights"]["symbol"] == 0.55
+    assert result.relations[0]["relation_type"] == "calls"
+
+
+def test_query_service_dedupes_evidence_and_reranks_authoritative_doc(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        make_decision(
+            intent="api_lookup",
+            weights={"symbol": 0.10, "fts": 0.50, "vector": 0.30, "graph": 0.10},
+            selected_view="evidence",
+            selected_granularity="doc_section",
+            resolved_profile_id="watch",
+        )
+    )
+    fulltext = StubFullTextRetriever(
+        FullTextSearchResult(
+            request=FullTextSearchRequest(query="sensor open"),
+            matches=(
+                FullTextMatchResult(
+                    logical_object_id="doc:authoritative",
+                    physical_object_id="chunk:authoritative",
+                    object_type="chunk",
+                    primary_index="doc_fts",
+                    matched_indexes=("doc_fts",),
+                    source_index="baseline",
+                    score=0.84,
+                    match_reason="fts authoritative",
+                    relative_path="knowledge-sources/api/sensor.md",
+                    title="sensor_open",
+                    snippet="authoritative sensor API docs",
+                    file_id="file-sensor",
+                    chunk_id="chunk-authoritative",
+                    entity_id=None,
+                    profile_id="watch",
+                    source_scope="api",
+                    domain="engineering",
+                    doc_type="api",
+                    metadata={
+                        "authority_level": "source_doc",
+                        "freshness_ts": "2026-05-20T00:00:00Z",
+                        "start_line": 12,
+                        "end_line": 24,
+                    },
+                ),
+                FullTextMatchResult(
+                    logical_object_id="doc:derived",
+                    physical_object_id="chunk:derived",
+                    object_type="chunk",
+                    primary_index="doc_fts",
+                    matched_indexes=("doc_fts",),
+                    source_index="baseline",
+                    score=0.89,
+                    match_reason="fts derived",
+                    relative_path="knowledge-sources/api/notes.md",
+                    title="sensor_open notes",
+                    snippet="derived older notes",
+                    file_id="file-notes",
+                    chunk_id="chunk-derived",
+                    entity_id=None,
+                    profile_id="all",
+                    source_scope="api",
+                    domain="engineering",
+                    doc_type="api",
+                    metadata={
+                        "authority_level": "derived",
+                        "freshness_ts": "2024-01-01T00:00:00Z",
+                        "start_line": 12,
+                        "end_line": 24,
+                    },
+                ),
+            ),
+        )
+    )
+    vector = StubVectorRetriever(
+        VectorSearchResult(
+            request=VectorSearchRequest(query="sensor open"),
+            matches=(
+                VectorMatchResult(
+                    logical_object_id="doc:authoritative",
+                    physical_object_id="chunk:authoritative",
+                    vector_ref_id="vec-authoritative",
+                    object_type="chunk",
+                    source_index="baseline",
+                    score=0.82,
+                    match_reason="vector authoritative",
+                    file_id="file-sensor",
+                    relative_path="knowledge-sources/api/sensor.md",
+                    title="sensor_open",
+                    snippet="authoritative semantic hit",
+                    chunk_id="chunk-authoritative",
+                    entity_id=None,
+                    evidence_id=None,
+                    profile_id="watch",
+                    source_scope="api",
+                    domain="engineering",
+                    doc_type="api",
+                    embedding_model_version="bge-m3",
+                    content_hash="hash-authoritative",
+                    metadata={
+                        "authority_level": "source_doc",
+                        "freshness_ts": "2026-05-20T00:00:00Z",
+                        "start_line": 12,
+                        "end_line": 24,
+                    },
+                ),
+            ),
+        )
+    )
+
+    service = QueryService(
+        config,
+        router=router,
+        fulltext_retriever=fulltext,
+        vector_retriever=vector,
+    )
+
+    result = service.search(QueryRequest(query="sensor open", profile_id="watch"))
+
+    assert result.items[0]["candidate_id"] == "doc:authoritative"
+    assert len(result.evidence_refs) == 2
+    authoritative_trace = [
+        item
+        for item in result.diagnostics["retrieval_trace"]["evidence_trace"]
+        if item["path"] == "knowledge-sources/api/sensor.md"
+    ]
+    assert authoritative_trace[0]["retrieval_sources"] == ["fts", "vector"]
+    assert result.items[0]["authority_level"] == "source_doc"
+
+
+def test_query_service_returns_zero_result_contract(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    router = StubRouter(
+        make_decision(
+            intent="unknown",
+            weights={"symbol": 0.15, "fts": 0.40, "vector": 0.20, "graph": 0.25},
+            selected_view="evidence",
+            selected_granularity="doc_section",
+            resolved_profile_id="all",
+            confidence=0.30,
+        )
+    )
+    service = QueryService(config, router=router)
+
+    result = service.search(QueryRequest(query="帮我看看这里。"))
+
+    assert result.result_status == "zero_result"
+    assert result.items == ()
+    assert result.evidence_refs == ()
+    assert any(warning.code == "retrieval.zero_result" for warning in result.warnings)
+    assert result.next_queries
+
+
+def make_decision(
+    *,
+    intent: str,
+    weights: dict[str, float],
+    selected_view: str,
+    selected_granularity: str,
+    resolved_profile_id: str,
+    confidence: float = 0.86,
+) -> RouterDecision:
+    return RouterDecision(
+        normalized_query="normalized",
+        intent=intent,
+        confidence=confidence,
+        selected_view=selected_view,
+        selected_granularity=selected_granularity,
+        profile_resolution={
+            "status": "resolved",
+            "resolved_profile_id": resolved_profile_id,
+            "warnings": [],
+        },
+        retriever_weights=weights,
+        tool_plan=ToolPlan(route_mode="explore", primary_tool="kb_search"),
+        route_trace=(
+            RouteTraceEntry(stage="route", summary="stub", details={}),
+        ),
+    )
+
+
+def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            nested = merged[key]
+            assert isinstance(nested, dict)
+            merged[key] = deep_merge(nested, value)
+        else:
+            merged[key] = value
+    return merged

@@ -1109,22 +1109,22 @@ TODO：
 
 ### Q5-07 Fusion、rerank 与上下文组装
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`Q5-03` 至 `Q5-06`
 
 TODO：
 
-- [ ] 实现 RRF 或加权归一化融合。
-- [ ] intent-specific 权重：代码精确问题提高 symbol/FTS，文档问题提高 FTS/vector，feature 问题提高 graph。
-- [ ] 证据去重：同文件、同 symbol、同 doc section 去重。
-- [ ] authority、profile_match、freshness、graph_proximity 加权。
-- [ ] 输出 retrieval trace，支持可解释检索。
+- [x] 实现 RRF 或加权归一化融合。
+- [x] intent-specific 权重：代码精确问题提高 symbol/FTS，文档问题提高 FTS/vector，feature 问题提高 graph。
+- [x] 证据去重：同文件、同 symbol、同 doc section 去重。
+- [x] authority、profile_match、freshness、graph_proximity 加权。
+- [x] 输出 retrieval trace，支持可解释检索。
 
 验收标准：
 
-- 每条 evidence 有召回来源和分数。
+- [x] 每条 evidence 有召回来源和分数；已验证 `tests/unit/test_query_rerank.py tests/unit/test_query_service.py`，并通过 `tests/unit/test_query_router.py tests/unit/test_symbol_retriever.py tests/unit/test_fulltext_retriever.py tests/unit/test_vector_retriever.py tests/unit/test_graph_retriever.py tests/unit/test_query_rerank.py tests/unit/test_query_service.py` 邻接 smoke。
 
 ### Q5-08 Profile-aware query 行为
 
