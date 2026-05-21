@@ -1035,21 +1035,22 @@ TODO：
 
 ### Q5-03 SymbolRetriever
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`P4-04`、`Q5-01`
+- 输出：已在 `query/retrievers.py` 实现基于 `logical_entities + entity_fts + chunk_fts(code_symbols)` 的 `SymbolRetriever`，覆盖函数/宏/类型/文件/模块精确查找、fuzzy/alias/doc mention 标记、多候选消歧所需的 disambiguation key、以及按 `QueryScope.profile_id` 的 profile 过滤；同时在 `query/symbol_resolver.py` 增加薄封装 `SymbolResolver`，并补充 `tests/unit/test_symbol_retriever.py` 聚焦回归。
 
 TODO：
 
-- [ ] 支持函数、宏、类型、文件、模块精确查找。
-- [ ] 支持 fuzzy/alias/doc mention 标记。
-- [ ] 多候选返回 disambiguation。
-- [ ] profile 条件过滤。
+- [x] 支持函数、宏、类型、文件、模块精确查找。
+- [x] 支持 fuzzy/alias/doc mention 标记。
+- [x] 多候选返回 disambiguation。
+- [x] profile 条件过滤。
 
 验收标准：
 
-- 符号定位 Top-3 Recall 达到 V1 gate。
+- [x] 聚焦符号定位回归通过；已验证 exact/fuzzy/alias/doc mention/profile filter 与多候选消歧，正式 Top-3 Recall gate 由 `E7-02` 统一承接。
 
 ### Q5-04 FullTextRetriever
 

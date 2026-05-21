@@ -1,5 +1,26 @@
 """Query service, routing, retrieval, and evidence packaging."""
 
 from active_knowledge_server.query.router import QueryRouter, normalize_query
+from active_knowledge_server.query.retrievers import (
+	SymbolCandidate,
+	SymbolRetriever,
+	SymbolSearchRequest,
+	SymbolSearchResult,
+	normalize_lookup_text,
+)
+from active_knowledge_server.query.symbol_resolver import (
+	SymbolResolution,
+	SymbolResolver,
+)
 
-__all__ = ["QueryRouter", "normalize_query"]
+__all__ = [
+	"QueryRouter",
+	"SymbolCandidate",
+	"SymbolResolution",
+	"SymbolResolver",
+	"SymbolRetriever",
+	"SymbolSearchRequest",
+	"SymbolSearchResult",
+	"normalize_lookup_text",
+	"normalize_query",
+]
