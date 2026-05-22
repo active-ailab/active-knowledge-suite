@@ -102,6 +102,80 @@ active-kb serve
 active-kb serve --transport http
 ```
 
+默认推荐 `stdio`，这是本地单机最安全、最少暴露面的接入方式。
+
+---
+
+## 部署样式（O8-03 / O8-04）
+
+### 本地单机（local_single_user）
+
+建议直接使用示例配置：
+
+```bash
+active-kb validate --config examples/local-single-user.yaml --format json
+active-kb serve --config examples/local-single-user.yaml --transport stdio
+```
+
+本地单机场景约束：
+
+- 默认 transport 为 `stdio`。
+- 若开启 HTTP，仅绑定 `127.0.0.1`（或 `localhost` / `::1`）。
+- ops tools 默认不暴露，需显式开启。
+- audit 默认开启。
+
+本地 Agent / IDE 对接建议：
+
+- VS Code / 本地 Copilot Agent：优先走 `stdio`。
+- Codex CLI / 本地脚本 Agent：通过 `active-kb serve --transport stdio` 直连。
+- 本机 HTTP 仅用于调试，不用于跨主机访问。
+
+### 远程共享（remote_shared）
+
+建议使用示例配置：
+
+```bash
+active-kb validate --config examples/remote-shared.yaml --format json
+ACTIVE_KB_AUTH_TOKEN='<strong-random-token>' active-kb serve --config examples/remote-shared.yaml
+```
+
+远程共享场景必须满足：
+
+- `require_auth=true`。
+- `allowed_origins` 显式列出可信来源，禁止 `*`。
+- 强制开启 audit。
+- ops tools 默认禁用。
+- 推荐放在 HTTPS 网关/反向代理后。
+
+不安全配置会直接启动失败（fail-safe）：
+
+- `remote_shared` 下使用 `allowed_origins: ["*"]`。
+- 非 loopback 监听但未启用认证。
+- 关闭 audit。
+
+### Token Rotation（远程）
+
+建议采用短周期轮换策略：
+
+- 使用高熵随机 token（至少 32 字节）。
+- 将 token 存在密钥管理系统，运行时通过环境变量注入（如 `ACTIVE_KB_AUTH_TOKEN`）。
+- 轮换周期建议 7-30 天，或在成员变更/泄露风险后立即轮换。
+- 轮换时采用双窗口：先在网关和服务端并行接受新旧 token，完成客户端切换后撤销旧 token。
+
+### 反向代理信任边界
+
+- 仅在服务位于受控网关后时开启 `trust_reverse_proxy: true`。
+- 只信任网关注入的 `X-Forwarded-*`，并在网络层限制直连后端。
+- 外网 TLS 终止应在网关，后端仅接受来自网关的内网流量。
+
+### ChatGPT 远程 MCP 接入注意事项
+
+- 仅暴露 `streamable-http` MCP 路径（示例为 `/mcp`）。
+- 在 `allowed_origins` 中显式加入 `https://chatgpt.com`。
+- 不要开放 ops tools 到远程。
+- 先运行 `active-kb validate --config examples/remote-shared.yaml`，再上线。
+- 若配置不满足 fail-safe，`serve` 会返回 `blocked` 并拒绝启动。
+
 ---
 
 ## MCP 工具（稳定接口）

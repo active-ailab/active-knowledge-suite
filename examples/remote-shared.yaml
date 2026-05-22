@@ -20,11 +20,11 @@ server:
     trust_reverse_proxy: true
 
 runtime:
-  source_root: /srv/active-knowledge
-  workdir: /var/lib/active-kb
-  baseline_dir: /var/lib/active-kb/baseline
-  local_dir: /var/lib/active-kb/local
-  source_docs_root: /srv/active-knowledge/knowledge-sources
+  source_root: ..
+  workdir: ../.active-kb
+  baseline_dir: ../.active-kb/baseline
+  local_dir: ../.active-kb/local
+  source_docs_root: ../knowledge-sources
   log_level: info
   logging:
     rotation:
@@ -35,7 +35,7 @@ runtime:
 project:
   id: active
   display_name: Active
-  workspace_root: /srv/Active
+  workspace_root: .
   branch_strategy: baseline-first
   baseline_branch: main
   default_snapshot: current
@@ -69,39 +69,30 @@ profiles:
     dotconfig_candidates:
       - build/.config
       - build/out_hub/.config
-  known:
-    - id: mhs003_watch
-      dotconfig: build/.config
-      app: watch
-      board: mhs003
-    - id: mhs003_sensorhub
-      dotconfig: build/out_hub/.config
-      app: sensorhub
-      board: mhs003
 
 storage:
   baseline:
-    manifest: /var/lib/active-kb/baseline/manifest.json
+    manifest: ../.active-kb/baseline/manifest.json
   metadata:
     backend: sqlite
-    path: /var/lib/active-kb/baseline/db/metadata.db
+    path: ../.active-kb/baseline/db/metadata.db
     mode: readonly
   overlay:
     backend: sqlite
-    path: /var/lib/active-kb/local/db/overlay.db
+    path: ../.active-kb/local/db/overlay.db
   jobs:
     backend: sqlite
-    path: /var/lib/active-kb/local/db/jobs.db
+    path: ../.active-kb/local/db/jobs.db
   vector:
     backend: lancedb
-    path: /var/lib/active-kb/baseline/vectors/lancedb
+    path: ../.active-kb/baseline/vectors/lancedb
     mode: readonly
   vector_delta:
     backend: lancedb
-    path: /var/lib/active-kb/local/vectors/lancedb-delta
-  artifacts_root: /var/lib/active-kb/baseline/artifacts
-  local_artifacts_root: /var/lib/active-kb/local/artifacts
-  cache_root: /var/lib/active-kb/local/cache
+    path: ../.active-kb/local/vectors/lancedb-delta
+  artifacts_root: ../.active-kb/baseline/artifacts
+  local_artifacts_root: ../.active-kb/local/artifacts
+  cache_root: ../.active-kb/local/cache
 
 indexing:
   mode: local
@@ -143,9 +134,9 @@ query:
 
 security:
   path_allowlist:
-    - /srv/Active
-    - /srv/active-knowledge/knowledge-sources
-    - /var/lib/active-kb
+    - .
+    - ../knowledge-sources
+    - ../.active-kb
   secret_scan:
     enabled: true
     deny_patterns:

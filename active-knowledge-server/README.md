@@ -78,6 +78,48 @@ authenticated `streamable-http`, explicit non-wildcard origins, enabled audit
 logging, and hidden ops tools. Failures return a structured
 `result_status=blocked` response for JSON callers.
 
+`stdio` is the default and recommended transport for local single-user usage.
+
+## Deployment Quick Reference
+
+Local single-user deployment:
+
+```bash
+uv run active-kb validate --config ../examples/local-single-user.yaml --format json
+uv run active-kb serve --config ../examples/local-single-user.yaml --transport stdio
+```
+
+Remote shared deployment:
+
+```bash
+uv run active-kb validate --config ../examples/remote-shared.yaml --format json
+ACTIVE_KB_AUTH_TOKEN='<strong-random-token>' uv run active-kb serve --config ../examples/remote-shared.yaml
+```
+
+Remote requirements:
+
+- Keep `require_auth=true`.
+- Keep explicit `allowed_origins` and never use `*`.
+- Keep `security.audit.enabled=true`.
+- Keep `server.expose_ops_tools=false`.
+
+Token rotation suggestions:
+
+- Use environment-injected tokens from a secret manager.
+- Rotate every 7-30 days or immediately on risk events.
+- Use a short overlap window where new and old tokens are both accepted.
+
+Reverse proxy trust boundary:
+
+- Enable `trust_reverse_proxy` only when the service is strictly behind a trusted gateway.
+- Restrict backend ingress to gateway network paths.
+
+ChatGPT remote MCP notes:
+
+- Keep `streamable-http` transport.
+- Include `https://chatgpt.com` in `allowed_origins`.
+- Do not expose ops tools remotely.
+
 Path access is mediated by `active_knowledge_server.security.path_guard`.
 Configured allowlist roots are normalized before use, `..` traversal and
 symlink escapes are blocked by default, and successful paths expose

@@ -1528,40 +1528,54 @@ TODO：
 
 ### O8-03 本地单机部署文档
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`DOC`、`SEC`
 - 依赖：`D0-08`、`M6-01`
 
 TODO：
 
-- [ ] 提供 `examples/local-single-user.yaml`。
-- [ ] README 写明 stdio 默认。
-- [ ] 本地 HTTP 示例只绑定 `127.0.0.1`。
-- [ ] 说明如何对接 IDE/Codex/本地 Agent。
+- [x] 提供 `examples/local-single-user.yaml`。
+- [x] README 写明 stdio 默认。
+- [x] 本地 HTTP 示例只绑定 `127.0.0.1`。
+- [x] 说明如何对接 IDE/Codex/本地 Agent。
 
 验收标准：
 
-- 示例配置可直接通过 `validate`。
+- [x] 示例配置可直接通过 `validate`。
+
+输出：
+
+- 已补齐 `examples/local-single-user.yaml` 本地单机配置样式，默认 `transport=stdio`，HTTP 仅 loopback。
+- 已在仓库 README 与 server README 增补本地单机部署说明，明确 stdio 默认与本机 HTTP 调试边界。
+- 已补充本地 Agent 接入说明（IDE/Codex/本地脚本场景统一建议 stdio）。
+- 验收命令：`active-kb validate --config examples/local-single-user.yaml --format json`。
 
 ### O8-04 远程共享部署文档
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`DOC`、`SEC`
 - 依赖：`D0-08`、`M6-05`
 
 TODO：
 
-- [ ] 提供 `examples/remote-shared.yaml`。
-- [ ] 说明认证、Origin、HTTPS/gateway、audit、ops tools 禁用。
-- [ ] 给出 token rotation 建议。
-- [ ] 给出反向代理 header 信任边界说明。
-- [ ] 给出 ChatGPT 远程 MCP 接入注意事项。
+- [x] 提供 `examples/remote-shared.yaml`。
+- [x] 说明认证、Origin、HTTPS/gateway、audit、ops tools 禁用。
+- [x] 给出 token rotation 建议。
+- [x] 给出反向代理 header 信任边界说明。
+- [x] 给出 ChatGPT 远程 MCP 接入注意事项。
 
 验收标准：
 
-- 不安全 remote config 在文档中明确标注会启动失败。
+- [x] 不安全 remote config 在文档中明确标注会启动失败。
+
+输出：
+
+- 已补齐 `examples/remote-shared.yaml` 远程共享配置样式（`require_auth=true`、显式 origin allowlist、audit 开启、ops tools 默认禁用）。
+- 已在 README 与 server README 增补远程部署安全说明，覆盖认证、Origin、HTTPS/gateway 与 fail-safe 启动失败条件。
+- 已补充 token rotation 建议、反向代理信任边界、ChatGPT 远程 MCP 接入注意事项。
+- 验收命令：`active-kb validate --config examples/remote-shared.yaml --format json`。
 
 ### O8-05 可观测性
 
