@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from active_knowledge_server.cli import main
-from active_knowledge_server.mcp.schemas import ALL_TOOL_NAMES
+from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAMES
 
 
 def test_subcommands_have_help() -> None:
@@ -137,10 +137,7 @@ def test_serve_json_reports_registered_mcp_components(tmp_path: Path, capsys) ->
     assert exit_code == 0
     assert payload["status"] == "ready"
     assert payload["mcp"]["components"]["tools"] == list(ALL_TOOL_NAMES)
-    assert payload["mcp"]["components"]["resources"] == [
-        "active://config/current",
-        "active://server/runtime",
-    ]
+    assert payload["mcp"]["components"]["resources"] == list(ALL_RESOURCE_URIS)
     assert payload["mcp"]["http_endpoint"] == "http://127.0.0.1:8765/mcp"
 
 

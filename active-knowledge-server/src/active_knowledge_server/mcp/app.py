@@ -20,6 +20,7 @@ from active_knowledge_server.mcp.tools import (
 )
 from active_knowledge_server.observability.logging import configure_logging
 from active_knowledge_server.security.audit import AuditLogger
+from active_knowledge_server.security.http import fastmcp_http_middleware_entries
 
 try:
 	from fastmcp import FastMCP
@@ -42,6 +43,7 @@ class ActiveKnowledgeFastMCPApp:
 	context: MCPAppContext
 	inventory: MCPComponentInventory
 	query_runtime: LazyQueryToolRuntime | None = None
+	http_middleware: tuple[Any, ...] = ()
 
 	def describe(self) -> dict[str, object]:
 		"""Return a machine-readable summary of the current runtime wiring."""
@@ -73,6 +75,7 @@ class ActiveKnowledgeFastMCPApp:
 			port=http.port,
 			path=normalize_mcp_path(http.mcp_path),
 			stateless_http=self._stateless_http(),
+			middleware=list(self.http_middleware),
 		)
 
 	def http_app(self) -> Any:
@@ -81,6 +84,7 @@ class ActiveKnowledgeFastMCPApp:
 		return self.mcp.http_app(
 			path=normalize_mcp_path(self.context.config.server.http.mcp_path),
 			stateless_http=self._stateless_http(),
+			middleware=list(self.http_middleware),
 		)
 
 	def _stateless_http(self) -> bool:
@@ -125,6 +129,12 @@ def create_fastmcp_app(
 		audit_logger=audit_logger,
 		cwd=root,
 	)
+	http_middleware = tuple(
+		fastmcp_http_middleware_entries(
+			config=resolved.model,
+			audit_logger=audit_logger,
+		)
+	)
 
 	mcp = FastMCP(
 		resolved.model.server.name,
@@ -155,6 +165,7 @@ def create_fastmcp_app(
 		context=context,
 		inventory=MCPComponentInventory(tools=tools, resources=resources),
 		query_runtime=query_runtime,
+		http_middleware=http_middleware,
 	)
 
 

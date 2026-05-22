@@ -94,13 +94,13 @@ def test_run_passes_http_host_port_and_path(tmp_path: Path, monkeypatch) -> None
 
     runtime.run()
 
-    assert captured == {
-        "transport": "http",
-        "host": "0.0.0.0",
-        "port": 9100,
-        "path": "/api/mcp",
-        "stateless_http": False,
-    }
+    assert captured["transport"] == "http"
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 9100
+    assert captured["path"] == "/api/mcp"
+    assert captured["stateless_http"] is False
+    assert isinstance(captured["middleware"], list)
+    assert len(captured["middleware"]) == 1
 
 
 def test_remote_shared_http_prefers_stateless_mode(tmp_path: Path, monkeypatch) -> None:
@@ -118,4 +118,7 @@ def test_remote_shared_http_prefers_stateless_mode(tmp_path: Path, monkeypatch) 
 
     runtime.http_app()
 
-    assert captured == {"path": "/mcp", "stateless_http": True}
+    assert captured["path"] == "/mcp"
+    assert captured["stateless_http"] is True
+    assert isinstance(captured["middleware"], list)
+    assert len(captured["middleware"]) == 1

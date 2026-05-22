@@ -1281,18 +1281,19 @@ TODO：
 
 ### M6-05 HTTP 安全中间件
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`SEC`、`IMPL`、`TEST`
 - 依赖：`D0-08`、`C1-05`
+- 输出：已实现 `security/http.py` HTTP 安全中间件，并在 `mcp/app.py` 统一注入到 FastMCP `http_app()` / `run()` 路径；中间件对所有 streamable-http 请求执行 Origin allowlist 校验、本地 token auth V1、HTTP 级审计落盘，确保 `remote_shared` 无认证请求被拒绝、`local_single_user` loopback 请求可无认证访问但仍产生 audit 记录；并通过 `uv run --group dev python -m pytest tests/unit/test_mcp_app.py tests/unit/test_http_security.py tests/unit/test_security_config.py tests/unit/test_cli.py` 聚焦回归。
 
 TODO：
 
-- [ ] Origin 校验。
-- [ ] token auth V1。
-- [ ] audit 每次 HTTP tool call。
-- [ ] remote_shared 拒绝无认证请求。
-- [ ] 本地 loopback 允许无认证但仍 audit。
+- [x] Origin 校验。
+- [x] token auth V1。
+- [x] audit 每次 HTTP tool call。
+- [x] remote_shared 拒绝无认证请求。
+- [x] 本地 loopback 允许无认证但仍 audit。
 
 验收标准：
 
