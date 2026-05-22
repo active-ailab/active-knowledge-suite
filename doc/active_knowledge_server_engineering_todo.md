@@ -1257,22 +1257,23 @@ TODO：
 
 ### M6-04 Ops tools gating
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`SEC`、`IMPL`、`TEST`
 - 依赖：`C1-05`、`S2-07`
+- 输出：已实现 `ops_get_config`、`ops_validate_setup`、`ops_index_status`、`ops_start_index`、`ops_cancel_index`、`ops_list_profiles`、`ops_list_sources` 七个 gated ops tools；仅 `local_single_user + server.expose_ops_tools=true` 时注册到 MCP inventory，`remote_shared` 即使误开也在 app 装配层与工具运行时双层阻断；`ops_start_index` / `ops_cancel_index` 复用 SQLite job store 返回稳定响应，并通过 `uv run --group dev python -m pytest tests/unit/test_mcp_app.py tests/unit/test_mcp_query_tools.py tests/unit/test_mcp_resources.py tests/unit/test_mcp_ops_tools.py` 聚焦回归。
 
 TODO：
 
-- [ ] `ops_get_config`
-- [ ] `ops_validate_setup`
-- [ ] `ops_index_status`
-- [ ] `ops_start_index`
-- [ ] `ops_cancel_index`
-- [ ] `ops_list_profiles`
-- [ ] `ops_list_sources`
-- [ ] 默认 `server.expose_ops_tools=false`。
-- [ ] remote_shared 下即使配置误开，也需二次安全校验。
+- [x] `ops_get_config`
+- [x] `ops_validate_setup`
+- [x] `ops_index_status`
+- [x] `ops_start_index`
+- [x] `ops_cancel_index`
+- [x] `ops_list_profiles`
+- [x] `ops_list_sources`
+- [x] 默认 `server.expose_ops_tools=false`。
+- [x] remote_shared 下即使配置误开，也需二次安全校验。
 
 验收标准：
 

@@ -7,6 +7,7 @@ from active_knowledge_server.mcp.schemas import (
 	BOOTSTRAP_RESOURCE_URIS,
 	BOOTSTRAP_TOOL_NAMES,
 	MCPComponentInventory,
+	OPS_TOOL_NAMES,
 	QUERY_RESOURCE_URIS,
 	QUERY_TOOL_NAMES,
 )
@@ -18,6 +19,7 @@ __all__ = [
 	"BOOTSTRAP_RESOURCE_URIS",
 	"BOOTSTRAP_TOOL_NAMES",
 	"MCPComponentInventory",
+	"OPS_TOOL_NAMES",
 	"QUERY_RESOURCE_URIS",
 	"QUERY_TOOL_NAMES",
 	"create_fastmcp_app",

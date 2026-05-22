@@ -1,20 +1,29 @@
-"""Bootstrap and V1 query MCP tools for the FastMCP facade."""
+"""Bootstrap, query, and gated ops MCP tools for the FastMCP facade."""
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from active_knowledge_server.config.loader import resolve_runtime_path
 from active_knowledge_server.connectors.workspace import WorkspaceConnector
+from active_knowledge_server.indexing.jobs import (
+	INDEX_JOB_LOCK_ID,
+	JobLockConflictError,
+	JobStateTransitionError,
+	SQLiteJobStore,
+)
 from active_knowledge_server.indexing.workspace_map import WorkspaceMapArtifact, WorkspaceMapBuilder, WorkspaceViewItem
-from active_knowledge_server.mcp.annotations import readonly_annotations
+from active_knowledge_server.mcp.annotations import readonly_annotations, tool_annotations
 from active_knowledge_server.mcp.schemas import (
 	MCPAppContext,
+	MCPOpsToolResult,
 	MCPPingResult,
 	MCPServerInfoResult,
+	OPS_TOOL_NAMES,
 	QUERY_TOOL_NAMES,
 	RegisteredTool,
 )
@@ -22,6 +31,7 @@ from active_knowledge_server.models.evidence import EvidenceRef
 from active_knowledge_server.models.query import QueryDomain, QueryGranularity, QueryIntent, QueryRequest, QueryView
 from active_knowledge_server.models.responses import QueryResult, Warning
 from active_knowledge_server.query.service import QueryService
+from active_knowledge_server.security.config import validate_startup_security
 from active_knowledge_server.security.path_guard import PathBlockedError
 from active_knowledge_server.storage.base import ALL_SCOPE, StorageReader
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
@@ -30,10 +40,15 @@ from active_knowledge_server.storage.sqlite_store import (
 	configured_sqlite_paths,
 	migrate_sqlite_store,
 )
+from active_knowledge_server.storage.validation import validate_storage_consistency
 
 DocsSearchType = Literal["api", "widget", "product", "project"]
 WorkspaceViewName = Literal["workspace", "layer", "domain", "feature", "profile"]
+OpsIndexMode = Literal["incremental", "full"]
+OpsIndexSource = Literal["all", "code", "docs"]
 _QUERY_TOOL_TAGS = ("query", "v1", "readonly")
+_OPS_TOOL_TAGS = ("ops", "v1")
+_ACTIVE_INDEX_JOB_STATUSES = ("pending", "discovering", "parsing", "extracting", "embedding", "reporting")
 
 
 @dataclass
@@ -49,6 +64,7 @@ class LazyQueryToolRuntime:
 	_readonly_metadata_adapter: SQLiteStorageAdapter | None = None
 	_readonly_workspace_connector: WorkspaceConnector | None = None
 	_readonly_workspace_map_builder: WorkspaceMapBuilder | None = None
+	_job_store: SQLiteJobStore | None = None
 
 	def search_query(self, request: QueryRequest) -> QueryResult:
 		"""Run one routed hybrid query using the shared service."""
@@ -113,6 +129,77 @@ class LazyQueryToolRuntime:
 			profiles=reader.iter_profiles(snapshot_id=snapshot_id),
 		)
 
+	def ops_reader(self) -> StorageReader:
+		"""Return the read-only metadata reader reused by gated ops tools."""
+
+		return self.resource_reader()
+
+	def active_index_job(self) -> Any | None:
+		"""Return the newest non-terminal index job when one exists."""
+
+		for job in self.ops_reader().iter_jobs():
+			if job.job_type == "index" and job.status in _ACTIVE_INDEX_JOB_STATUSES:
+				return job
+		return None
+
+	def recent_jobs(self, *, limit: int = 10) -> tuple[Any, ...]:
+		"""Return recent persisted jobs in descending update order."""
+
+		return self.ops_reader().iter_jobs()[: max(1, limit)]
+
+	def create_index_job(
+		self,
+		*,
+		mode: OpsIndexMode,
+		source: OpsIndexSource,
+		profile_id: str,
+		snapshot_id: str,
+	) -> Any:
+		"""Persist a scheduler-owned index job request for the gated ops surface."""
+
+		active_job = self.active_index_job()
+		if active_job is not None:
+			raise JobLockConflictError(
+				f"index job {active_job.job_id!r} is already active with status {active_job.status!r}"
+			)
+		return self._ensure_job_store().create_job(
+			metadata={
+				"requested_mode": mode,
+				"requested_source": source,
+				"requested_profile_id": profile_id,
+				"requested_snapshot_id": snapshot_id,
+				"requested_by": "mcp.ops_start_index",
+				"execution_state": "scheduled",
+			}
+		)
+
+	def cancel_index_job(self, job_id: str) -> Any:
+		"""Cancel one active or pending index job through the jobs store."""
+
+		store = self._ensure_job_store()
+		job = store.get_job(job_id)
+		if job is None:
+			raise KeyError(f"job {job_id!r} does not exist")
+		if job.job_type != "index":
+			raise JobStateTransitionError(f"job {job_id!r} is not an index job")
+		if job.status == "failed" and bool(job.metadata.get("cancelled")):
+			return job
+		if job.status not in _ACTIVE_INDEX_JOB_STATUSES:
+			raise JobStateTransitionError(
+				f"job {job_id!r} is not cancelable from status {job.status!r}"
+			)
+		updated = store.transition_job(
+			job_id,
+			"failed",
+			error_summary="cancelled by ops_cancel_index",
+			metadata_update={
+				"cancelled": True,
+				"cancelled_by": "mcp.ops_cancel_index",
+			},
+		)
+		store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job_id)
+		return updated
+
 	def _ensure_initialized(self) -> None:
 		if self._query_service is not None:
 			return
@@ -165,6 +252,15 @@ class LazyQueryToolRuntime:
 			cwd=self.context.cwd,
 		)
 
+	def _ensure_job_store(self) -> SQLiteJobStore:
+		if self._job_store is not None:
+			return self._job_store
+
+		paths = configured_sqlite_paths(self.context.config, cwd=self.context.cwd)
+		migrate_sqlite_store(paths["jobs"], target="jobs")
+		self._job_store = SQLiteJobStore(paths["jobs"])
+		return self._job_store
+
 
 def register_bootstrap_tools(mcp: Any, context: MCPAppContext) -> tuple[RegisteredTool, ...]:
 	"""Register the minimal bootstrap tools required by M6-01."""
@@ -204,11 +300,12 @@ def register_bootstrap_tools(mcp: Any, context: MCPAppContext) -> tuple[Register
 				transport=context.config.server.transport,
 				http_endpoint=http_endpoint,
 				mcp_path=context.config.server.http.mcp_path if http_endpoint else None,
-				expose_ops_tools=context.config.server.expose_ops_tools,
+				expose_ops_tools=context.ops_tools_enabled(),
 				audit_enabled=context.config.security.audit.enabled,
 				workspace_root=str(context.workspace_root),
 				workdir=str(context.layout.workdir),
 				source_docs_root=str(context.source_docs_root),
+				ops_tools=context.exposed_ops_tools(),
 			)
 			scope.set_result(result_count=1, result_status="ok")
 			return result
@@ -226,6 +323,209 @@ def register_bootstrap_tools(mcp: Any, context: MCPAppContext) -> tuple[Register
 			handler=server_info,
 			tags=("bootstrap", "status", "config"),
 		),
+	)
+
+
+def register_ops_tools(
+	mcp: Any,
+	context: MCPAppContext,
+	*,
+	runtime: LazyQueryToolRuntime,
+) -> tuple[RegisteredTool, ...]:
+	"""Register gated operational tools for local single-user deployments only."""
+
+	if not context.ops_tools_enabled():
+		return ()
+
+	@mcp.tool(
+		name="ops_get_config",
+		annotations=readonly_annotations(title="Active Ops Get Config"),
+		tags={"ops", "config", "status"},
+	)
+	def ops_get_config() -> MCPOpsToolResult:
+		"""Return the current non-sensitive config and effective ops exposure state."""
+
+		with context.audit_logger.tool_call(tool="ops_get_config", caller="mcp.ops") as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_get_config",
+				handler=lambda: MCPOpsToolResult(
+					operation="ops_get_config",
+					status="ok",
+					summary="Returned the effective non-sensitive config and ops exposure state.",
+					payload={
+						"config": dict(context.config_summary),
+						"deployment_mode": context.config.deployment_mode,
+						"transport": context.config.server.transport,
+						"expose_ops_tools": context.ops_tools_enabled(),
+						"ops_tools": list(context.exposed_ops_tools()),
+					},
+				),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_validate_setup",
+		annotations=readonly_annotations(title="Active Ops Validate Setup"),
+		tags={"ops", "validate", "status"},
+	)
+	def ops_validate_setup(*, strict: bool = False) -> MCPOpsToolResult:
+		"""Validate local path readiness, fail-safe security, and storage consistency."""
+
+		with context.audit_logger.tool_call(
+			tool="ops_validate_setup",
+			caller="mcp.ops",
+			details={"strict": strict},
+		) as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_validate_setup",
+				handler=lambda: _validate_setup_result(context=context, strict=strict),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_index_status",
+		annotations=readonly_annotations(title="Active Ops Index Status"),
+		tags={"ops", "index", "status"},
+	)
+	def ops_index_status(*, limit: int = 10) -> MCPOpsToolResult:
+		"""Return storage validation plus recent persisted index jobs."""
+
+		with context.audit_logger.tool_call(
+			tool="ops_index_status",
+			caller="mcp.ops",
+			details={"limit": limit},
+		) as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_index_status",
+				handler=lambda: _index_status_result(context=context, runtime=runtime, limit=limit),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_start_index",
+		annotations=tool_annotations(
+			title="Active Ops Start Index",
+			read_only=False,
+			idempotent=False,
+		),
+		tags={"ops", "index", "write"},
+	)
+	def ops_start_index(
+		*,
+		mode: OpsIndexMode = "incremental",
+		source: OpsIndexSource = "all",
+		profile_id: str = ALL_SCOPE,
+		snapshot_id: str = "current",
+	) -> MCPOpsToolResult:
+		"""Create one scheduler-owned index job request when no active job exists."""
+
+		with context.audit_logger.tool_call(
+			tool="ops_start_index",
+			profile_id=profile_id,
+			snapshot_id=snapshot_id,
+			caller="mcp.ops",
+			details={"mode": mode, "source": source},
+		) as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_start_index",
+				handler=lambda: _start_index_result(
+					runtime=runtime,
+					mode=mode,
+					source=source,
+					profile_id=profile_id,
+					snapshot_id=snapshot_id,
+				),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_cancel_index",
+		annotations=tool_annotations(
+			title="Active Ops Cancel Index",
+			read_only=False,
+			idempotent=False,
+			destructive=True,
+		),
+		tags={"ops", "index", "write"},
+	)
+	def ops_cancel_index(job_id: str) -> MCPOpsToolResult:
+		"""Cancel one active or pending index job."""
+
+		with context.audit_logger.tool_call(
+			tool="ops_cancel_index",
+			caller="mcp.ops",
+			details={"job_id": job_id},
+		) as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_cancel_index",
+				handler=lambda: _cancel_index_result(runtime=runtime, job_id=job_id),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_list_profiles",
+		annotations=readonly_annotations(title="Active Ops List Profiles"),
+		tags={"ops", "profile", "status"},
+	)
+	def ops_list_profiles(*, snapshot_id: str | None = None) -> MCPOpsToolResult:
+		"""List indexed profiles from read-only metadata without triggering migrations."""
+
+		with context.audit_logger.tool_call(
+			tool="ops_list_profiles",
+			snapshot_id=snapshot_id,
+			caller="mcp.ops",
+		) as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_list_profiles",
+				handler=lambda: _list_profiles_result(runtime=runtime, snapshot_id=snapshot_id),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	@mcp.tool(
+		name="ops_list_sources",
+		annotations=readonly_annotations(title="Active Ops List Sources"),
+		tags={"ops", "source", "status"},
+	)
+	def ops_list_sources() -> MCPOpsToolResult:
+		"""List indexed source roots from read-only metadata without triggering migrations."""
+
+		with context.audit_logger.tool_call(tool="ops_list_sources", caller="mcp.ops") as scope:
+			result = _execute_ops(
+				context=context,
+				operation="ops_list_sources",
+				handler=lambda: _list_sources_result(runtime=runtime),
+			)
+			_finalize_ops_scope(scope, result)
+			return result
+
+	return tuple(
+		RegisteredTool(
+			name=name,
+			description=description,
+			handler=handler,
+			tags=_OPS_TOOL_TAGS,
+		)
+		for name, description, handler in (
+			("ops_get_config", "Return the effective non-sensitive config and ops exposure state.", ops_get_config),
+			("ops_validate_setup", "Validate local path readiness, fail-safe security, and storage consistency.", ops_validate_setup),
+			("ops_index_status", "Return storage validation plus recent persisted index jobs.", ops_index_status),
+			("ops_start_index", "Create one scheduler-owned index job request when no active job exists.", ops_start_index),
+			("ops_cancel_index", "Cancel one active or pending index job.", ops_cancel_index),
+			("ops_list_profiles", "List indexed profiles from read-only metadata without triggering migrations.", ops_list_profiles),
+			("ops_list_sources", "List indexed source roots from read-only metadata without triggering migrations.", ops_list_sources),
+		)
 	)
 
 
@@ -653,6 +953,424 @@ def register_query_tools(
 			),
 		)
 	)
+
+
+def _execute_ops(
+	*,
+	context: MCPAppContext,
+	operation: str,
+	handler: Any,
+) -> MCPOpsToolResult:
+	"""Execute one gated ops handler with consistent safety enforcement."""
+
+	blocked = _ops_access_blocked(context=context, operation=operation)
+	if blocked is not None:
+		return blocked
+	try:
+		return handler()
+	except Exception as exc:  # noqa: BLE001 - ops tools surface stable envelopes on unexpected failures.
+		return _ops_error_result(
+			operation=operation,
+			summary=f"{operation} failed before returning a stable operational response.",
+			exc=exc,
+		)
+
+
+def _finalize_ops_scope(scope: Any, result: MCPOpsToolResult) -> None:
+	"""Write one stable audit summary for an ops tool result."""
+
+	scope.set_result(
+		result_count=_ops_result_count(result),
+		result_status=result.status,
+		warning_codes=[warning.code for warning in result.warnings],
+		warning_levels=[warning.level for warning in result.warnings],
+	)
+
+
+def _validate_setup_result(*, context: MCPAppContext, strict: bool) -> MCPOpsToolResult:
+	"""Build the stable validate-setup response used by the gated ops surface."""
+
+	checks = _ops_validation_checks(context=context, strict=strict)
+	storage_report = validate_storage_consistency(context.config, cwd=context.cwd)
+	security_result = validate_startup_security(context.config)
+	warnings = [
+		*[_warning_from_validation_check(check) for check in checks if check["level"] != "ok"],
+		*(warning.to_warning() for warning in security_result.warnings),
+		*[_warning_from_storage_check(check) for check in storage_report.checks if check.severity != "info"],
+	]
+	error_checks = [check for check in checks if check["level"] == "error"]
+	status = (
+		"blocked"
+		if strict and (error_checks or security_result.blocked or storage_report.status == "blocked")
+		else "ok"
+	)
+	summary = (
+		"Local setup validation completed without blocking issues."
+		if status == "ok"
+		else "Local setup validation found blocking issues under strict mode."
+	)
+	return MCPOpsToolResult(
+		operation="ops_validate_setup",
+		status=status,
+		summary=summary,
+		warnings=tuple(warnings),
+		items=tuple(dict(check) for check in checks),
+		payload={
+			"strict": strict,
+			"storage_report": storage_report.to_dict(),
+			"security": {
+				"ok": security_result.ok,
+				"warnings": [warning.to_dict() for warning in security_result.warnings],
+			},
+		},
+	)
+
+
+def _index_status_result(
+	*,
+	context: MCPAppContext,
+	runtime: LazyQueryToolRuntime,
+	limit: int,
+) -> MCPOpsToolResult:
+	"""Build the stable index-status response with recent jobs and storage checks."""
+
+	storage_report = validate_storage_consistency(context.config, cwd=context.cwd)
+	recent_jobs = runtime.recent_jobs(limit=limit)
+	job_status_counts = Counter(job.status for job in recent_jobs)
+	warnings = tuple(
+		_warning_from_storage_check(check)
+		for check in storage_report.checks
+		if check.severity != "info"
+	)
+	return MCPOpsToolResult(
+		operation="ops_index_status",
+		status="ok",
+		summary="Returned recent index jobs plus current storage validation.",
+		warnings=warnings,
+		items=tuple(_job_payload(job) for job in recent_jobs),
+		payload={
+			"validation": storage_report.to_dict(),
+			"job_status_counts": dict(job_status_counts),
+		},
+	)
+
+
+def _start_index_result(
+	*,
+	runtime: LazyQueryToolRuntime,
+	mode: OpsIndexMode,
+	source: OpsIndexSource,
+	profile_id: str,
+	snapshot_id: str,
+) -> MCPOpsToolResult:
+	"""Create a stable accepted/conflict response for index-job scheduling."""
+
+	try:
+		job = runtime.create_index_job(
+			mode=mode,
+			source=source,
+			profile_id=_normalize_scope_value(profile_id),
+			snapshot_id=snapshot_id or "current",
+		)
+	except JobLockConflictError as exc:
+		active_job = runtime.active_index_job()
+		return MCPOpsToolResult(
+			operation="ops_start_index",
+			status="conflict",
+			summary="Another index job is already active; the new job request was not accepted.",
+			warnings=(
+				Warning(
+					level="caution",
+					code="ops.index_job_active",
+					message=str(exc),
+					actionable=True,
+					suggested_action="Inspect ops_index_status or cancel the active job before retrying.",
+				),
+			),
+			payload={"active_job": _job_payload(active_job) if active_job is not None else None},
+		)
+	return MCPOpsToolResult(
+		operation="ops_start_index",
+		status="accepted",
+		summary="Index job request accepted and persisted for scheduler-owned execution.",
+		payload={
+			"job": _job_payload(job),
+			"execution_state": "scheduled",
+			"requested_mode": mode,
+			"requested_source": source,
+		},
+	)
+
+
+def _cancel_index_result(*, runtime: LazyQueryToolRuntime, job_id: str) -> MCPOpsToolResult:
+	"""Cancel one index job and return a stable result envelope."""
+
+	try:
+		job = runtime.cancel_index_job(job_id)
+	except KeyError:
+		return MCPOpsToolResult(
+			operation="ops_cancel_index",
+			status="not_found",
+			summary="The requested index job was not found.",
+			warnings=(
+				Warning(
+					level="caution",
+					code="ops.job_not_found",
+					message=f"job {job_id!r} does not exist",
+					actionable=True,
+					suggested_action="Use ops_index_status to discover a valid job_id before retrying.",
+				),
+			),
+		)
+	except JobStateTransitionError as exc:
+		return MCPOpsToolResult(
+			operation="ops_cancel_index",
+			status="conflict",
+			summary="The requested index job is not cancelable in its current state.",
+			warnings=(
+				Warning(
+					level="caution",
+					code="ops.job_not_cancelable",
+					message=str(exc),
+					actionable=True,
+					suggested_action="Inspect ops_index_status and retry only for pending or running index jobs.",
+				),
+			),
+		)
+	return MCPOpsToolResult(
+		operation="ops_cancel_index",
+		status="ok",
+		summary="The requested index job was marked as cancelled.",
+		payload={"job": _job_payload(job)},
+	)
+
+
+def _list_profiles_result(
+	*,
+	runtime: LazyQueryToolRuntime,
+	snapshot_id: str | None,
+) -> MCPOpsToolResult:
+	"""List persisted profile records through the read-only metadata adapter."""
+
+	filter_snapshot = None if snapshot_id in {None, "", "current"} else snapshot_id
+	profiles = runtime.ops_reader().iter_profiles(snapshot_id=filter_snapshot)
+	return MCPOpsToolResult(
+		operation="ops_list_profiles",
+		status="ok",
+		summary=f"Returned {len(profiles)} indexed profiles.",
+		items=tuple(_record_payload(profile) for profile in profiles),
+		payload={"snapshot_id": filter_snapshot},
+	)
+
+
+def _list_sources_result(*, runtime: LazyQueryToolRuntime) -> MCPOpsToolResult:
+	"""List persisted source records through the read-only metadata adapter."""
+
+	sources = runtime.ops_reader().iter_sources()
+	return MCPOpsToolResult(
+		operation="ops_list_sources",
+		status="ok",
+		summary=f"Returned {len(sources)} indexed sources.",
+		items=tuple(_record_payload(source) for source in sources),
+		payload={"source_count": len(sources)},
+	)
+
+
+def _ops_access_blocked(
+	*,
+	context: MCPAppContext,
+	operation: str,
+) -> MCPOpsToolResult | None:
+	"""Return a stable blocked result when ops tools are not effectively exposed."""
+
+	if context.ops_tools_enabled():
+		return None
+	code = (
+		"security.ops_exposure_blocked"
+		if context.config.deployment_mode != "local_single_user"
+		else "security.ops_tools_disabled"
+	)
+	message = (
+		"Operational tools are never exposed outside local_single_user deployments."
+		if context.config.deployment_mode != "local_single_user"
+		else "Operational tools are disabled until server.expose_ops_tools=true is set."
+	)
+	suggested_action = (
+		"Use local_single_user deployment mode for local operational access."
+		if context.config.deployment_mode != "local_single_user"
+		else "Enable server.expose_ops_tools in a trusted local_single_user deployment and retry."
+	)
+	return MCPOpsToolResult(
+		operation=operation,
+		status="blocked",
+		summary="Operational tools are blocked by the effective server exposure policy.",
+		warnings=(
+			Warning(
+				level="blocked",
+				code=code,
+				message=message,
+				actionable=True,
+				suggested_action=suggested_action,
+			),
+		),
+		diagnostics={
+			"deployment_mode": context.config.deployment_mode,
+			"configured_expose_ops_tools": context.config.server.expose_ops_tools,
+		},
+	)
+
+
+def _ops_error_result(*, operation: str, summary: str, exc: Exception) -> MCPOpsToolResult:
+	"""Build a stable error envelope for unexpected ops-tool failures."""
+
+	request_id = str(uuid4())
+	return MCPOpsToolResult(
+		operation=operation,
+		status="error",
+		summary=summary,
+		warnings=(
+			Warning(
+				level="degraded",
+				code="ops.unexpected_error",
+				message=str(exc),
+				actionable=True,
+				suggested_action="Inspect the diagnostics, fix the underlying runtime issue, and retry.",
+			),
+		),
+		diagnostics={
+			"request_id": request_id,
+			"error_kind": exc.__class__.__name__,
+			"error_summary": str(exc),
+		},
+	)
+
+
+def _ops_result_count(result: MCPOpsToolResult) -> int:
+	"""Return a stable audit result-count across all ops response shapes."""
+
+	return max(len(result.items), 1 if result.payload else 0)
+
+
+def _ops_validation_checks(
+	*,
+	context: MCPAppContext,
+	strict: bool,
+) -> list[dict[str, str]]:
+	"""Build setup validation checks reused by ops_validate_setup."""
+
+	checks: list[dict[str, str]] = []
+	for name, info in _ops_path_status(context).items():
+		exists = bool(info["exists"])
+		missing_is_error = strict and name in {"workspace_root", "source_docs_root", "workdir"}
+		if exists:
+			checks.append({"name": name, "level": "ok", "message": f"{info['path']} exists"})
+		else:
+			checks.append(
+				{
+					"name": name,
+					"level": "error" if missing_is_error else "warning",
+					"message": f"{info['path']} does not exist",
+				}
+			)
+	checks.append(
+		{
+			"name": "server.transport",
+			"level": "ok",
+			"message": str(context.config.server.transport),
+		}
+	)
+	security_result = validate_startup_security(context.config)
+	if security_result.ok:
+		checks.append(
+			{
+				"name": "security.fail_safe",
+				"level": "ok",
+				"message": "fail-safe startup security checks passed",
+			}
+		)
+	else:
+		for warning in security_result.warnings:
+			checks.append({"name": warning.code, "level": "error", "message": warning.message})
+	return checks
+
+
+def _ops_path_status(context: MCPAppContext) -> dict[str, dict[str, str | bool]]:
+	"""Return existence status for important local runtime paths."""
+
+	paths = {
+		"workspace_root": context.workspace_root,
+		"source_docs_root": context.source_docs_root,
+		"workdir": context.layout.workdir,
+		"baseline_dir": context.layout.baseline_dir,
+		"local_dir": context.layout.local_dir,
+		"local_config": context.layout.local_config_path,
+	}
+	return {
+		name: {"path": str(path), "exists": path.exists(), "kind": _ops_path_kind(path)}
+		for name, path in paths.items()
+	}
+
+
+def _ops_path_kind(path: Path) -> str:
+	"""Classify an existing or missing path for ops status payloads."""
+
+	if path.is_dir():
+		return "directory"
+	if path.is_file():
+		return "file"
+	return "missing"
+
+
+def _warning_from_validation_check(check: Mapping[str, str]) -> Warning:
+	"""Convert one ops validation check into the shared warning contract."""
+
+	level = "blocked" if check["level"] == "error" else "caution"
+	return Warning(
+		level=level,
+		code=f"validation.{check['name']}",
+		message=check["message"],
+		actionable=True,
+		suggested_action="Create the missing path or adjust the local server configuration before retrying.",
+	)
+
+
+def _warning_from_storage_check(check: Any) -> Warning:
+	"""Convert one storage validation finding into the shared warning contract."""
+
+	return Warning(
+		level=check.severity,
+		code=check.check_code,
+		message=check.message,
+		details=dict(check.details),
+		actionable=check.suggested_action is not None,
+		suggested_action=check.suggested_action,
+		affected_sources=tuple(check.affected_objects),
+	)
+
+
+def _record_payload(record: Any) -> dict[str, Any]:
+	"""Return one stable JSON payload for storage-backed dataclass records."""
+
+	return dict(asdict(record))
+
+
+def _job_payload(job: Any | None) -> dict[str, Any] | None:
+	"""Return one stable JSON payload for a persisted job record."""
+
+	if job is None:
+		return None
+	return _record_payload(job)
+
+
+def _normalize_scope_value(value: str | None) -> str:
+	"""Normalize optional scope-like input values for persisted ops job metadata."""
+
+	if value is None:
+		return ALL_SCOPE
+	resolved = value.strip()
+	if not resolved or resolved == "auto":
+		return ALL_SCOPE
+	return resolved
 
 
 def _execute_search_tool(

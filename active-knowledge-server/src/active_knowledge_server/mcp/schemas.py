@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 from active_knowledge_server import __version__
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig, Transport
 from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
+from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
+from active_knowledge_server.models.responses import Warning
 from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.security.audit import AuditLogger
 
@@ -26,6 +28,15 @@ QUERY_TOOL_NAMES: Final[tuple[str, ...]] = (
 	"config_impact",
 	"workspace_view",
 	"evidence_bundle",
+)
+OPS_TOOL_NAMES: Final[tuple[str, ...]] = (
+	"ops_get_config",
+	"ops_validate_setup",
+	"ops_index_status",
+	"ops_start_index",
+	"ops_cancel_index",
+	"ops_list_profiles",
+	"ops_list_sources",
 )
 ALL_TOOL_NAMES: Final[tuple[str, ...]] = BOOTSTRAP_TOOL_NAMES + QUERY_TOOL_NAMES
 BOOTSTRAP_RESOURCE_URIS: Final[tuple[str, ...]] = (
@@ -43,6 +54,7 @@ QUERY_RESOURCE_URIS: Final[tuple[str, ...]] = (
 )
 ALL_RESOURCE_URIS: Final[tuple[str, ...]] = BOOTSTRAP_RESOURCE_URIS + QUERY_RESOURCE_URIS
 ResourceReadStatus = Literal["ok", "missing", "degraded", "blocked", "error"]
+OpsToolStatus = Literal["ok", "accepted", "blocked", "error", "not_found", "conflict"]
 
 
 def normalize_mcp_path(path: str) -> str:
@@ -65,6 +77,19 @@ class MCPAppContext:
 	config_summary: dict[str, Any]
 	audit_logger: AuditLogger
 	cwd: Path
+
+	def ops_tools_enabled(self) -> bool:
+		"""Return whether operational tools should be exposed to MCP clients."""
+
+		return (
+			self.config.deployment_mode == "local_single_user"
+			and self.config.server.expose_ops_tools
+		)
+
+	def exposed_ops_tools(self) -> tuple[str, ...]:
+		"""Return the effective operational tool inventory."""
+
+		return OPS_TOOL_NAMES if self.ops_tools_enabled() else ()
 
 	def http_endpoint(self) -> str | None:
 		"""Return the configured MCP endpoint URL when HTTP transport is enabled."""
@@ -112,6 +137,7 @@ class MCPServerInfoResult(BaseModel):
 	source_docs_root: str
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
 	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
+	ops_tools: tuple[str, ...] = ()
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
 	query_resources: tuple[str, ...] = Field(default=QUERY_RESOURCE_URIS)
 
@@ -139,6 +165,7 @@ class MCPServerRuntimeResource(BaseModel):
 	audit_enabled: bool
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
 	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
+	ops_tools: tuple[str, ...] = ()
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
 	query_resources: tuple[str, ...] = Field(default=QUERY_RESOURCE_URIS)
 	workspace_root: str
@@ -264,6 +291,18 @@ class MCPIndexStatusResource(MCPResourcePayload):
 	validation: dict[str, Any] = Field(default_factory=dict)
 	recent_jobs: tuple[dict[str, Any], ...] = ()
 	job_status_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class MCPOpsToolResult(BaseModel):
+	"""Stable response envelope shared by gated operational MCP tools."""
+
+	operation: str
+	status: OpsToolStatus
+	summary: str
+	warnings: tuple[Warning, ...] = ()
+	payload: dict[str, Any] = Field(default_factory=dict)
+	items: tuple[dict[str, Any], ...] = ()
+	diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)

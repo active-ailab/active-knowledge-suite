@@ -12,7 +12,12 @@ from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import layout_from_config
 from active_knowledge_server.mcp.resources import register_bootstrap_resources, register_query_resources
 from active_knowledge_server.mcp.schemas import MCPAppContext, MCPComponentInventory, normalize_mcp_path
-from active_knowledge_server.mcp.tools import LazyQueryToolRuntime, register_bootstrap_tools, register_query_tools
+from active_knowledge_server.mcp.tools import (
+	LazyQueryToolRuntime,
+	register_bootstrap_tools,
+	register_ops_tools,
+	register_query_tools,
+)
 from active_knowledge_server.observability.logging import configure_logging
 from active_knowledge_server.security.audit import AuditLogger
 
@@ -131,6 +136,11 @@ def create_fastmcp_app(
 	_register_health_route(mcp, context)
 	query_runtime = LazyQueryToolRuntime(context)
 	tools = register_bootstrap_tools(mcp, context) + register_query_tools(
+		mcp,
+		context,
+		runtime=query_runtime,
+	)
+	tools += register_ops_tools(
 		mcp,
 		context,
 		runtime=query_runtime,
