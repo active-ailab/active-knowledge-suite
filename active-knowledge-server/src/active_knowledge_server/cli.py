@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from active_knowledge_server.config.loader import (
 from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import (
     WorkdirLayout,
+    inspect_baseline_manifest,
     initialize_workdir,
     layout_from_config,
 )
@@ -35,6 +37,8 @@ from active_knowledge_server.eval.baseline import (
     save_baseline_snapshot,
 )
 from active_knowledge_server.eval.stability import StabilityBenchmark
+from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
+from active_knowledge_server.indexing.profile import ProfileCollector
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
     SecurityConfigError,
@@ -43,6 +47,7 @@ from active_knowledge_server.security.config import (
 )
 from active_knowledge_server.server import build_server_app, server_name
 from active_knowledge_server.storage.maintenance import clean_local_state
+from active_knowledge_server.storage.sqlite_store import SQLiteStorageAdapter
 from active_knowledge_server.storage.validation import validate_storage_consistency
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
@@ -77,13 +82,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Overwrite the generated local config if it already exists.",
     )
+    init_reuse_group = init_parser.add_mutually_exclusive_group()
+    init_reuse_group.add_argument(
+        "--reuse-baseline",
+        dest="reuse_baseline",
+        action="store_true",
+        help="Validate and reuse a shipped baseline when available.",
+    )
+    init_reuse_group.add_argument(
+        "--no-reuse-baseline",
+        dest="reuse_baseline",
+        action="store_false",
+        help="Skip baseline reuse and initialize a local-only overlay skeleton.",
+    )
     init_parser.add_argument(
         "--format",
         choices=_FORMAT_CHOICES,
         default="text",
         help="Output format.",
     )
-    init_parser.set_defaults(handler=handle_init)
+    init_parser.set_defaults(handler=handle_init, reuse_baseline=None)
 
     serve_parser = subparsers.add_parser(
         "serve",
@@ -474,17 +492,33 @@ def main(argv: Sequence[str] | None = None) -> int:
 def handle_init(args: argparse.Namespace) -> int:
     """Initialize the local workdir skeleton."""
 
-    resolved = resolve_from_args(args)
+    resolved = resolve_from_args(args, command_overrides=init_overrides(args))
     result = initialize_workdir(resolved, force=bool(args.force))
     layout = result.layout
 
     summary = config_summary(resolved)
+    index_status, index_warnings = collect_index_status(resolved)
+    baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
+        resolved,
+        layout=layout,
+        storage_validation=index_status["storage_validation"],
+    )
+    profile_status, profile_warnings = collect_profile_status(resolved)
+    warnings = collect_cli_warnings(
+        [warning.to_dict() for warning in result.warnings],
+        baseline_warnings,
+        profile_warnings,
+        index_warnings,
+    )
     payload = {
         "command": "init",
         "status": "ok",
         "created": [str(path) for path in result.created],
-        "warnings": [warning.to_dict() for warning in result.warnings],
+        "warnings": warnings,
         "baseline_manifest": result.baseline_manifest.to_dict(),
+        "baseline_reuse": baseline_reuse,
+        "profile": profile_status,
+        "index": index_status,
         "config": summary,
     }
     if args.format == "json":
@@ -493,8 +527,13 @@ def handle_init(args: argparse.Namespace) -> int:
         print(f"Initialized Active Knowledge workdir: {layout.workdir}")
         print(f"Local config: {layout.local_config_path}")
         print(f"Workspace: {summary['workspace_root']}")
-        for warning in result.warnings:
-            print(f"Warning [{warning.code}]: {warning.message}")
+        print(format_baseline_reuse_line(baseline_reuse))
+        print(format_profile_line(profile_status))
+        print(format_index_line(index_status))
+        print("Next: active-kb validate --format json")
+        print("Next: active-kb status --format json")
+        for warning in warnings:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
     return 0
 
 
@@ -551,15 +590,26 @@ def handle_status(args: argparse.Namespace) -> int:
     resolved = resolve_from_args(args)
     layout = workdir_layout(resolved)
     summary = config_summary(resolved)
+    index_status, index_warnings = collect_index_status(resolved)
+    baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
+        resolved,
+        layout=layout,
+        storage_validation=index_status["storage_validation"],
+    )
+    profile_status, profile_warnings = collect_profile_status(resolved)
     payload = {
         "command": "status",
         "status": "ok",
         "config": summary,
         "paths": path_status(layout, resolved),
-        "index": {
-            "result_status": "partial_ready",
-            "message": "Storage and indexing backends are not implemented yet.",
-        },
+        "baseline_reuse": baseline_reuse,
+        "profile": profile_status,
+        "index": index_status,
+        "warnings": collect_cli_warnings(
+            baseline_warnings,
+            profile_warnings,
+            index_warnings,
+        ),
     }
     if args.format == "json":
         print_json(payload)
@@ -570,7 +620,11 @@ def handle_status(args: argparse.Namespace) -> int:
             f"Local config: {layout.local_config_path} ({exists_label(layout.local_config_path)})"
         )
         print(f"Transport: {summary['transport']}")
-        print("Index: partial_ready (storage/indexing backends pending)")
+        print(format_baseline_reuse_line(baseline_reuse))
+        print(format_profile_line(profile_status))
+        print(format_index_line(index_status))
+        for warning in payload["warnings"]:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
     return 0
 
 
@@ -580,14 +634,31 @@ def handle_validate(args: argparse.Namespace) -> int:
     resolved = resolve_from_args(args)
     layout = workdir_layout(resolved)
     checks = validation_checks(layout, resolved, strict=bool(args.strict))
-    storage_report = validate_storage_consistency(resolved.model, cwd=Path.cwd())
+    index_status, index_warnings = collect_index_status(resolved)
+    baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
+        resolved,
+        layout=layout,
+        storage_validation=index_status["storage_validation"],
+    )
+    profile_status, profile_warnings = collect_profile_status(resolved)
+    storage_report = index_status["storage_validation"]
     errors = [check for check in checks if check["level"] == "error"]
     payload = {
         "schema_version": "active_kb_validate.v1",
         "command": "validate",
-        "status": "error" if errors or storage_report.status == "blocked" else "ok",
+        "status": "error"
+        if errors or str(storage_report["status"]) == "blocked"
+        else "ok",
         "checks": checks,
-        "storage_report": storage_report.to_dict(),
+        "storage_report": storage_report,
+        "baseline_reuse": baseline_reuse,
+        "profile": profile_status,
+        "index": index_status,
+        "warnings": collect_cli_warnings(
+            baseline_warnings,
+            profile_warnings,
+            index_warnings,
+        ),
         "config": config_summary(resolved),
     }
 
@@ -597,13 +668,18 @@ def handle_validate(args: argparse.Namespace) -> int:
         print("Validation checks")
         for check in checks:
             print(f"- {check['level']}: {check['name']} - {check['message']}")
-        print(f"Storage consistency: {storage_report.status}")
-        for storage_check in storage_report.checks:
+        print(format_baseline_reuse_line(baseline_reuse))
+        print(format_profile_line(profile_status))
+        print(format_index_line(index_status))
+        print(f"Storage consistency: {storage_report['status']}")
+        for storage_check in storage_report["checks"]:
             print(
-                f"- {storage_check.severity}: "
-                f"{storage_check.check_code} - {storage_check.message}"
+                f"- {storage_check['severity']}: "
+                f"{storage_check['check_code']} - {storage_check['message']}"
             )
-    return 1 if errors or storage_report.status == "blocked" else 0
+        for warning in payload["warnings"]:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
+    return 1 if errors or str(storage_report["status"]) == "blocked" else 0
 
 
 def handle_clean(args: argparse.Namespace) -> int:
@@ -992,6 +1068,16 @@ def serve_overrides(args: argparse.Namespace) -> ConfigDict:
     return overrides
 
 
+def init_overrides(args: argparse.Namespace) -> ConfigDict:
+    """Build init-specific config overrides."""
+
+    overrides: ConfigDict = {}
+    reuse_baseline = getattr(args, "reuse_baseline", None)
+    if reuse_baseline is not None:
+        set_nested(overrides, ("indexing", "reuse_baseline"), bool(reuse_baseline))
+    return overrides
+
+
 def index_overrides(args: argparse.Namespace) -> ConfigDict:
     """Build index-specific config overrides."""
 
@@ -1059,6 +1145,286 @@ def path_status(
         name: {"path": str(path), "exists": path.exists(), "kind": path_kind(path)}
         for name, path in paths.items()
     }
+
+
+def collect_baseline_reuse_status(
+    resolved: ResolvedConfig,
+    *,
+    layout: WorkdirLayout | None = None,
+    storage_validation: dict[str, object] | None = None,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Summarize baseline reuse readiness and related warnings."""
+
+    runtime_layout = layout or workdir_layout(resolved)
+    manifest_status, manifest_warning = inspect_baseline_manifest(runtime_layout.baseline_manifest_path)
+    manifest_payload, manifest_payload_warning = read_baseline_manifest_payload(
+        runtime_layout.baseline_manifest_path
+    )
+    enabled = bool(resolved.model.indexing.reuse_baseline)
+    if not enabled:
+        status = "disabled"
+    elif not manifest_status.exists:
+        status = "missing"
+    elif not manifest_status.readable or manifest_payload_warning is not None:
+        status = "blocked"
+    else:
+        status = baseline_reuse_storage_status(
+            runtime_layout=runtime_layout,
+            storage_validation=storage_validation,
+        )
+
+    warnings: list[dict[str, object]] = []
+    if enabled and manifest_warning is not None:
+        warnings.append(manifest_warning.to_dict())
+    if enabled and manifest_payload_warning is not None:
+        warnings.append(manifest_payload_warning)
+    return (
+        {
+            "enabled": enabled,
+            "status": status,
+            "manifest": manifest_status.to_dict(),
+            "baseline_id": manifest_payload.get("baseline_id"),
+            "default_profile": manifest_payload.get("default_profile"),
+            "project_id": manifest_payload.get("project_id"),
+            "schema_version": manifest_payload.get("schema_version"),
+            "storage_status": baseline_reuse_storage_status(
+                runtime_layout=runtime_layout,
+                storage_validation=storage_validation,
+            ),
+        },
+        tuple(warnings),
+    )
+
+
+def baseline_reuse_storage_status(
+    *,
+    runtime_layout: WorkdirLayout,
+    storage_validation: dict[str, object] | None,
+) -> str:
+    """Map baseline-related storage findings to a baseline reuse readiness status."""
+
+    if storage_validation is None:
+        return "ready"
+    checks = storage_validation.get("checks")
+    if not isinstance(checks, list):
+        return "ready"
+    baseline_root = str(runtime_layout.baseline_dir)
+    status = "ready"
+    for raw_check in checks:
+        if not isinstance(raw_check, dict):
+            continue
+        code = str(raw_check.get("check_code", ""))
+        severity = str(raw_check.get("severity", ""))
+        affected = tuple(str(item) for item in raw_check.get("affected_objects", ()))
+        baseline_related = code.startswith("baseline.") or any(
+            item.startswith(baseline_root) for item in affected
+        )
+        if not baseline_related:
+            continue
+        if code == "storage.schema_missing":
+            return "missing"
+        if severity == "blocked":
+            return "blocked"
+        if severity in {"degraded", "caution"}:
+            status = "partial_ready"
+    return status
+
+
+def read_baseline_manifest_payload(path: Path) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Read a baseline manifest payload when it is available and valid JSON."""
+
+    if not path.exists():
+        return {}, None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, {
+            "level": "blocked",
+            "code": "baseline.manifest_invalid",
+            "message": f"Baseline manifest is not valid JSON: {exc}",
+            "path": str(path),
+        }
+    if not isinstance(payload, dict):
+        return {}, {
+            "level": "blocked",
+            "code": "baseline.manifest_invalid",
+            "message": "Baseline manifest must decode to a JSON object.",
+            "path": str(path),
+        }
+    return cast(dict[str, object], payload), None
+
+
+def collect_profile_status(
+    resolved: ResolvedConfig,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Summarize the current default profile resolution state."""
+
+    collected = ProfileCollector.from_config(resolved.model, cwd=Path.cwd()).collect()
+    resolution = collected.resolution
+    warnings = tuple(
+        warning.to_dict()
+        for warning in (
+            *collected.warnings,
+            *resolution.warnings,
+        )
+    )
+    return (
+        {
+            "requested": resolution.requested,
+            "status": resolution.status,
+            "resolved_profile_id": resolution.resolved_profile_id,
+            "source": resolution.source,
+            "confidence": resolution.confidence,
+            "profile_count": len(collected.profile_records),
+            "candidate_count": len(resolution.candidates),
+            "candidate_profile_ids": [candidate.profile_id for candidate in resolution.candidates],
+            "manifest_hash": collected.manifest_hash,
+        },
+        warnings,
+    )
+
+
+def collect_index_status(
+    resolved: ResolvedConfig,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Summarize storage validation plus recent index job state."""
+
+    adapter = SQLiteStorageAdapter.from_config(resolved.model, cwd=Path.cwd())
+    reader = adapter.reader()
+    storage_report = validate_storage_consistency(resolved.model, cwd=Path.cwd())
+    recent_jobs_raw = tuple(reader.iter_jobs())[:10]
+    recent_jobs = tuple(
+        {
+            "job_id": job.job_id,
+            "job_type": job.job_type,
+            "status": job.status,
+            "write_target": job.write_target,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+            "snapshot_id": job.snapshot_id,
+            "profile_id": job.profile_id,
+            "error_summary": job.error_summary,
+            "metadata": dict(job.metadata),
+        }
+        for job in recent_jobs_raw
+    )
+    current_snapshot = reader.get_snapshot(resolved.model.project.default_snapshot)
+    result_status = infer_index_result_status(
+        storage_status=storage_report.status,
+        current_snapshot_exists=current_snapshot is not None,
+        recent_jobs=recent_jobs_raw,
+    )
+    payload = {
+        "result_status": result_status,
+        "message": index_status_message(result_status),
+        "snapshot_id": None if current_snapshot is None else current_snapshot.snapshot_id,
+        "storage_validation": storage_report.to_dict(),
+        "recent_jobs": list(recent_jobs),
+        "job_status_counts": dict(sorted(Counter(job.status for job in recent_jobs_raw).items())),
+    }
+    warnings = tuple(
+        warning_from_storage_check(check) for check in storage_report.checks if check.severity != "info"
+    )
+    return payload, warnings
+
+
+def infer_index_result_status(
+    *,
+    storage_status: str,
+    current_snapshot_exists: bool,
+    recent_jobs: Sequence[Any],
+) -> str:
+    """Infer the user-facing index status from validation and job state."""
+
+    if recent_jobs:
+        latest = recent_jobs[0]
+        status = str(latest.status)
+        if status in RUNNING_JOB_STATUSES or status in {"pending", "ready", "failed", "partial_ready"}:
+            return status
+    if storage_status == "blocked":
+        return "blocked"
+    if not current_snapshot_exists:
+        return "missing"
+    if storage_status == "degraded":
+        return "partial_ready"
+    return "ready"
+
+
+def index_status_message(result_status: str) -> str:
+    """Return a short human-readable index health summary."""
+
+    messages = {
+        "pending": "An index job is queued.",
+        "discovering": "An index job is collecting workspace and source metadata.",
+        "parsing": "An index job is parsing source inputs.",
+        "extracting": "An index job is extracting entities, chunks, and relations.",
+        "embedding": "An index job is building vector payloads.",
+        "reporting": "An index job is writing reports and final metadata.",
+        "ready": "The current snapshot is queryable.",
+        "failed": "The most recent index job failed; inspect recent_jobs for details.",
+        "partial_ready": "The index is queryable with degraded coverage or warnings.",
+        "blocked": "Storage validation found blocking issues.",
+        "missing": "No indexed snapshot is available yet.",
+    }
+    return messages.get(result_status, "Index status is unknown.")
+
+
+def warning_from_storage_check(check: Any) -> dict[str, object]:
+    """Convert one storage validation finding into the shared warning shape."""
+
+    return {
+        "level": check.severity,
+        "code": check.check_code,
+        "message": check.message,
+        "affected_objects": list(check.affected_objects),
+        "suggested_action": check.suggested_action,
+        "details": dict(check.details),
+    }
+
+
+def collect_cli_warnings(*warning_groups: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    """Merge warning payloads while preserving order and removing duplicates."""
+
+    merged: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in warning_groups:
+        for warning in group:
+            code = str(warning.get("code", "unknown"))
+            message = str(warning.get("message", ""))
+            key = (code, message)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(warning))
+    return merged
+
+
+def format_baseline_reuse_line(summary: dict[str, object]) -> str:
+    """Render one text-mode baseline reuse summary line."""
+
+    status = str(summary["status"])
+    baseline_id = summary.get("baseline_id")
+    suffix = f" [{baseline_id}]" if baseline_id else ""
+    return f"Baseline reuse: {status}{suffix}"
+
+
+def format_profile_line(summary: dict[str, object]) -> str:
+    """Render one text-mode profile summary line."""
+
+    status = str(summary["status"])
+    resolved_profile = summary.get("resolved_profile_id")
+    requested = summary.get("requested")
+    if resolved_profile:
+        return f"Profile: {status} ({resolved_profile})"
+    if requested:
+        return f"Profile: {status} (requested={requested})"
+    return f"Profile: {status}"
+
+
+def format_index_line(summary: dict[str, object]) -> str:
+    """Render one text-mode index summary line."""
+
+    return f"Index: {summary['result_status']} ({summary['message']})"
 
 
 def validation_checks(

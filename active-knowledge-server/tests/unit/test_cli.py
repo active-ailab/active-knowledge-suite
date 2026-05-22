@@ -104,7 +104,10 @@ def test_status_json_is_machine_readable(capsys) -> None:
     assert exit_code == 0
     assert payload["command"] == "status"
     assert payload["status"] == "ok"
-    assert payload["index"]["result_status"] == "partial_ready"
+    assert "baseline_reuse" in payload
+    assert "profile" in payload
+    assert "index" in payload
+    assert "warnings" in payload
 
 
 def test_init_creates_workdir_and_local_config(tmp_path: Path, capsys) -> None:
@@ -113,6 +116,18 @@ def test_init_creates_workdir_and_local_config(tmp_path: Path, capsys) -> None:
     workdir = tmp_path / ".active-kb"
     workspace.mkdir()
     source_docs.mkdir()
+    write_profile_fixture(
+        workspace,
+        defconfig_rel="configs/mhs003_watch_defconfig",
+        dotconfig_rel="build/.config",
+        app="watch",
+        board="mhs003",
+    )
+    write_baseline_manifest(
+        workdir / "baseline" / "manifest.json",
+        baseline_id="baseline-unit",
+        default_profile="mhs003_watch",
+    )
 
     exit_code = main(
         [
@@ -123,6 +138,7 @@ def test_init_creates_workdir_and_local_config(tmp_path: Path, capsys) -> None:
             str(workspace),
             "--source-docs-root",
             str(source_docs),
+            "--reuse-baseline",
             "--format",
             "json",
         ]
@@ -137,6 +153,146 @@ def test_init_creates_workdir_and_local_config(tmp_path: Path, capsys) -> None:
     assert local_config.exists()
     assert (workdir / "local" / "db").is_dir()
     assert (workdir / "baseline" / "config").is_dir()
+    assert payload["baseline_reuse"]["enabled"] is True
+    assert payload["baseline_reuse"]["status"] == "missing"
+    assert payload["profile"]["status"] == "resolved"
+    assert payload["profile"]["resolved_profile_id"] == "mhs003_watch"
+    assert payload["index"]["result_status"] == "missing"
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "compile_db.missing",
+        "storage.schema_missing",
+    }
+
+
+def test_status_json_reports_baseline_profile_index_and_warnings(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    write_profile_fixture(
+        workspace,
+        defconfig_rel="configs/mhs003_watch_defconfig",
+        dotconfig_rel="build/.config",
+        app="watch",
+        board="mhs003",
+    )
+    write_baseline_manifest(
+        workdir / "baseline" / "manifest.json",
+        baseline_id="baseline-unit",
+        default_profile="mhs003_watch",
+    )
+    main(
+        [
+            "init",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--reuse-baseline",
+            "--format",
+            "json",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "status",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["baseline_reuse"]["status"] == "missing"
+    assert payload["profile"]["status"] == "resolved"
+    assert payload["profile"]["resolved_profile_id"] == "mhs003_watch"
+    assert payload["index"]["result_status"] == "missing"
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "compile_db.missing",
+        "storage.schema_missing",
+    }
+
+
+def test_validate_json_reports_baseline_profile_index_and_warnings(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    write_profile_fixture(
+        workspace,
+        defconfig_rel="configs/mhs003_watch_defconfig",
+        dotconfig_rel="build/.config",
+        app="watch",
+        board="mhs003",
+    )
+    write_baseline_manifest(
+        workdir / "baseline" / "manifest.json",
+        baseline_id="baseline-unit",
+        default_profile="mhs003_watch",
+    )
+    main(
+        [
+            "init",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--reuse-baseline",
+            "--format",
+            "json",
+        ]
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "validate",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert payload["baseline_reuse"]["status"] == "missing"
+    assert payload["profile"]["status"] == "resolved"
+    assert payload["profile"]["resolved_profile_id"] == "mhs003_watch"
+    assert payload["index"]["result_status"] == "missing"
+    assert {warning["code"] for warning in payload["warnings"]} == {
+        "compile_db.missing",
+        "storage.schema_missing",
+    }
 
 
 def test_validate_strict_reports_missing_workdir(tmp_path: Path, capsys) -> None:
@@ -797,6 +953,48 @@ def test_serve_without_json_runs_server(monkeypatch, tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert called["run"] is True
+
+
+def write_profile_fixture(
+    workspace_root: Path,
+    *,
+    defconfig_rel: str,
+    dotconfig_rel: str,
+    app: str,
+    board: str,
+) -> None:
+    defconfig_path = workspace_root / defconfig_rel
+    dotconfig_path = workspace_root / dotconfig_rel
+    defconfig_path.parent.mkdir(parents=True, exist_ok=True)
+    dotconfig_path.parent.mkdir(parents=True, exist_ok=True)
+    defconfig_path.write_text(
+        f'CONFIG_APP="{app}"\nCONFIG_BOARD="{board}"\nCONFIG_FEATURE_{app.upper()}=y\n',
+        encoding="utf-8",
+    )
+    dotconfig_path.write_text(
+        f'CONFIG_APP="{app}"\nCONFIG_BOARD="{board}"\nCONFIG_RUNTIME_READY=y\n',
+        encoding="utf-8",
+    )
+
+
+def write_baseline_manifest(
+    path: Path,
+    *,
+    baseline_id: str,
+    default_profile: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "active_kb_baseline_manifest.v1",
+                "baseline_id": baseline_id,
+                "default_profile": default_profile,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _quality_report(

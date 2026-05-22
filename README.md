@@ -68,10 +68,19 @@ pip install -e ./active-knowledge-server
 ### 2. 初始化工作目录
 
 ```bash
-active-kb init --workspace /path/to/your/project
+active-kb init \
+  --workspace /path/to/your/project \
+  --source-docs-root /path/to/knowledge-sources \
+  --reuse-baseline
 ```
 
 会在当前目录创建 `.active-kb/local/`，并生成 `active-kb.local.yaml` 配置文件。
+初始化后可以立即检查本地状态：
+
+```bash
+active-kb validate --format json
+active-kb status --format json
+```
 
 ### 3. 执行增量索引
 
@@ -80,7 +89,7 @@ active-kb init --workspace /path/to/your/project
 active-kb index
 
 # 查看索引状态
-active-kb status
+active-kb status --format text
 ```
 
 ### 4. 启动 MCP 服务器

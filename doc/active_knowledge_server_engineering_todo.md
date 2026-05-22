@@ -1479,21 +1479,25 @@ TODO：
 
 ### O8-01 Init/validate/status 端到端
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`C1-02`、`S2-08`、`P4-02`
 
 TODO：
 
-- [ ] `init --workspace --reuse-baseline`。
-- [ ] `validate --format text|json`。
-- [ ] `status --format text|json`。
-- [ ] 输出 baseline reuse status、profile status、index status、warnings。
+- [x] `init --workspace --reuse-baseline`。
+- [x] `validate --format text|json`。
+- [x] `status --format text|json`。
+- [x] 输出 baseline reuse status、profile status、index status、warnings。
 
 验收标准：
 
 - 新用户能按 README 在本地完成初始化。
+
+输出：
+
+- 已补齐 `active-kb init --reuse-baseline` CLI 入口，并让 `init`/`validate`/`status` 统一输出 baseline reuse、profile、index、warnings 四类状态摘要；`README.md` 现已同步给出 `init + validate + status` 本地启动路径，聚焦单测覆盖 `tests/unit/test_cli.py` 与 `tests/unit/test_workdir.py`。
 
 ### O8-02 Index/rebuild/baseline publish
 
