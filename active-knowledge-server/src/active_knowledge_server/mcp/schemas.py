@@ -6,12 +6,13 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel, Field
 
 from active_knowledge_server import __version__
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig, Transport
+from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
 from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.security.audit import AuditLogger
 
@@ -31,6 +32,17 @@ BOOTSTRAP_RESOURCE_URIS: Final[tuple[str, ...]] = (
 	"active://config/current",
 	"active://server/runtime",
 )
+QUERY_RESOURCE_URIS: Final[tuple[str, ...]] = (
+	"active://snapshot/current",
+	"active://profile/{profile_id}",
+	"active://workspace/current/summary",
+	"active://workspace/current/tree",
+	"active://entity/{entity_id}",
+	"active://evidence/{evidence_id}",
+	"active://index/status",
+)
+ALL_RESOURCE_URIS: Final[tuple[str, ...]] = BOOTSTRAP_RESOURCE_URIS + QUERY_RESOURCE_URIS
+ResourceReadStatus = Literal["ok", "missing", "degraded", "blocked", "error"]
 
 
 def normalize_mcp_path(path: str) -> str:
@@ -101,6 +113,7 @@ class MCPServerInfoResult(BaseModel):
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
 	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
+	query_resources: tuple[str, ...] = Field(default=QUERY_RESOURCE_URIS)
 
 
 class MCPConfigSummaryResource(BaseModel):
@@ -127,9 +140,130 @@ class MCPServerRuntimeResource(BaseModel):
 	bootstrap_tools: tuple[str, ...] = Field(default=BOOTSTRAP_TOOL_NAMES)
 	query_tools: tuple[str, ...] = Field(default=QUERY_TOOL_NAMES)
 	bootstrap_resources: tuple[str, ...] = Field(default=BOOTSTRAP_RESOURCE_URIS)
+	query_resources: tuple[str, ...] = Field(default=QUERY_RESOURCE_URIS)
 	workspace_root: str
 	workdir: str
 	source_docs_root: str
+
+
+class MCPResourcePayload(BaseModel):
+	"""Base payload shared by read-only MCP resources."""
+
+	status: ResourceReadStatus = "ok"
+	requested_uri: str
+	message: str | None = None
+
+
+class MCPSnapshotResource(MCPResourcePayload):
+	"""Current snapshot metadata surfaced through a read-only MCP resource."""
+
+	requested_snapshot_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	workspace_revision: str | None = None
+	baseline_id: str | None = None
+	manifest_version: str | None = None
+	created_at: str | None = None
+	available_profile_ids: tuple[str, ...] = ()
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPProfileResource(MCPResourcePayload):
+	"""One profile record surfaced through the read-only MCP resource layer."""
+
+	requested_profile_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	profile_record_id: str | None = None
+	profile_id: str | None = None
+	defconfig_hash: str | None = None
+	dotconfig_hash: str | None = None
+	defconfig_path: str | None = None
+	dotconfig_path: str | None = None
+	app: str | None = None
+	board: str | None = None
+	available_profile_ids: tuple[str, ...] = ()
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPWorkspaceSummaryResource(MCPResourcePayload):
+	"""Summary-only workspace projection resource."""
+
+	requested_snapshot_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	schema_version: str | None = None
+	workspace_root: str | None = None
+	inventory_hash: str | None = None
+	generated_at: str | None = None
+	summary: dict[str, Any] = Field(default_factory=dict)
+	view_names: tuple[str, ...] = ()
+	view_summaries: dict[str, str] = Field(default_factory=dict)
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPWorkspaceTreeResource(MCPResourcePayload):
+	"""Tree-focused workspace projection resource."""
+
+	requested_snapshot_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	schema_version: str | None = None
+	workspace_root: str | None = None
+	inventory_hash: str | None = None
+	generated_at: str | None = None
+	summary: dict[str, Any] = Field(default_factory=dict)
+	workspace_tree: dict[str, Any] | None = None
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPEntityResource(MCPResourcePayload):
+	"""Logical entity view surfaced through a read-only MCP resource."""
+
+	requested_entity_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	entity_id: str | None = None
+	source_index: SourceIndex | None = None
+	entity_type: str | None = None
+	name: str | None = None
+	qualified_name: str | None = None
+	path: str | None = None
+	profile_id: str | None = None
+	start_line: int | None = None
+	end_line: int | None = None
+	replaced_from: tuple[str, ...] = ()
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPEvidenceResource(MCPResourcePayload):
+	"""Logical evidence view surfaced through a read-only MCP resource."""
+
+	requested_evidence_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	evidence_id: str | None = None
+	source_index: SourceIndex | None = None
+	object_type: str | None = None
+	object_id: str | None = None
+	profile_id: str | None = None
+	citation_label: str | None = None
+	start_line: int | None = None
+	end_line: int | None = None
+	replaced_from: tuple[str, ...] = ()
+	evidence_ref: EvidenceRef | None = None
+	metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MCPIndexStatusResource(MCPResourcePayload):
+	"""Current index validation and job-status resource."""
+
+	requested_snapshot_id: str
+	snapshot_id: str | None = None
+	resolved_snapshot_id: str | None = None
+	validation: dict[str, Any] = Field(default_factory=dict)
+	recent_jobs: tuple[dict[str, Any], ...] = ()
+	job_status_counts: dict[str, int] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)

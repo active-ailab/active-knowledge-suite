@@ -1234,21 +1234,22 @@ TODO：
 
 ### M6-03 Resources
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`P4-07`、`Q5-10`
+- 输出：已实现 `active://config/current`、`active://snapshot/current`、`active://profile/{profile_id}`、`active://workspace/current/summary`、`active://workspace/current/tree`、`active://entity/{entity_id}`、`active://evidence/{evidence_id}`、`active://index/status` 八类只读 MCP resources，并补充资源契约模型、只读 runtime 初始化路径与聚焦单测，验证资源读取不触发索引或 SQLite migration 写入。
 
 TODO：
 
-- [ ] `active://config/current`
-- [ ] `active://snapshot/current`
-- [ ] `active://profile/{profile_id}`
-- [ ] `active://workspace/current/summary`
-- [ ] `active://workspace/current/tree`
-- [ ] `active://entity/{entity_id}`
-- [ ] `active://evidence/{evidence_id}`
-- [ ] `active://index/status`
+- [x] `active://config/current`
+- [x] `active://snapshot/current`
+- [x] `active://profile/{profile_id}`
+- [x] `active://workspace/current/summary`
+- [x] `active://workspace/current/tree`
+- [x] `active://entity/{entity_id}`
+- [x] `active://evidence/{evidence_id}`
+- [x] `active://index/status`
 
 验收标准：
 

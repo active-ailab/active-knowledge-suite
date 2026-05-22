@@ -10,7 +10,7 @@ from active_knowledge_server import __version__
 from active_knowledge_server.config.loader import ResolvedConfig, resolve_runtime_path
 from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import layout_from_config
-from active_knowledge_server.mcp.resources import register_bootstrap_resources
+from active_knowledge_server.mcp.resources import register_bootstrap_resources, register_query_resources
 from active_knowledge_server.mcp.schemas import MCPAppContext, MCPComponentInventory, normalize_mcp_path
 from active_knowledge_server.mcp.tools import LazyQueryToolRuntime, register_bootstrap_tools, register_query_tools
 from active_knowledge_server.observability.logging import configure_logging
@@ -135,7 +135,11 @@ def create_fastmcp_app(
 		context,
 		runtime=query_runtime,
 	)
-	resources = register_bootstrap_resources(mcp, context)
+	resources = register_bootstrap_resources(mcp, context) + register_query_resources(
+		mcp,
+		context,
+		runtime=query_runtime,
+	)
 	return ActiveKnowledgeFastMCPApp(
 		mcp=mcp,
 		context=context,

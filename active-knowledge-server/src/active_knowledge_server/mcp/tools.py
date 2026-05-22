@@ -23,7 +23,7 @@ from active_knowledge_server.models.query import QueryDomain, QueryGranularity, 
 from active_knowledge_server.models.responses import QueryResult, Warning
 from active_knowledge_server.query.service import QueryService
 from active_knowledge_server.security.path_guard import PathBlockedError
-from active_knowledge_server.storage.base import ALL_SCOPE
+from active_knowledge_server.storage.base import ALL_SCOPE, StorageReader
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.sqlite_store import (
 	SQLiteStorageAdapter,
@@ -46,6 +46,9 @@ class LazyQueryToolRuntime:
 	_query_service: QueryService | None = None
 	_workspace_connector: WorkspaceConnector | None = None
 	_workspace_map_builder: WorkspaceMapBuilder | None = None
+	_readonly_metadata_adapter: SQLiteStorageAdapter | None = None
+	_readonly_workspace_connector: WorkspaceConnector | None = None
+	_readonly_workspace_map_builder: WorkspaceMapBuilder | None = None
 
 	def search_query(self, request: QueryRequest) -> QueryResult:
 		"""Run one routed hybrid query using the shared service."""
@@ -87,6 +90,29 @@ class LazyQueryToolRuntime:
 			profiles=reader.iter_profiles(snapshot_id=snapshot_id),
 		)
 
+	def resource_reader(self) -> StorageReader:
+		"""Return a read-only metadata reader without triggering migrations."""
+
+		self._ensure_readonly_initialized()
+		assert self._readonly_metadata_adapter is not None
+		return self._readonly_metadata_adapter.reader()
+
+	def collect_workspace_artifact_readonly(self, *, snapshot_id: str) -> WorkspaceMapArtifact:
+		"""Build one workspace projection artifact without triggering storage migrations."""
+
+		self._ensure_readonly_initialized()
+		assert self._readonly_metadata_adapter is not None
+		assert self._readonly_workspace_connector is not None
+		assert self._readonly_workspace_map_builder is not None
+		reader = self._readonly_metadata_adapter.reader()
+		inventory = self._readonly_workspace_connector.scan()
+		return self._readonly_workspace_map_builder.collect(
+			snapshot_id=snapshot_id,
+			workspace_inventory=inventory,
+			reader=reader,
+			profiles=reader.iter_profiles(snapshot_id=snapshot_id),
+		)
+
 	def _ensure_initialized(self) -> None:
 		if self._query_service is not None:
 			return
@@ -118,6 +144,23 @@ class LazyQueryToolRuntime:
 			cwd=self.context.cwd,
 		)
 		self._workspace_map_builder = WorkspaceMapBuilder.from_config(
+			self.context.config,
+			cwd=self.context.cwd,
+		)
+
+	def _ensure_readonly_initialized(self) -> None:
+		if self._readonly_metadata_adapter is not None:
+			return
+
+		self._readonly_metadata_adapter = SQLiteStorageAdapter.from_config(
+			self.context.config,
+			cwd=self.context.cwd,
+		)
+		self._readonly_workspace_connector = WorkspaceConnector.from_config(
+			self.context.config,
+			cwd=self.context.cwd,
+		)
+		self._readonly_workspace_map_builder = WorkspaceMapBuilder.from_config(
 			self.context.config,
 			cwd=self.context.cwd,
 		)
