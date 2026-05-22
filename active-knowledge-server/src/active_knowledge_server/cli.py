@@ -229,6 +229,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_run_parser.set_defaults(handler=handle_eval_run)
 
+    perf_parser = subparsers.add_parser(
+        "perf",
+        help="Run performance gate benchmarks and emit machine-readable reports.",
+    )
+    perf_subparsers = perf_parser.add_subparsers(dest="perf_command", metavar="PERF_COMMAND")
+
+    perf_run_parser = perf_subparsers.add_parser(
+        "run",
+        parents=[common],
+        help="Load and execute the E7-03 performance suite.",
+    )
+    perf_run_parser.add_argument(
+        "--gate",
+        default="v1",
+        help="Gate identifier recorded in the performance report.",
+    )
+    perf_run_parser.add_argument(
+        "--cases",
+        type=Path,
+        default=Path("eval") / "performance_cases.yaml",
+        help="Performance case YAML file.",
+    )
+    perf_run_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional output path for the performance report JSON.",
+    )
+    perf_run_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    perf_run_parser.set_defaults(handler=handle_perf_run)
+
     return parser
 
 
@@ -446,12 +481,18 @@ def handle_eval_run(args: argparse.Namespace) -> int:
 
     resolved = resolve_from_args(args)
     runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
-    report = runner.run(resolve_eval_cases_path(args), gate_id=str(args.gate))
+    report = runner.run(
+        resolve_eval_cases_path(args),
+        gate_id=str(args.gate),
+    )
     if args.report is not None:
         report_path = Path(args.report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report = report.model_copy(update={"artifacts": report.artifacts + (str(report_path),)})
-        report_path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        report_path.write_text(
+            json.dumps(report.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
     payload = {
         "command": "eval run",
         **report.to_dict(),
@@ -471,6 +512,44 @@ def handle_eval_run(args: argparse.Namespace) -> int:
     return 1 if report.status == "fail" else 0
 
 
+def handle_perf_run(args: argparse.Namespace) -> int:
+    """Load and execute the configured performance suite."""
+
+    resolved = resolve_from_args(args)
+    runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
+    report = runner.run(
+        resolve_performance_cases_path(args),
+        gate_id=str(args.gate),
+        suite_kind="performance",
+    )
+    if args.report is not None:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = report.model_copy(update={"artifacts": report.artifacts + (str(report_path),)})
+        report_path.write_text(
+            json.dumps(report.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    payload = {
+        "command": "perf run",
+        **report.to_dict(),
+        "config": config_summary(resolved),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Performance suite: {report.suite_id}")
+        print(f"Gate: {report.gate_id}")
+        print(f"Status: {report.status}")
+        performance_gate = report.metrics.get("performance_gate", {})
+        sample_counts = performance_gate.get("sample_counts", {})
+        if sample_counts:
+            print(f"Probes: {len(sample_counts)}")
+        for warning in report.warnings:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
+    return 1 if report.status == "fail" else 0
+
+
 def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
     """Resolve the default eval suite path for the selected gate."""
 
@@ -481,7 +560,18 @@ def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
             return candidate
     if str(args.gate) == "quality":
         return Path("eval") / "quality_cases.yaml"
+    if str(args.gate) == "performance":
+        return Path("eval") / "performance_cases.yaml"
     return Path("eval") / "cases.yaml"
+
+
+def resolve_performance_cases_path(args: argparse.Namespace) -> Path:
+    """Resolve the default performance suite path."""
+
+    cases_path = getattr(args, "cases", None)
+    if cases_path is not None:
+        return Path(cases_path)
+    return Path("eval") / "performance_cases.yaml"
 
 
 def resolve_from_args(

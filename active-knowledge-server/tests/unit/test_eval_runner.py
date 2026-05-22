@@ -5,9 +5,15 @@ from pathlib import Path
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.eval import EvalRunner
 from active_knowledge_server.eval.benchmark import QualityBenchmark
+from active_knowledge_server.eval.metrics import (
+    PERFORMANCE_GATE_THRESHOLDS,
+    PerformanceProbeObservation,
+)
+from active_knowledge_server.eval.performance import PerformanceBenchmark
 
 CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
 QUALITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "quality_cases.yaml"
+PERFORMANCE_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "performance_cases.yaml"
 
 
 def _resolved_config(tmp_path: Path) -> object:
@@ -90,3 +96,172 @@ def test_eval_runner_fails_quality_gate_when_thresholds_regress(tmp_path: Path) 
     failed_checks = [item for item in report.metrics["quality_gate"]["checks"] if not item["passed"]]
     assert failed_checks
     assert any(item["metric"] in {"evidence_hit_rate", "top_5_recall", "mrr"} for item in failed_checks)
+
+
+def test_eval_runner_executes_performance_suite_and_reports_pass(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class PassingPerformanceBenchmark:
+        def measure_suite(self, suite):
+            del suite
+            return _performance_observations()
+
+        def environment(self):
+            return {
+                "platform": "test-platform",
+                "python_version": "3.11.0",
+                "cpu_count": 4,
+                "transport": "streamable-http",
+            }
+
+        def dataset_scale(self):
+            return {
+                "workspace_files": 103,
+                "source_docs_files": 3,
+                "incremental_probe_files": 100,
+            }
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        performance_benchmark_factory=PassingPerformanceBenchmark,
+    )
+
+    report = runner.run(PERFORMANCE_CASES_FILE, gate_id="performance")
+
+    assert report.status == "pass"
+    assert report.failures == ()
+    performance_gate = report.metrics["performance_gate"]
+    assert performance_gate["passed"] is True
+    assert performance_gate["environment"]["transport"] == "streamable-http"
+    assert performance_gate["sample_counts"]["serve_startup"] == 5
+
+
+def test_eval_runner_supports_named_performance_suite_with_release_gate_id(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class PassingPerformanceBenchmark:
+        def measure_suite(self, suite):
+            del suite
+            return _performance_observations()
+
+        def environment(self):
+            return {
+                "platform": "test-platform",
+                "python_version": "3.11.0",
+                "cpu_count": 4,
+                "transport": "streamable-http",
+            }
+
+        def dataset_scale(self):
+            return {
+                "workspace_files": 103,
+                "source_docs_files": 3,
+                "incremental_probe_files": 100,
+            }
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        performance_benchmark_factory=PassingPerformanceBenchmark,
+    )
+
+    report = runner.run(
+        PERFORMANCE_CASES_FILE,
+        gate_id="v1",
+        suite_kind="performance",
+    )
+
+    assert report.gate_id == "v1"
+    assert report.status == "pass"
+    assert report.metrics["performance_gate"]["passed"] is True
+
+
+def test_eval_runner_fails_performance_gate_when_p95_regresses(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class FailingPerformanceBenchmark:
+        def measure_suite(self, suite):
+            del suite
+            return _performance_observations(overrides={"serve_startup": 12.0})
+
+        def environment(self):
+            return {
+                "platform": "test-platform",
+                "python_version": "3.11.0",
+                "cpu_count": 4,
+                "transport": "streamable-http",
+            }
+
+        def dataset_scale(self):
+            return {
+                "workspace_files": 103,
+                "source_docs_files": 3,
+                "incremental_probe_files": 100,
+            }
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        performance_benchmark_factory=FailingPerformanceBenchmark,
+    )
+
+    report = runner.run(PERFORMANCE_CASES_FILE, gate_id="performance")
+
+    assert report.status == "fail"
+    assert report.failures == ()
+    assert report.warnings[0]["code"] == "eval.performance_gate_failed"
+    failed_checks = [item for item in report.metrics["performance_gate"]["checks"] if not item["passed"]]
+    assert failed_checks
+    assert failed_checks[0]["metric"] == "serve_startup"
+
+
+def test_eval_runner_executes_real_performance_benchmark_smoke(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        performance_benchmark_factory=lambda: PerformanceBenchmark(
+            sample_count=1,
+            warmup_runs=0,
+            incremental_file_count=5,
+        ),
+    )
+
+    report = runner.run(PERFORMANCE_CASES_FILE, gate_id="performance")
+
+    assert report.status == "pass"
+    assert report.metrics["performance_gate"]["passed"] is True
+    assert report.metrics["performance_gate"]["metrics"]["docs_search"]["p95"] >= 0.0
+    assert report.metrics["performance_gate"]["metrics"]["serve_resident_memory"]["p95"] > 0
+
+
+def _performance_observations(
+    *,
+    overrides: dict[str, float] | None = None,
+) -> tuple[PerformanceProbeObservation, ...]:
+    values = overrides or {}
+    observations = []
+    for probe_id, (unit, threshold) in PERFORMANCE_GATE_THRESHOLDS.items():
+        sample = values.get(probe_id, threshold / 2.0)
+        observations.append(
+            PerformanceProbeObservation.from_samples(
+                probe_id=probe_id,
+                display_name=probe_id,
+                unit=unit,
+                samples=(sample, sample, sample, sample, sample),
+                metadata={},
+            )
+        )
+    return tuple(observations)

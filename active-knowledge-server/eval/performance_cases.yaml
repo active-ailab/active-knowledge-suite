@@ -1,0 +1,176 @@
+schema_version: eval_cases.v1
+suite_id: performance-benchmark-v1
+description: Deterministic E7-03 performance suite backed by the synthetic benchmark corpus.
+generated_from:
+  - eval/performance_cases.yaml
+
+cases:
+  - case_id: perf_docs_search_sensor_close
+    title: docs_search latency probe
+    category: api_documentation
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/performance_cases.yaml#perf_docs_search_sensor_close
+    input_tool: docs_search
+    request:
+      query: sensor_close API
+      domain: api
+      view: evidence
+      granularity: doc_section
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: doc_section
+        locator: sensor_close
+
+  - case_id: perf_code_resolve_health_init
+    title: code_resolve latency probe
+    category: symbol_lookup
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/performance_cases.yaml#perf_code_resolve_health_init
+    input_tool: code_resolve
+    request:
+      query: health_init 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: symbol
+        locator: health_init
+
+  - case_id: perf_workspace_view_health
+    title: workspace_view latency probe
+    category: workspace_navigation
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/performance_cases.yaml#perf_workspace_view_health
+    input_tool: workspace_view
+    request:
+      query: components
+      domain: code
+      view: workspace
+      granularity: module
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: module
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: path
+        locator: components
+
+  - case_id: perf_kb_search_health_init
+    title: kb_search latency probe
+    category: feature_domain_cross_layer
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/performance_cases.yaml#perf_kb_search_health_init
+    input_tool: kb_search
+    request:
+      query: health_init 在哪里定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: kb_search
+      route_mode: direct
+      selected_view: auto
+      selected_granularity: auto
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: symbol
+        locator: health_init
+
+  - case_id: perf_evidence_bundle_sensor_close
+    title: evidence_bundle latency probe
+    category: feature_domain_cross_layer
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/performance_cases.yaml#perf_evidence_bundle_sensor_close
+    input_tool: evidence_bundle
+    request:
+      query: sensor_close API
+      domain: docs
+      view: evidence
+      granularity: doc_section
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: evidence_lookup
+      primary_tool: evidence_bundle
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: doc_section
+        locator: sensor_close

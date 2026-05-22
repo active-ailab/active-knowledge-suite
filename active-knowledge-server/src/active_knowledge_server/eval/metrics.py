@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Final
+from math import ceil
+from typing import Final, Literal
 
 from active_knowledge_server.eval.cases import EvalCaseCategory, EvalCaseSuite
 
@@ -26,6 +27,18 @@ QUALITY_GATE_THRESHOLDS: Final[dict[str, float]] = {
 	"profile_correctness": 0.90,
 	"warning_quality": 0.85,
 	"blocked_security_contract": 1.0,
+}
+
+PERFORMANCE_GATE_THRESHOLDS: Final[dict[str, tuple[Literal["seconds", "bytes"], float]]] = {
+	"serve_startup": ("seconds", 10.0),
+	"init_reuse_baseline": ("seconds", 60.0),
+	"docs_search": ("seconds", 2.0),
+	"code_resolve": ("seconds", 1.5),
+	"workspace_view": ("seconds", 2.0),
+	"kb_search": ("seconds", 3.0),
+	"evidence_bundle": ("seconds", 3.0),
+	"incremental_index_100_files": ("seconds", 600.0),
+	"serve_resident_memory": ("bytes", float(4 * 1024 * 1024 * 1024)),
 }
 
 
@@ -100,6 +113,92 @@ class QualityGateCheck:
 			"metric": self.metric,
 			"actual": self.actual,
 			"threshold": self.threshold,
+			"passed": self.passed,
+			"blocking_level": self.blocking_level,
+		}
+
+
+PerformanceMetricUnit = Literal["seconds", "bytes"]
+
+
+@dataclass(frozen=True)
+class PerformanceProbeObservation:
+	"""Observed latency or memory samples for one E7-03 probe."""
+
+	probe_id: str
+	display_name: str
+	unit: PerformanceMetricUnit
+	samples: tuple[float, ...]
+	p50: float
+	p95: float
+	mean: float
+	max_value: float
+	metadata: dict[str, object]
+
+	@classmethod
+	def from_samples(
+		cls,
+		*,
+		probe_id: str,
+		display_name: str,
+		unit: PerformanceMetricUnit,
+		samples: tuple[float, ...],
+		metadata: dict[str, object] | None = None,
+	) -> PerformanceProbeObservation:
+		if not samples:
+			raise ValueError("performance probes must record at least one sample")
+		normalized = tuple(float(sample) for sample in samples)
+		sorted_samples = tuple(sorted(normalized))
+		return cls(
+			probe_id=probe_id,
+			display_name=display_name,
+			unit=unit,
+			samples=normalized,
+			p50=_percentile(sorted_samples, 0.50),
+			p95=_percentile(sorted_samples, 0.95),
+			mean=_mean(list(sorted_samples)),
+			max_value=sorted_samples[-1],
+			metadata=dict(metadata or {}),
+		)
+
+	@property
+	def sample_size(self) -> int:
+		return len(self.samples)
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"probe_id": self.probe_id,
+			"display_name": self.display_name,
+			"unit": self.unit,
+			"sample_size": self.sample_size,
+			"samples": [_normalize_metric_value(sample, self.unit) for sample in self.samples],
+			"p50": _normalize_metric_value(self.p50, self.unit),
+			"p95": _normalize_metric_value(self.p95, self.unit),
+			"mean": _normalize_metric_value(self.mean, self.unit),
+			"max": _normalize_metric_value(self.max_value, self.unit),
+			"metadata": self.metadata,
+		}
+
+
+@dataclass(frozen=True)
+class PerformanceGateCheck:
+	"""One blocker threshold evaluation for the performance gate."""
+
+	metric: str
+	unit: PerformanceMetricUnit
+	actual_p95: float | None
+	threshold_p95: float
+	passed: bool
+	blocking_level: str = "blocker"
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"metric": self.metric,
+			"unit": self.unit,
+			"actual_p95": None
+			if self.actual_p95 is None
+			else _normalize_metric_value(self.actual_p95, self.unit),
+			"threshold_p95": _normalize_metric_value(self.threshold_p95, self.unit),
 			"passed": self.passed,
 			"blocking_level": self.blocking_level,
 		}
@@ -199,6 +298,58 @@ def build_quality_gate_metrics(
 	}
 
 
+def build_performance_gate_metrics(
+	observations: tuple[PerformanceProbeObservation, ...],
+	*,
+	environment: dict[str, object],
+	dataset_scale: dict[str, object],
+) -> dict[str, object]:
+	"""Return E7-03 performance metrics plus blocker-threshold checks."""
+
+	observation_map = {item.probe_id: item for item in observations}
+	checks = tuple(
+		PerformanceGateCheck(
+			metric=probe_id,
+			unit=unit,
+			actual_p95=None if observation_map.get(probe_id) is None else observation_map[probe_id].p95,
+			threshold_p95=threshold,
+			passed=(
+				probe_id in observation_map
+				and observation_map[probe_id].unit == unit
+				and observation_map[probe_id].p95 <= threshold
+			),
+		)
+		for probe_id, (unit, threshold) in PERFORMANCE_GATE_THRESHOLDS.items()
+	)
+	return {
+		"environment": dict(environment),
+		"dataset_scale": dict(dataset_scale),
+		"sample_counts": {
+			item.probe_id: item.sample_size for item in observations
+		},
+		"metrics": {
+			item.probe_id: {
+				"unit": item.unit,
+				"p50": _normalize_metric_value(item.p50, item.unit),
+				"p95": _normalize_metric_value(item.p95, item.unit),
+				"mean": _normalize_metric_value(item.mean, item.unit),
+				"max": _normalize_metric_value(item.max_value, item.unit),
+			}
+			for item in observations
+		},
+		"thresholds": {
+			probe_id: {
+				"unit": unit,
+				"p95": _normalize_metric_value(threshold, unit),
+			}
+			for probe_id, (unit, threshold) in PERFORMANCE_GATE_THRESHOLDS.items()
+		},
+		"checks": [item.to_dict() for item in checks],
+		"passed": all(item.passed for item in checks),
+		"probe_observations": [item.to_dict() for item in observations],
+	}
+
+
 def _boolean_rate(values: list[bool | None]) -> float:
 	eligible = [value for value in values if value is not None]
 	if not eligible:
@@ -211,3 +362,19 @@ def _mean(values: list[float | None]) -> float:
 	if not eligible:
 		return 0.0
 	return sum(eligible) / len(eligible)
+
+
+def _percentile(values: tuple[float, ...], quantile: float) -> float:
+	if not values:
+		return 0.0
+	index = max(0, ceil(len(values) * quantile) - 1)
+	return values[index]
+
+
+def _normalize_metric_value(
+	value: float,
+	unit: PerformanceMetricUnit,
+) -> float | int:
+	if unit == "bytes":
+		return int(round(value))
+	return round(value, 6)

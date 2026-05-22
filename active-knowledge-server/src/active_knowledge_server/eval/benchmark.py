@@ -1,4 +1,4 @@
-"""Deterministic synthetic benchmark used by the E7-02 quality gate."""
+"""Deterministic synthetic benchmarks shared by the E7 eval gates."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from active_knowledge_server.config.loader import ConfigDict, resolve_config
+from active_knowledge_server.config.loader import ConfigDict, ResolvedConfig, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.eval.cases import EvalCase
 from active_knowledge_server.indexing import CURRENT_SNAPSHOT_ID, CodeIndexer, DocumentIndexer
@@ -130,7 +130,10 @@ class QualityBenchmark:
 		self._tmpdir.cleanup()
 
 
-def _resolve_model(root: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
+def _resolve_benchmark_config(
+	root: Path,
+	overrides: ConfigDict | None = None,
+) -> ResolvedConfig:
 	workspace = root / "workspace"
 	docs = root / "knowledge-sources"
 	workspace.mkdir(parents=True, exist_ok=True)
@@ -177,7 +180,11 @@ def _resolve_model(root: Path, overrides: ConfigDict | None = None) -> ActiveKno
 	}
 	if overrides:
 		merged = _deep_merge(merged, overrides)
-	return resolve_config(cli_overrides=merged, env={}, cwd=root).model
+	return resolve_config(cli_overrides=merged, env={}, cwd=root)
+
+
+def _resolve_model(root: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
+	return _resolve_benchmark_config(root, overrides).model
 
 
 def _build_adapter(config: ActiveKnowledgeConfig) -> SQLiteStorageAdapter:
@@ -194,10 +201,15 @@ def _build_adapter(config: ActiveKnowledgeConfig) -> SQLiteStorageAdapter:
 	)
 
 
-def _build_indexed_fixture(root: Path, config: ActiveKnowledgeConfig) -> SQLiteStorageAdapter:
+def _build_indexed_fixture(
+	root: Path,
+	config: ActiveKnowledgeConfig,
+	*,
+	extra_workspace_files: int = 0,
+) -> SQLiteStorageAdapter:
 	workspace_root = Path(config.project.workspace_root)
 	docs_root = Path(config.runtime.source_docs_root)
-	_seed_workspace(workspace_root)
+	_seed_workspace(workspace_root, extra_workspace_files=extra_workspace_files)
 	_seed_docs(docs_root)
 	adapter = _build_adapter(config)
 	writer = adapter.writer(StorageWriteRequest(target="overlay"))
@@ -213,13 +225,19 @@ def _build_indexed_fixture(root: Path, config: ActiveKnowledgeConfig) -> SQLiteS
 	return adapter
 
 
-def _seed_workspace(workspace_root: Path) -> None:
+def _seed_workspace(
+	workspace_root: Path,
+	*,
+	extra_workspace_files: int = 0,
+) -> None:
 	component_dir = workspace_root / "components" / "health"
 	sensor_dir = workspace_root / "components" / "sensor"
 	ui_dir = workspace_root / "ui" / "widgets"
+	perf_dir = workspace_root / "perf" / "generated"
 	component_dir.mkdir(parents=True, exist_ok=True)
 	sensor_dir.mkdir(parents=True, exist_ok=True)
 	ui_dir.mkdir(parents=True, exist_ok=True)
+	perf_dir.mkdir(parents=True, exist_ok=True)
 	(component_dir / "module.mk").write_text(
 		"""NAME = health
 MODULE = health.logic
@@ -311,6 +329,15 @@ int sensor_close(void);
 """,
 		encoding="utf-8",
 	)
+	for index in range(max(extra_workspace_files, 0)):
+		(perf_dir / f"bench_{index:03d}.c").write_text(
+			f"""int perf_generated_{index:03d}(void)
+{{
+    return {index};
+}}
+""",
+			encoding="utf-8",
+		)
 
 
 def _seed_docs(docs_root: Path) -> None:

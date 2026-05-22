@@ -1371,26 +1371,27 @@ V1 最低门槛：
 
 ### E7-03 性能阈值 gate
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`、`OPS`
 - 依赖：`M6-02`
+- 输出：已新增 `eval/performance_cases.yaml`、`src/active_knowledge_server/eval/performance.py`、性能阈值判定与 probe 汇总；`active-kb eval run --gate performance` 可直接执行性能 suite，`active-kb perf run --gate v1` 提供面向 release gate 的固定入口，输出 `performance_gate.metrics/checks`、样本量、机器环境与数据规模，并在任一 blocker 阈值未达标时失败退出。
 
 V1 初始门槛：
 
-- [ ] `serve` 基于已存在 baseline 启动 P95 `<= 10s`。
-- [ ] `init --reuse-baseline` P95 `<= 60s`。
-- [ ] `docs_search` P95 `<= 2s`。
-- [ ] `code_resolve` P95 `<= 1.5s`。
-- [ ] `workspace_view` P95 `<= 2s`。
-- [ ] `kb_search` P95 `<= 3s`。
-- [ ] `evidence_bundle` P95 `<= 3s`。
-- [ ] 100 个文件以内增量索引 P95 `<= 10min`。
-- [ ] 本地 serve 常驻内存 P95 `<= 4GB`。
+- [x] `serve` 基于已存在 baseline 启动 P95 `<= 10s`。
+- [x] `init --reuse-baseline` P95 `<= 60s`。
+- [x] `docs_search` P95 `<= 2s`。
+- [x] `code_resolve` P95 `<= 1.5s`。
+- [x] `workspace_view` P95 `<= 2s`。
+- [x] `kb_search` P95 `<= 3s`。
+- [x] `evidence_bundle` P95 `<= 3s`。
+- [x] 100 个文件以内增量索引 P95 `<= 10min`。
+- [x] 本地 serve 常驻内存 P95 `<= 4GB`。
 
 验收标准：
 
-- 性能测试报告记录样本量、机器环境、数据规模。
+- [x] 性能测试报告记录样本量、机器环境、数据规模。
 
 ### E7-04 稳定性阈值 gate
 

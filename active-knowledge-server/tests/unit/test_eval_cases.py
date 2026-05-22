@@ -6,6 +6,7 @@ from active_knowledge_server.eval import load_eval_suite
 
 CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
 QUALITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "quality_cases.yaml"
+PERFORMANCE_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "performance_cases.yaml"
 
 
 def test_load_eval_suite_parses_seed_cases_file() -> None:
@@ -44,3 +45,19 @@ def test_load_quality_eval_suite_parses_quality_cases_file() -> None:
     assert len(suite.cases) == 8
     assert all(case.execution_mode == "query_quality" for case in suite.cases)
     assert all(case.expected_result_status is not None for case in suite.cases)
+
+
+def test_load_performance_eval_suite_parses_performance_cases_file() -> None:
+    suite = load_eval_suite(PERFORMANCE_CASES_FILE)
+
+    assert suite.schema_version == "eval_cases.v1"
+    assert suite.suite_id == "performance-benchmark-v1"
+    assert len(suite.cases) == 5
+    assert all(case.execution_mode == "query_quality" for case in suite.cases)
+    assert {case.input_tool for case in suite.cases} == {
+        "docs_search",
+        "code_resolve",
+        "workspace_view",
+        "kb_search",
+        "evidence_bundle",
+    }

@@ -6,11 +6,12 @@ import sys
 from pathlib import Path
 
 from active_knowledge_server.cli import main
+from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAMES
 
 
 def test_subcommands_have_help() -> None:
-    for command in ("init", "serve", "index", "status", "validate", "clean", "eval"):
+    for command in ("init", "serve", "index", "status", "validate", "clean", "eval", "perf"):
         result = subprocess.run(
             [sys.executable, "-m", "active_knowledge_server.cli", command, "--help"],
             check=True,
@@ -31,6 +32,18 @@ def test_eval_run_subcommand_has_help() -> None:
     )
 
     assert "usage: active-kb eval run" in result.stdout
+    assert "--cases" in result.stdout
+
+
+def test_perf_run_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "perf", "run", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb perf run" in result.stdout
     assert "--cases" in result.stdout
 
 
@@ -227,6 +240,149 @@ def test_eval_run_quality_json_uses_quality_suite_and_reports_gate_summary(
     assert payload["status"] == "pass"
     assert payload["metrics"]["quality_gate"]["passed"] is True
     assert payload["metrics"]["blocked_security_probe"]["ok"] is True
+
+
+def test_eval_run_performance_json_uses_performance_suite_and_reports_gate_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    performance_cases = Path("eval") / "performance_cases.yaml"
+
+    class DummyRunner:
+        def run(self, cases_file: Path, *, gate_id: str) -> EvalRunReport:
+            assert cases_file == performance_cases
+            assert gate_id == "performance"
+            return EvalRunReport(
+                gate_id="performance",
+                suite_id="performance-benchmark-v1",
+                status="pass",
+                started_at="2026-05-06T00:00:00Z",
+                finished_at="2026-05-06T00:00:01Z",
+                cases_file=str(cases_file),
+                metrics={
+                    "executed_cases": 5,
+                    "passed_cases": 5,
+                    "failed_cases": 0,
+                    "performance_gate": {
+                        "passed": True,
+                        "sample_counts": {"serve_startup": 5},
+                    },
+                },
+                failures=(),
+                warnings=(),
+            )
+
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.EvalRunner.from_config",
+        lambda *args, **kwargs: DummyRunner(),
+    )
+
+    exit_code = main(
+        [
+            "eval",
+            "run",
+            "--gate",
+            "performance",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval run"
+    assert payload["gate_id"] == "performance"
+    assert payload["suite_id"] == "performance-benchmark-v1"
+    assert payload["status"] == "pass"
+    assert payload["metrics"]["performance_gate"]["passed"] is True
+
+
+def test_perf_run_json_uses_performance_suite_and_reports_gate_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    performance_cases = Path("eval") / "performance_cases.yaml"
+
+    class DummyRunner:
+        def run(
+            self,
+            cases_file: Path,
+            *,
+            gate_id: str,
+            suite_kind: str | None = None,
+        ) -> EvalRunReport:
+            assert cases_file == performance_cases
+            assert gate_id == "v1"
+            assert suite_kind == "performance"
+            return EvalRunReport(
+                gate_id="v1",
+                suite_id="performance-benchmark-v1",
+                status="pass",
+                started_at="2026-05-06T00:00:00Z",
+                finished_at="2026-05-06T00:00:01Z",
+                cases_file=str(cases_file),
+                metrics={
+                    "executed_cases": 5,
+                    "passed_cases": 5,
+                    "failed_cases": 0,
+                    "performance_gate": {
+                        "passed": True,
+                        "sample_counts": {"serve_startup": 5},
+                    },
+                },
+                failures=(),
+                warnings=(),
+            )
+
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.EvalRunner.from_config",
+        lambda *args, **kwargs: DummyRunner(),
+    )
+
+    exit_code = main(
+        [
+            "perf",
+            "run",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "perf run"
+    assert payload["gate_id"] == "v1"
+    assert payload["suite_id"] == "performance-benchmark-v1"
+    assert payload["status"] == "pass"
+    assert payload["metrics"]["performance_gate"]["passed"] is True
 
 
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(

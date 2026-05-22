@@ -47,6 +47,7 @@ uv run active-kb status --format json
 uv run active-kb validate --strict
 uv run active-kb serve --transport stdio
 uv run active-kb index --incremental
+uv run active-kb perf run --report .active-kb/local/artifacts/perf/v1-gate.json
 ```
 
 Config precedence is fixed as:
@@ -88,3 +89,11 @@ Runtime logging is split under `.active-kb/local/logs/` into `server.log`,
 emits JSONL events for tool calls and ops operations with query hashes, safe
 short previews, caller/profile/result metadata, warning codes, and redacted
 details. Rotation is controlled by `runtime.logging.rotation`.
+
+## Performance Gate
+
+`active-kb perf run` executes the E7-03 synthetic benchmark suite and writes a
+machine-readable gate report when `--report` is provided. The report includes
+per-probe P50/P95 latency, resident memory samples, blocker threshold
+pass/fail, sample counts, machine environment, and benchmark dataset scale so
+the same artifact can be reviewed locally or in CI.

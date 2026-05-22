@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any, Final
 
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
@@ -95,6 +96,7 @@ class QueryService:
 		cls,
 		config: ActiveKnowledgeConfig,
 		*,
+		cwd: Path | None = None,
 		metadata_adapter: StorageAdapter,
 		vector_adapter: VectorStoreAdapter | None = None,
 		router: QueryRouter | None = None,
@@ -105,7 +107,7 @@ class QueryService:
 		reranker: CandidateReranker | None = None,
 		evidence_packager: EvidencePackager | None = None,
 	) -> QueryService:
-		resolved_router = router or QueryRouter.from_config(config)
+		resolved_router = router or QueryRouter.from_config(config, cwd=cwd)
 		resolved_symbol = symbol_retriever or SymbolRetriever.from_storage(metadata_adapter)
 		resolved_fulltext = fulltext_retriever or FullTextRetriever.from_storage(metadata_adapter)
 		resolved_vector = vector_retriever

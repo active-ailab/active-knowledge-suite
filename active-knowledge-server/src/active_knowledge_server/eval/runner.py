@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from collections.abc import Callable
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,17 +14,21 @@ from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.eval.benchmark import QualityBenchmark
 from active_knowledge_server.eval.cases import EvalCase, EvalCaseSuite, load_eval_suite
 from active_knowledge_server.eval.metrics import (
+	PerformanceProbeObservation,
 	QualityCaseObservation,
 	build_category_coverage,
+	build_performance_gate_metrics,
 	build_quality_gate_metrics,
 	build_suite_metrics,
 )
+from active_knowledge_server.eval.performance import PerformanceBenchmark
 from active_knowledge_server.models import QueryRequest
 from active_knowledge_server.models.responses import QueryResult
 from active_knowledge_server.query import QueryRouter
 
 EvalCaseRunStatus = Literal["passed", "failed"]
 EvalRunStatus = Literal["pass", "partial_ready", "fail"]
+EvalSuiteKind = Literal["router", "quality", "performance"]
 
 
 @dataclass(frozen=True)
@@ -132,6 +137,7 @@ class EvalRunner:
 		cwd: Path,
 		profile_collector: object | None = None,
 		quality_benchmark_factory: Callable[[], object] | None = None,
+		performance_benchmark_factory: Callable[[], object] | None = None,
 	) -> None:
 		self._cwd = cwd
 		self._router = QueryRouter.from_config(
@@ -140,6 +146,9 @@ class EvalRunner:
 			profile_collector=profile_collector or _EvalProfileCollector(),
 		)
 		self._quality_benchmark_factory = quality_benchmark_factory or QualityBenchmark
+		self._performance_benchmark_factory = (
+			performance_benchmark_factory or PerformanceBenchmark
+		)
 
 	@classmethod
 	def from_config(
@@ -149,22 +158,48 @@ class EvalRunner:
 		cwd: Path,
 		profile_collector: object | None = None,
 		quality_benchmark_factory: Callable[[], object] | None = None,
+		performance_benchmark_factory: Callable[[], object] | None = None,
 	) -> EvalRunner:
 		return cls(
 			config,
 			cwd=cwd,
 			profile_collector=profile_collector,
 			quality_benchmark_factory=quality_benchmark_factory,
+			performance_benchmark_factory=performance_benchmark_factory,
 		)
 
-	def run(self, cases_file: Path, *, gate_id: str) -> EvalRunReport:
+	def run(
+		self,
+		cases_file: Path,
+		*,
+		gate_id: str,
+		suite_kind: EvalSuiteKind | None = None,
+	) -> EvalRunReport:
 		"""Load, execute, and summarize one eval suite."""
 
 		started_at = _utc_now()
 		suite = load_eval_suite(cases_file)
-		if gate_id == "quality":
-			return self._run_quality_suite(suite, cases_file=cases_file, gate_id=gate_id, started_at=started_at)
-		return self._run_router_suite(suite, cases_file=cases_file, gate_id=gate_id, started_at=started_at)
+		resolved_suite_kind = suite_kind or _infer_suite_kind(gate_id)
+		if resolved_suite_kind == "quality":
+			return self._run_quality_suite(
+				suite,
+				cases_file=cases_file,
+				gate_id=gate_id,
+				started_at=started_at,
+			)
+		if resolved_suite_kind == "performance":
+			return self._run_performance_suite(
+				suite,
+				cases_file=cases_file,
+				gate_id=gate_id,
+				started_at=started_at,
+			)
+		return self._run_router_suite(
+			suite,
+			cases_file=cases_file,
+			gate_id=gate_id,
+			started_at=started_at,
+		)
 
 	def _run_router_suite(
 		self,
@@ -310,6 +345,60 @@ class EvalRunner:
 					}
 					for result in failed_results
 				),
+				warnings=tuple(warnings),
+			)
+		finally:
+			close = getattr(benchmark, "close", None)
+			if callable(close):
+				close()
+
+	def _run_performance_suite(
+		self,
+		suite: EvalCaseSuite,
+		*,
+		cases_file: Path,
+		gate_id: str,
+		started_at: str,
+	) -> EvalRunReport:
+		benchmark = self._performance_benchmark_factory()
+		try:
+			observations = tuple(
+				item
+				for item in benchmark.measure_suite(suite)
+				if isinstance(item, PerformanceProbeObservation)
+			)
+			metrics = build_suite_metrics(
+				suite,
+				executed_cases=len(suite.cases),
+				passed_cases=len(suite.cases),
+				failed_cases=0,
+			)
+			performance_metrics = build_performance_gate_metrics(
+				observations,
+				environment=dict(benchmark.environment()),
+				dataset_scale=dict(benchmark.dataset_scale()),
+			)
+			metrics["performance_gate"] = performance_metrics
+			warnings: list[dict[str, Any]] = []
+			if not performance_metrics["passed"]:
+				failed_checks = [
+					item for item in performance_metrics["checks"] if not item["passed"]
+				]
+				warnings.append(
+					{
+						"code": "eval.performance_gate_failed",
+						"message": "One or more E7-03 performance blocker thresholds were not met.",
+						"details": {"failed_checks": failed_checks},
+					}
+				)
+			return EvalRunReport(
+				gate_id=gate_id,
+				suite_id=suite.suite_id,
+				status="pass" if performance_metrics["passed"] else "fail",
+				started_at=started_at,
+				finished_at=_utc_now(),
+				cases_file=str(cases_file),
+				metrics=metrics,
 				warnings=tuple(warnings),
 			)
 		finally:
@@ -574,3 +663,11 @@ class EvalRunner:
 
 def _utc_now() -> str:
 	return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _infer_suite_kind(gate_id: str) -> EvalSuiteKind:
+	if gate_id == "quality":
+		return "quality"
+	if gate_id == "performance":
+		return "performance"
+	return "router"
