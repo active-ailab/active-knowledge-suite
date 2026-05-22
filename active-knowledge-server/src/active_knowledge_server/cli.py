@@ -37,8 +37,18 @@ from active_knowledge_server.eval.baseline import (
     save_baseline_snapshot,
 )
 from active_knowledge_server.eval.stability import StabilityBenchmark
+from active_knowledge_server.indexing import (
+    CURRENT_SNAPSHOT_ID,
+    CodeIndexer,
+    DocumentIndexer,
+    IncrementalIndexPipeline,
+    ProfileCollector,
+    ProfileConditionedRelationExtractor,
+    SnapshotCollector,
+    WorkspaceMapBuilder,
+)
 from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
-from active_knowledge_server.indexing.profile import ProfileCollector
+from active_knowledge_server.models import QueryResult, Warning
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
     SecurityConfigError,
@@ -47,7 +57,14 @@ from active_knowledge_server.security.config import (
 )
 from active_knowledge_server.server import build_server_app, server_name
 from active_knowledge_server.storage.maintenance import clean_local_state
-from active_knowledge_server.storage.sqlite_store import SQLiteStorageAdapter
+from active_knowledge_server.storage import StorageWriteRequest
+from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
+from active_knowledge_server.storage.sqlite_store import (
+    SQLiteStorageAdapter,
+    configured_sqlite_paths,
+    migrate_local_sqlite_stores,
+    migrate_sqlite_store,
+)
 from active_knowledge_server.storage.validation import validate_storage_consistency
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
@@ -141,6 +158,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Plan an incremental index update.",
     )
     index_parser.add_argument(
+        "--target",
+        choices=("local", "baseline"),
+        default="local",
+        help="Write target for this run. Baseline writes require publish mode.",
+    )
+    index_parser.add_argument(
+        "--publish-mode",
+        choices=("publish", "build"),
+        help="Required when writing baseline data.",
+    )
+    index_parser.add_argument(
         "--source",
         choices=("all", "code", "docs"),
         default="all",
@@ -220,6 +248,93 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     clean_parser.set_defaults(handler=handle_clean)
+
+    rebuild_parser = subparsers.add_parser(
+        "rebuild",
+        parents=[common],
+        help="Rebuild selected index artifacts.",
+    )
+    rebuild_parser.add_argument(
+        "--vectors",
+        action="store_true",
+        help="Rebuild vector payloads from source documents.",
+    )
+    rebuild_parser.add_argument(
+        "--target",
+        choices=("local", "baseline"),
+        default="local",
+        help="Write target for rebuilt vectors.",
+    )
+    rebuild_parser.add_argument(
+        "--publish-mode",
+        choices=("publish", "build"),
+        help="Required when rebuilding baseline vectors.",
+    )
+    rebuild_parser.add_argument(
+        "--source",
+        choices=("all", "docs"),
+        default="docs",
+        help="Source family used for vector rebuild.",
+    )
+    rebuild_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    rebuild_parser.set_defaults(handler=handle_rebuild)
+
+    baseline_parser = subparsers.add_parser(
+        "baseline",
+        parents=[common],
+        help="Baseline lifecycle operations.",
+    )
+    baseline_subparsers = baseline_parser.add_subparsers(
+        dest="baseline_command",
+        metavar="BASELINE_COMMAND",
+    )
+
+    baseline_validate_parser = baseline_subparsers.add_parser(
+        "validate",
+        parents=[common],
+        help="Validate baseline manifest and baseline storage consistency.",
+    )
+    baseline_validate_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    baseline_validate_parser.set_defaults(handler=handle_baseline_validate)
+
+    baseline_publish_parser = baseline_subparsers.add_parser(
+        "publish",
+        parents=[common],
+        help="Build and publish a baseline snapshot manifest.",
+    )
+    baseline_publish_parser.add_argument(
+        "--source",
+        choices=("all", "code", "docs"),
+        default="all",
+        help="Source family to publish into baseline.",
+    )
+    baseline_publish_parser.add_argument(
+        "--baseline-id",
+        help="Baseline identifier written into baseline/manifest.json.",
+    )
+    baseline_publish_parser.add_argument(
+        "--publish-mode",
+        choices=("publish", "build"),
+        required=True,
+        help="Explicit publish/build mode required for baseline writes.",
+    )
+    baseline_publish_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    baseline_publish_parser.set_defaults(handler=handle_baseline_publish)
 
     eval_parser = subparsers.add_parser(
         "eval",
@@ -563,24 +678,191 @@ def handle_serve(args: argparse.Namespace) -> int:
 
 
 def handle_index(args: argparse.Namespace) -> int:
-    """Resolve an index job plan."""
+    """Execute one index run."""
 
     resolved = resolve_from_args(args, command_overrides=index_overrides(args))
     summary = config_summary(resolved)
+
+    mode = "full" if args.full else "incremental"
+    target = str(args.target)
+    publish_mode = getattr(args, "publish_mode", None)
+    blocked = validate_baseline_write_intent(
+        args,
+        tool_name="index",
+        target=target,
+        mode=mode,
+        publish_mode=publish_mode,
+    )
+    if blocked is not None:
+        return blocked
+
+    if mode == "incremental" and target == "local":
+        pipeline = IncrementalIndexPipeline(resolved.model, cwd=Path.cwd())
+        result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source=args.source)
+        payload = {
+            "command": "index",
+            "status": "ok",
+            "target": target,
+            "source": args.source,
+            "mode": mode,
+            "result": result.to_dict(),
+            "config": summary,
+        }
+    else:
+        full_result = run_full_index(
+            resolved,
+            target=target,
+            source=args.source,
+            operation_mode="baseline_publish" if target == "baseline" else "normal",
+        )
+        payload = {
+            "command": "index",
+            "status": "ok",
+            "target": target,
+            "source": args.source,
+            "mode": mode,
+            "result": full_result,
+            "config": summary,
+        }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Index completed: {payload['mode']} ({payload['source']})")
+        print(f"Target: {payload['target']}")
+        print(f"Workdir: {summary['workdir']}")
+        result_status = payload["result"].get("result_status", "ready")
+        print(f"Result status: {result_status}")
+    return 0
+
+
+def handle_rebuild(args: argparse.Namespace) -> int:
+    """Execute rebuild operations for selected artifacts."""
+
+    if not args.vectors:
+        return emit_command_blocked(
+            args,
+            tool_name="rebuild",
+            code="rebuild.no_target_selected",
+            message="No rebuild target was selected.",
+            suggested_action="Pass --vectors to rebuild vector payloads.",
+        )
+
+    resolved = resolve_from_args(args)
+    target = str(args.target)
+    blocked = validate_baseline_write_intent(
+        args,
+        tool_name="rebuild",
+        target=target,
+        mode="full",
+        publish_mode=getattr(args, "publish_mode", None),
+    )
+    if blocked is not None:
+        return blocked
+
+    result = rebuild_vectors(
+        resolved,
+        target=target,
+        source=args.source,
+        operation_mode="baseline_publish" if target == "baseline" else "normal",
+    )
     payload = {
-        "command": "index",
-        "status": "ready",
+        "command": "rebuild",
+        "status": "ok",
+        "target": target,
         "source": args.source,
-        "mode": "full" if args.full else "incremental",
-        "config": summary,
-        "note": "Index pipeline execution is scheduled for Phase 4; C1-02 validates job planning.",
+        "rebuild": result,
+        "config": config_summary(resolved),
     }
     if args.format == "json":
         print_json(payload)
     else:
-        print(f"Index plan ready: {payload['mode']} ({payload['source']})")
-        print(f"Workdir: {summary['workdir']}")
-        print("Index pipeline execution is not started by the C1-02 skeleton.")
+        print("Rebuild completed")
+        print(f"Target: {target}")
+        print(f"Vectors rebuilt: {result['vectors_rebuilt']}")
+    return 0
+
+
+def handle_baseline_validate(args: argparse.Namespace) -> int:
+    """Validate baseline manifest and baseline storage consistency."""
+
+    resolved = resolve_from_args(args)
+    layout = layout_from_config(resolved)
+    manifest_status, manifest_warning = inspect_baseline_manifest(layout.baseline_manifest_path)
+    storage_report = validate_storage_consistency(resolved.model, cwd=Path.cwd()).to_dict()
+    checks = cast(list[dict[str, object]], storage_report["checks"])
+    baseline_root = str(layout.baseline_dir)
+    baseline_checks = [
+        check
+        for check in checks
+        if str(check.get("check_code", "")).startswith("baseline.")
+        or any(str(item).startswith(baseline_root) for item in check.get("affected_objects", []))
+    ]
+    payload = {
+        "command": "baseline validate",
+        "status": "ok" if manifest_status.exists and manifest_status.readable else "fail",
+        "manifest": manifest_status.to_dict(),
+        "storage_report": storage_report,
+        "baseline_checks": baseline_checks,
+        "warnings": [] if manifest_warning is None else [manifest_warning.to_dict()],
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print("Baseline validate")
+        print(f"Manifest: {manifest_status.path} ({exists_label(manifest_status.path)})")
+        print(f"Storage status: {storage_report['status']}")
+        for check in baseline_checks:
+            print(f"- {check['severity']}: {check['check_code']} - {check['message']}")
+        if manifest_warning is not None:
+            print(f"Warning [{manifest_warning.code}]: {manifest_warning.message}")
+    if not manifest_status.exists or not manifest_status.readable:
+        return 1
+    return 1 if str(storage_report["status"]) == "blocked" else 0
+
+
+def handle_baseline_publish(args: argparse.Namespace) -> int:
+    """Publish one baseline build and write baseline manifest."""
+
+    resolved = resolve_from_args(resolved_args_for_baseline_publish(args))
+    result = run_full_index(
+        resolved,
+        target="baseline",
+        source=args.source,
+        operation_mode="baseline_publish",
+    )
+    layout = layout_from_config(resolved)
+    baseline_id = str(args.baseline_id or _default_baseline_id())
+    manifest_payload = {
+        "schema_version": "active_kb_baseline_manifest.v1",
+        "baseline_id": baseline_id,
+        "default_profile": resolved.model.project.default_profile,
+        "published_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "snapshot_id": CURRENT_SNAPSHOT_ID,
+        "source": args.source,
+        "publish_mode": args.publish_mode,
+        "code_indexer_schema_version": result.get("code_indexer_schema_version"),
+        "doc_indexer_schema_version": result.get("doc_indexer_schema_version"),
+        "profile_collector_schema_version": result.get("profile_collector_schema_version"),
+        "relation_schema_version": result.get("relation_schema_version"),
+    }
+    layout.baseline_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    layout.baseline_manifest_path.write_text(
+        json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    payload = {
+        "command": "baseline publish",
+        "status": "ok",
+        "baseline_id": baseline_id,
+        "manifest_path": str(layout.baseline_manifest_path),
+        "result": result,
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Baseline published: {baseline_id}")
+        print(f"Manifest: {layout.baseline_manifest_path}")
     return 0
 
 
@@ -1086,7 +1368,173 @@ def index_overrides(args: argparse.Namespace) -> ConfigDict:
         set_nested(overrides, ("indexing", "incremental"), False)
     elif args.incremental:
         set_nested(overrides, ("indexing", "incremental"), True)
+    target = getattr(args, "target", "local")
+    write_target = "baseline" if target == "baseline" else "local_overlay"
+    set_nested(overrides, ("indexing", "write_target"), write_target)
     return overrides
+
+
+def resolved_args_for_baseline_publish(args: argparse.Namespace) -> argparse.Namespace:
+    """Clone parsed args while forcing baseline write target for publish."""
+
+    payload = vars(args).copy()
+    payload["target"] = "baseline"
+    payload["full"] = True
+    payload["incremental"] = False
+    return argparse.Namespace(**payload)
+
+
+def validate_baseline_write_intent(
+    args: argparse.Namespace,
+    *,
+    tool_name: str,
+    target: str,
+    mode: str,
+    publish_mode: str | None,
+) -> int | None:
+    """Return blocked exit code when baseline writes do not use publish/build mode."""
+
+    if target != "baseline":
+        return None
+    if mode != "full":
+        return emit_command_blocked(
+            args,
+            tool_name=tool_name,
+            code="baseline.full_required",
+            message="Baseline writes require full mode.",
+            suggested_action="Use --full with --target baseline.",
+        )
+    if publish_mode not in {"publish", "build"}:
+        return emit_command_blocked(
+            args,
+            tool_name=tool_name,
+            code="baseline.publish_mode_required",
+            message="Baseline writes require explicit publish/build mode.",
+            suggested_action="Pass --publish-mode publish or --publish-mode build.",
+        )
+    return None
+
+
+def run_full_index(
+    resolved: ResolvedConfig,
+    *,
+    target: str,
+    source: str,
+    operation_mode: str,
+) -> dict[str, object]:
+    """Execute one full indexing pass for local overlay or baseline target."""
+
+    model = resolved.model
+    cwd = Path.cwd()
+    request = StorageWriteRequest(target=cast(Any, target), operation_mode=cast(Any, operation_mode))
+
+    if target == "baseline":
+        baseline_path = configured_sqlite_paths(model, cwd=cwd)["baseline_metadata"]
+        migrate_sqlite_store(baseline_path, target="baseline_metadata")
+    else:
+        migrate_local_sqlite_stores(model, cwd=cwd)
+
+    metadata_adapter = SQLiteStorageAdapter.from_config(model, cwd=cwd)
+    vector_adapter = LanceDBVectorAdapter.from_config(model, cwd=cwd, metadata_adapter=metadata_adapter)
+    writer = metadata_adapter.writer(request)
+    vector_writer = vector_adapter.writer(request)
+
+    snapshot = SnapshotCollector.from_config(model, cwd=cwd).collect_and_store(writer)
+    profiles = ProfileCollector.from_config(model, cwd=cwd).collect_and_store(
+        writer,
+        snapshot_id=snapshot.snapshot_record.snapshot_id,
+    )
+
+    code_records = None
+    if source in {"all", "code"}:
+        code_records = CodeIndexer.from_config(model, cwd=cwd).collect_and_store(
+            writer,
+            snapshot_id=snapshot.snapshot_record.snapshot_id,
+        )
+
+    doc_records = None
+    if source in {"all", "docs"}:
+        doc_records = DocumentIndexer.from_config(model, cwd=cwd).collect_and_store(
+            writer,
+            vector_writer=vector_writer,
+            snapshot_id=snapshot.snapshot_record.snapshot_id,
+        )
+
+    relation_records = None
+    if code_records is not None:
+        relation_records = ProfileConditionedRelationExtractor().collect_and_store(
+            writer,
+            snapshot_id=snapshot.snapshot_record.snapshot_id,
+            profiles=profiles.profile_records,
+            entities=code_records.entity_records,
+            relations=code_records.relation_records,
+        )
+
+    if source in {"all", "code"}:
+        WorkspaceMapBuilder.from_config(model, cwd=cwd).collect_and_store(
+            writer,
+            snapshot_id=snapshot.snapshot_record.snapshot_id,
+        )
+
+    return {
+        "schema_version": "index_full_result.v1",
+        "result_status": "ready",
+        "target": target,
+        "operation_mode": operation_mode,
+        "snapshot_id": snapshot.snapshot_record.snapshot_id,
+        "source_count": len(code_records.source_records) if code_records is not None else 0,
+        "profile_count": len(profiles.profile_records),
+        "code_file_count": len(code_records.file_records) if code_records is not None else 0,
+        "doc_file_count": len(doc_records.file_records) if doc_records is not None else 0,
+        "vector_write_count": len(doc_records.vector_writes) if doc_records is not None else 0,
+        "relation_count": len(relation_records.relation_records) if relation_records is not None else 0,
+        "code_indexer_schema_version": None if code_records is None else code_records.schema_version,
+        "doc_indexer_schema_version": None if doc_records is None else doc_records.schema_version,
+        "profile_collector_schema_version": profiles.schema_version,
+        "relation_schema_version": None
+        if relation_records is None
+        else relation_records.schema_version,
+    }
+
+
+def rebuild_vectors(
+    resolved: ResolvedConfig,
+    *,
+    target: str,
+    source: str,
+    operation_mode: str,
+) -> dict[str, object]:
+    """Rebuild vectors by re-indexing document embeddings for selected target."""
+
+    model = resolved.model
+    cwd = Path.cwd()
+    request = StorageWriteRequest(target=cast(Any, target), operation_mode=cast(Any, operation_mode))
+
+    if target == "baseline":
+        baseline_path = configured_sqlite_paths(model, cwd=cwd)["baseline_metadata"]
+        migrate_sqlite_store(baseline_path, target="baseline_metadata")
+    else:
+        migrate_local_sqlite_stores(model, cwd=cwd)
+
+    metadata_adapter = SQLiteStorageAdapter.from_config(model, cwd=cwd)
+    vector_adapter = LanceDBVectorAdapter.from_config(model, cwd=cwd, metadata_adapter=metadata_adapter)
+    writer = metadata_adapter.writer(request)
+    vector_writer = vector_adapter.writer(request)
+
+    indexed = DocumentIndexer.from_config(model, cwd=cwd).collect_and_store(
+        writer,
+        vector_writer=vector_writer,
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+    )
+    return {
+        "schema_version": "rebuild_vectors_result.v1",
+        "result_status": "ready",
+        "target": target,
+        "source": source,
+        "vectors_rebuilt": len(indexed.vector_writes),
+        "doc_files_scanned": len(indexed.file_records),
+        "embedding_model_version": DocumentIndexer.from_config(model, cwd=cwd).embedding_model_version,
+    }
 
 
 def merge_cli_overrides(low: ConfigDict, high: ConfigDict) -> ConfigDict:
@@ -1522,6 +1970,39 @@ def emit_blocked_result(args: argparse.Namespace, result: SecurityValidationResu
                         f"active-kb: blocked [{warning.get('code')}]: {warning.get('message')}",
                         file=sys.stderr,
                     )
+    return 2
+
+
+def emit_command_blocked(
+    args: argparse.Namespace,
+    *,
+    tool_name: str,
+    code: str,
+    message: str,
+    suggested_action: str,
+    details: dict[str, object] | None = None,
+) -> int:
+    """Emit one blocked result for non-security command policy violations."""
+
+    warning = Warning(
+        level="blocked",
+        code=code,
+        message=message,
+        details=details or {},
+        actionable=True,
+        suggested_action=suggested_action,
+    )
+    payload = QueryResult.blocked(
+        tool_name=tool_name,
+        summary=message,
+        warnings=(warning,),
+        next_queries=(suggested_action,),
+        diagnostics={"blocked_reason": "command_policy", "warning_codes": [code]},
+    ).to_dict()
+    if getattr(args, "format", None) == "json":
+        print_json(payload)
+    else:
+        print(f"active-kb: blocked [{code}]: {message}", file=sys.stderr)
     return 2
 
 

@@ -17,6 +17,8 @@ def test_subcommands_have_help() -> None:
         "init",
         "serve",
         "index",
+        "rebuild",
+        "baseline",
         "status",
         "validate",
         "clean",
@@ -58,6 +60,55 @@ def test_perf_run_subcommand_has_help() -> None:
 
     assert "usage: active-kb perf run" in result.stdout
     assert "--cases" in result.stdout
+
+
+def test_rebuild_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "rebuild", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb rebuild" in result.stdout
+    assert "--vectors" in result.stdout
+
+
+def test_baseline_validate_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "baseline",
+            "validate",
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb baseline validate" in result.stdout
+
+
+def test_baseline_publish_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "baseline",
+            "publish",
+            "--help",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb baseline publish" in result.stdout
+    assert "--publish-mode" in result.stdout
 
 
 def test_stability_run_subcommand_has_help() -> None:
@@ -953,6 +1004,114 @@ def test_serve_without_json_runs_server(monkeypatch, tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert called["run"] is True
+
+
+def test_index_baseline_requires_publish_mode(capsys) -> None:
+    exit_code = main(
+        [
+            "index",
+            "--full",
+            "--target",
+            "baseline",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 2
+    assert payload["result_status"] == "blocked"
+    assert payload["warnings"][0]["code"] == "baseline.publish_mode_required"
+
+
+def test_baseline_publish_json_writes_manifest(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.run_full_index",
+        lambda resolved, target, source, operation_mode: {
+            "schema_version": "index_full_result.v1",
+            "result_status": "ready",
+            "snapshot_id": "current",
+            "code_indexer_schema_version": "code_indexer.v1",
+            "doc_indexer_schema_version": "doc_indexer.v1",
+            "profile_collector_schema_version": "profile_collector.v1",
+            "relation_schema_version": "profile_relations.v1",
+        },
+    )
+
+    exit_code = main(
+        [
+            "baseline",
+            "publish",
+            "--publish-mode",
+            "publish",
+            "--baseline-id",
+            "baseline-o8-02",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    manifest_path = workdir / "baseline" / "manifest.json"
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert payload["command"] == "baseline publish"
+    assert payload["baseline_id"] == "baseline-o8-02"
+    assert manifest_payload["baseline_id"] == "baseline-o8-02"
+
+
+def test_baseline_validate_json_reports_missing_manifest(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    exit_code = main(
+        [
+            "baseline",
+            "validate",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 1
+    assert payload["command"] == "baseline validate"
+    assert payload["status"] == "fail"
+    assert payload["manifest"]["exists"] is False
 
 
 def write_profile_fixture(

@@ -1501,23 +1501,30 @@ TODO：
 
 ### O8-02 Index/rebuild/baseline publish
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`P4-06`、`E7-07`
 
 TODO：
 
-- [ ] `index --incremental --profile auto`。
-- [ ] `index --full --target local`。
-- [ ] `index --full --target baseline` 仅允许 publish/build mode。
-- [ ] `rebuild --vectors`。
-- [ ] `baseline validate`。
-- [ ] `baseline publish`。
+- [x] `index --incremental --profile auto`。
+- [x] `index --full --target local`。
+- [x] `index --full --target baseline` 仅允许 publish/build mode。
+- [x] `rebuild --vectors`。
+- [x] `baseline validate`。
+- [x] `baseline publish`。
 
 验收标准：
 
-- 普通用户不能误写 baseline。
+- [x] 普通用户不能误写 baseline。
+
+输出：
+
+- 已将 `active-kb index` 从计划模式升级为可执行模式：`--incremental` 走 `IncrementalIndexPipeline.run`，`--full --target local|baseline` 走完整索引写入流；其中 baseline 写入必须显式 `--publish-mode publish|build` 且仅允许 full。
+- 已新增 `active-kb rebuild --vectors`，支持 local/baseline 向量重建；baseline 目标同样受 publish/build mode gating。
+- 已新增 `active-kb baseline validate` 与 `active-kb baseline publish`：前者输出 baseline manifest + storage consistency，后者执行 baseline 全量构建并写入 `baseline/manifest.json`。
+- 已补充 CLI 单测覆盖 O8-02 核心门槛：新增 `rebuild`/`baseline` 帮助命令测试、baseline 误写阻断测试、baseline publish manifest 产出测试、baseline validate 缺 manifest 行为测试。
 
 ### O8-03 本地单机部署文档
 
