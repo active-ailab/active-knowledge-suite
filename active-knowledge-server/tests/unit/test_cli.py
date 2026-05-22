@@ -10,7 +10,7 @@ from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAME
 
 
 def test_subcommands_have_help() -> None:
-    for command in ("init", "serve", "index", "status", "validate", "clean"):
+    for command in ("init", "serve", "index", "status", "validate", "clean", "eval"):
         result = subprocess.run(
             [sys.executable, "-m", "active_knowledge_server.cli", command, "--help"],
             check=True,
@@ -20,6 +20,18 @@ def test_subcommands_have_help() -> None:
 
         assert "usage: active-kb" in result.stdout
         assert command in result.stdout
+
+
+def test_eval_run_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "eval", "run", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb eval run" in result.stdout
+    assert "--cases" in result.stdout
 
 
 def test_status_json_is_machine_readable(capsys) -> None:
@@ -139,6 +151,43 @@ def test_serve_json_reports_registered_mcp_components(tmp_path: Path, capsys) ->
     assert payload["mcp"]["components"]["tools"] == list(ALL_TOOL_NAMES)
     assert payload["mcp"]["components"]["resources"] == list(ALL_RESOURCE_URIS)
     assert payload["mcp"]["http_endpoint"] == "http://127.0.0.1:8765/mcp"
+
+
+def test_eval_run_json_reports_seed_suite_summary(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    cases = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    exit_code = main(
+        [
+            "eval",
+            "run",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--cases",
+            str(cases),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval run"
+    assert payload["status"] == "pass"
+    assert payload["suite_id"] == "v1-routing-v1"
+    assert payload["metrics"]["failed_cases"] == 0
+    assert payload["metrics"]["release_gate_cases"] == 60
+    assert payload["warnings"] == []
 
 
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(

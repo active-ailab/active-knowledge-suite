@@ -1324,21 +1324,22 @@ TODO：
 
 ### E7-01 V1 eval cases
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：`D0-07`
+- 输出：已将 `active-knowledge-server/eval/cases.yaml` 扩成完成态 V1 suite，包含 60 个 release-gate `router_contract` case，覆盖符号定位、API 文档查证、控件使用、workspace 导航、配置/profile 影响、feature/domain 跨层六类文档门槛；另保留 2 个非 gate 的 warning regression case。`eval/cases.py` 现已强制每个 case 显式声明目标 evidence、期望 route warning、requested profile 与期望 profile status，`eval/metrics.py` 的 coverage minimums 也已对齐 E7-01 文档中的六类要求；`active-kb eval run --cases ...` 可稳定读取并执行全套 cases，并返回 `pass`。
 
 TODO：
 
-- [ ] 建立 `eval/cases.yaml`。
-- [ ] 至少 10 个符号定位问题。
-- [ ] 至少 10 个 API 文档查证问题。
-- [ ] 至少 10 个控件使用问题。
-- [ ] 至少 10 个 workspace 导航问题。
-- [ ] 至少 10 个配置/profile 影响问题。
-- [ ] 至少 10 个 feature/domain 跨层问题。
-- [ ] 每个 case 标注目标 evidence、期望 intent、期望 warning、profile 条件。
+- [x] 建立 `eval/cases.yaml`。
+- [x] 至少 10 个符号定位问题。
+- [x] 至少 10 个 API 文档查证问题。
+- [x] 至少 10 个控件使用问题。
+- [x] 至少 10 个 workspace 导航问题。
+- [x] 至少 10 个配置/profile 影响问题。
+- [x] 至少 10 个 feature/domain 跨层问题。
+- [x] 每个 case 标注目标 evidence、期望 intent、期望 warning、profile 条件。
 
 验收标准：
 

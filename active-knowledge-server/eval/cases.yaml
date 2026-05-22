@@ -1,0 +1,2009 @@
+schema_version: eval_cases.v1
+suite_id: v1-routing-v1
+description: Router-contract V1 cases for the six documented E7-01 release-gate categories, plus auxiliary warning regressions.
+generated_from:
+  - tests/fixtures/skill_routing_examples.yaml
+  - tests/fixtures/query_intents.yaml
+
+cases:
+  - case_id: symbol_macro_definition
+    title: 宏定义定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#exact_macro_resolution
+      - tests/fixtures/query_intents.yaml#code_exact_macro_definition
+    input_tool: code_resolve
+    request:
+      query: CONFIG_HEALTH_SLEEP 在哪里定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: CONFIG_HEALTH_SLEEP
+
+  - case_id: symbol_file_module_lookup
+    title: 文件所属模块定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_file_module_lookup
+    input_tool: code_resolve
+    request:
+      query: drivers/hr/ppg_sensor.c 这个文件属于哪个模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: file
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: drivers/hr/ppg_sensor.c
+
+  - case_id: symbol_subscribe_definition
+    title: 订阅实现入口定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_from_api_negative
+    input_tool: code_resolve
+    request:
+      query: sensor_service.c 里 subscribe 在哪定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: subscribe
+
+  - case_id: symbol_health_service_publish_event_definition
+    title: 发布事件函数定义定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_reverse_lookup
+    input_tool: code_resolve
+    request:
+      query: health_service_publish_event() 在哪里定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: health_service_publish_event
+
+  - case_id: symbol_config_bt_references
+    title: 宏引用点定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_macro_definition
+    input_tool: code_resolve
+    request:
+      query: 谁引用了 CONFIG_BT？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: CONFIG_BT
+
+  - case_id: symbol_error_code_definition
+    title: 错误码定义定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_macro_definition
+    input_tool: code_resolve
+    request:
+      query: ERR_SENSOR_TIMEOUT 在哪里定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: ERR_SENSOR_TIMEOUT
+
+  - case_id: symbol_notification_file_module_lookup
+    title: 通知文件模块归属
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_file_module_lookup
+    input_tool: code_resolve
+    request:
+      query: packages/services/notification/notify.c 这个文件属于哪个模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: file
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: packages/services/notification/notify.c
+
+  - case_id: symbol_ppg_init_declaration
+    title: 初始化函数声明定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_function_chain
+    input_tool: code_resolve
+    request:
+      query: ppg_init() 在哪声明？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: ppg_init
+
+  - case_id: symbol_sleep_ring_file_module_lookup
+    title: UI 文件模块归属
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#code_exact_file_module_lookup
+    input_tool: code_resolve
+    request:
+      query: ui/widgets/sleep_ring.c 这个文件属于哪个模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: file
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: ui/widgets/sleep_ring.c
+
+  - case_id: symbol_app_manager_start_definition
+    title: 启动函数定义定位
+    category: symbol_lookup
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_function_chain
+    input_tool: code_resolve
+    request:
+      query: app_manager_start() 在哪里定义？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: app_manager_start
+
+  - case_id: api_sensor_subscribe_usage
+    title: API 用法查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#docs_api_usage_then_resolve
+      - tests/fixtures/query_intents.yaml#api_lookup_usage
+    input_tool: docs_search
+    request:
+      query: sensor.subscribe API 怎么用？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: sensor.subscribe
+
+  - case_id: api_ble_parameters
+    title: API 参数与返回值
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_parameter_question
+    input_tool: docs_search
+    request:
+      query: Active 蓝牙 API 的参数和返回值是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: 蓝牙 API
+
+  - case_id: api_ble_connect_return_value
+    title: BLE 连接返回值查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_parameter_question
+    input_tool: docs_search
+    request:
+      query: ble.connect API 的返回值是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: ble.connect
+
+  - case_id: api_sensor_unsubscribe_parameters
+    title: 取消订阅参数查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_parameter_question
+    input_tool: docs_search
+    request:
+      query: sensor.unsubscribe API 参数是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: sensor.unsubscribe
+
+  - case_id: api_health_sync_example
+    title: 同步接口示例查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_usage
+    input_tool: docs_search
+    request:
+      query: health.sync 接口示例是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: health.sync
+
+  - case_id: api_notification_push_usage
+    title: 推送接口调用方式
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_usage
+    input_tool: docs_search
+    request:
+      query: notification.push API 调用方式是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: notification.push
+
+  - case_id: api_gps_start_parameters
+    title: GPS 启动参数查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_parameter_question
+    input_tool: docs_search
+    request:
+      query: gps.start API 的参数是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: gps.start
+
+  - case_id: api_alarm_create_return_value
+    title: 闹钟创建返回值查证
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_parameter_question
+    input_tool: docs_search
+    request:
+      query: alarm.create API 返回值是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: alarm.create
+
+  - case_id: api_settings_save_usage
+    title: 设置保存接口用法
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_usage
+    input_tool: docs_search
+    request:
+      query: settings.save 接口怎么用？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: settings.save
+
+  - case_id: api_power_save_mode_usage
+    title: 省电接口用法
+    category: api_documentation
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#api_lookup_usage
+    input_tool: docs_search
+    request:
+      query: power.save_mode API 怎么用？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: power.save_mode
+
+  - case_id: widget_active_text_properties
+    title: Active Text 属性说明
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#widget_doc_then_feature_view
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: Active Text widget 支持哪些属性？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: Active Text widget
+
+  - case_id: widget_progress_ring_binding
+    title: Progress Ring 绑定方式
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_binding_example
+    input_tool: docs_search
+    request:
+      query: progress ring 控件怎么绑定数据？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: progress ring
+
+  - case_id: widget_list_item_styles
+    title: List Item 样式说明
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: list item widget 支持哪些样式？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: list item widget
+
+  - case_id: widget_button_click_binding
+    title: Button 点击绑定
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_binding_example
+    input_tool: docs_search
+    request:
+      query: button 控件点击事件怎么绑定？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: button 控件
+
+  - case_id: widget_calendar_properties
+    title: Calendar 属性说明
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: calendar widget 支持哪些属性？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: calendar widget
+
+  - case_id: widget_chart_binding
+    title: Chart 数据绑定
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_binding_example
+    input_tool: docs_search
+    request:
+      query: chart 控件怎么绑定数据？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: chart 控件
+
+  - case_id: widget_slider_layout_properties
+    title: Slider 布局属性
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: slider 组件有哪些布局属性？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: slider 组件
+
+  - case_id: widget_toast_style_configuration
+    title: Toast 样式配置
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: toast widget 样式怎么配置？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: toast widget
+
+  - case_id: widget_qr_card_properties
+    title: QR Card 属性说明
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_properties
+    input_tool: docs_search
+    request:
+      query: qr card 控件支持哪些属性？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: qr card 控件
+
+  - case_id: widget_switch_state_binding
+    title: Switch 状态绑定
+    category: widget_usage
+    priority: P1
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#widget_lookup_binding_example
+    input_tool: docs_search
+    request:
+      query: switch 组件怎么绑定状态？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: switch 组件
+
+  - case_id: workspace_nav_bluetooth_entry
+    title: 蓝牙功能目录导航
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#workspace_nav_entry_points
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 新同事要看蓝牙功能应该从哪些目录开始？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: 蓝牙目录入口
+
+  - case_id: workspace_nav_ui_boundary
+    title: UI 层次边界解释
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_boundary
+    input_tool: workspace_view
+    request:
+      query: ui 和 uiframework 的职责边界是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: layer
+      selected_granularity: module
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: module
+        locator: ui / uiframework
+
+  - case_id: workspace_nav_sleep_entry
+    title: 睡眠功能目录入口
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 想改睡眠功能应该从哪些目录开始？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: path
+        locator: 睡眠功能目录入口
+
+  - case_id: workspace_nav_bluetooth_tree
+    title: 蓝牙目录结构导航
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 蓝牙模块的目录结构在哪看？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: 蓝牙目录结构
+
+  - case_id: workspace_nav_ppg_newcomer_entry
+    title: PPG 新人入口导航
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 新人入口看 PPG 应该从哪些目录开始？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: PPG 目录入口
+
+  - case_id: workspace_nav_engine_layer_entry
+    title: 引擎层查看入口
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: framework/engine 这一层该去哪看？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: path
+        locator: framework/engine
+
+  - case_id: workspace_nav_services_apps_boundary
+    title: services 与 apps 边界导航
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_boundary
+    input_tool: workspace_view
+    request:
+      query: packages/services 和 packages/apps 的职责边界是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: layer
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: packages/services / packages/apps
+
+  - case_id: workspace_nav_notification_entry
+    title: 通知功能目录入口
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 想看 notification 功能应该从哪些目录开始？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: path
+        locator: notification 目录入口
+
+  - case_id: workspace_nav_ui_repo_tree
+    title: UI 控件目录结构
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 哪个仓可以看 UI 控件实现目录结构？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: directory
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: path
+        locator: UI 控件目录结构
+
+  - case_id: workspace_nav_sensor_first_stop
+    title: Sensor 功能首站导航
+    category: workspace_navigation
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#workspace_nav_newcomer_dirs
+    input_tool: workspace_view
+    request:
+      query: 新同事第一次看 sensor 功能该去哪看？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: module
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: module
+        locator: sensor 功能入口
+
+  - case_id: profile_diff_bt_compare
+    title: 显式 profile 差异
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#profile_diff_with_compare
+      - tests/unit/test_query_router.py#test_query_router_passes_compare_to_into_config_impact_args
+    input_tool: config_impact
+    request:
+      query: CONFIG_BT 在 watch 和 sensorhub 的差异是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context:
+        compare_to: mhs003_sensorhub
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      compare_to: mhs003_sensorhub
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: mhs003_watch vs mhs003_sensorhub
+
+  - case_id: profile_macro_impact
+    title: 宏开关影响范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: CONFIG_GNSS 打开后影响哪些模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_GNSS
+
+  - case_id: profile_sleep_impact
+    title: 睡眠配置影响范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: CONFIG_SLEEP 打开后影响哪些模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_SLEEP
+
+  - case_id: profile_touch_impact
+    title: Touch 配置影响范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: mhs003_watch profile 下 CONFIG_TOUCH 影响哪些模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_TOUCH
+
+  - case_id: profile_health_sleep_compare
+    title: 健康睡眠宏差异
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#profile_diff_with_compare
+    input_tool: config_impact
+    request:
+      query: CONFIG_HEALTH_SLEEP 在 mhs003_watch 和 mhs003_sensorhub 的差异是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context:
+        compare_to: mhs003_sensorhub
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      compare_to: mhs003_sensorhub
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_HEALTH_SLEEP
+
+  - case_id: profile_ui_animations_impact
+    title: UI 动画配置影响范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: board mhs003_watch 下 CONFIG_UI_ANIMATIONS 影响哪些模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_UI_ANIMATIONS
+
+  - case_id: profile_ppg_compare
+    title: PPG 宏跨 profile 差异
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#profile_diff_with_compare
+    input_tool: config_impact
+    request:
+      query: CONFIG_PPG 在 watch 和 sensorhub 的差异是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context:
+        compare_to: mhs003_sensorhub
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      compare_to: mhs003_sensorhub
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_PPG
+
+  - case_id: profile_macro_enabled_profiles
+    title: 宏启用 profile 列表
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: 哪些 profile 启用了 CONFIG_BT？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_BT
+
+  - case_id: profile_gps_defconfig_enablement
+    title: 宏启用 defconfig 范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: CONFIG_GPS 在哪些 defconfig 中启用？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_GPS
+
+  - case_id: profile_hrm_impact
+    title: HRM 配置影响范围
+    category: profile_impact
+    priority: P0
+    blocking_level: blocker
+    source_refs:
+      - tests/fixtures/query_intents.yaml#profile_diff_macro_impact
+    input_tool: config_impact
+    request:
+      query: CONFIG_HRM 在 mhs003_watch 下影响哪些模块？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: profile_diff
+      primary_tool: config_impact
+      route_mode: chain
+      selected_view: profile
+      selected_granularity: profile
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: profile
+        locator: CONFIG_HRM
+
+  - case_id: feature_call_trace_chain
+    title: 入口到出口调用链
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#trace_after_anchor_resolution
+      - tests/fixtures/query_intents.yaml#call_trace_function_chain
+    input_tool: code_resolve
+    request:
+      query: app_manager_start() 到 screen_create() 的调用链怎么走？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: call_trace
+      primary_tool: code_resolve
+      route_mode: chain
+      selected_view: code
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: app_manager_start -> screen_create
+
+  - case_id: feature_reverse_callers_health_service_publish
+    title: 反向调用者查询
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_reverse_lookup
+    input_tool: code_resolve
+    request:
+      query: 谁调用了 health_service_publish_event？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: call_trace
+      primary_tool: code_resolve
+      route_mode: chain
+      selected_view: code
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: health_service_publish_event
+
+  - case_id: feature_sensor_bootstrap_trace
+    title: 启动到广播调用链
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_function_chain
+    input_tool: code_resolve
+    request:
+      query: sensor_bootstrap() 到 ble_advertise_start() 的调用链怎么走？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: call_trace
+      primary_tool: code_resolve
+      route_mode: chain
+      selected_view: code
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: sensor_bootstrap -> ble_advertise_start
+
+  - case_id: feature_ui_scene_bind_trace
+    title: UI 场景绑定调用链
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#call_trace_function_chain
+    input_tool: code_resolve
+    request:
+      query: ui_scene_enter() 到 widget_bind_data() 的调用链怎么走？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: call_trace
+      primary_tool: code_resolve
+      route_mode: chain
+      selected_view: code
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: symbol
+        locator: ui_scene_enter -> widget_bind_data
+
+  - case_id: feature_runtime_flow_ppg
+    title: ISR 到 task 的运行时流转
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#runtime_flow_from_feature_projection
+      - tests/fixtures/query_intents.yaml#runtime_flow_isr_to_task
+    input_tool: workspace_view
+    request:
+      query: PPG 中断之后事件如何进入 health task？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: runtime_flow
+      primary_tool: workspace_view
+      route_mode: chain
+      selected_view: runtime
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: feature
+        locator: PPG -> health task
+
+  - case_id: feature_runtime_flow_timer_startup
+    title: Timer 启动顺序流转
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#runtime_flow_startup_order
+    input_tool: workspace_view
+    request:
+      query: 启动时 timer service 的初始化顺序是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: runtime_flow
+      primary_tool: workspace_view
+      route_mode: chain
+      selected_view: runtime
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: feature
+        locator: timer service startup
+
+  - case_id: feature_runtime_flow_button_to_app_task
+    title: 点击事件到任务流转
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#runtime_flow_from_widget_negative
+    input_tool: workspace_view
+    request:
+      query: 按钮点击后事件如何进入 app task？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: unresolved
+    expected_route:
+      intent: runtime_flow
+      primary_tool: workspace_view
+      route_mode: chain
+      selected_view: runtime
+      selected_granularity: flow
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: feature
+        locator: button click -> app task
+
+  - case_id: feature_product_scope_sleep
+    title: 产品范围到 feature 落点
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#product_scope_then_feature_link
+      - tests/fixtures/query_intents.yaml#product_context_feature_scope
+    input_tool: docs_search
+    request:
+      query: 睡眠功能 V1 的产品范围是什么？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: product_context
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: feature
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: feature
+        locator: 睡眠功能 V1
+
+  - case_id: feature_product_scope_sleep_with_evidence
+    title: 产品范围带证据说明
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#product_context_with_evidence_modifier
+    input_tool: docs_search
+    request:
+      query: 睡眠功能范围是什么？请带证据。
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: product_context
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: feature
+      selected_granularity: feature
+      required_warning_codes: []
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: feature
+        locator: 睡眠功能范围
+
+  - case_id: feature_project_delivery_risk_mhs003
+    title: 项目交付风险查证
+    category: feature_domain_cross_layer
+    priority: P1
+    blocking_level: warning
+    source_refs:
+      - tests/fixtures/query_intents.yaml#project_context_delivery_risk
+    input_tool: docs_search
+    request:
+      query: mhs003 本周有哪些交付风险？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: project_context
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: doc_section
+        locator: mhs003 交付风险
+
+  - case_id: warning_ambiguous_widget_api
+    title: API / widget 歧义
+    category: warning_degradation
+    priority: P0
+    blocking_level: blocker
+    include_in_release_gate: false
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#ambiguous_widget_or_api
+      - tests/unit/test_query_router.py#test_query_router_marks_close_intents_as_ambiguous
+    input_tool: docs_search
+    request:
+      query: 这个控件 API 怎么用？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: [router.ambiguous_intent]
+      allowed_warning_codes: [router.medium_confidence]
+    expected_evidence:
+      - kind: query_refinement
+        locator: widget_name_or_module_name
+
+  - case_id: warning_low_confidence_anchorless
+    title: 缺少锚点的低置信查询
+    category: warning_degradation
+    priority: P0
+    blocking_level: blocker
+    include_in_release_gate: false
+    source_refs:
+      - tests/fixtures/skill_routing_examples.yaml#low_confidence_missing_anchor
+      - tests/fixtures/query_intents.yaml#unknown_short_pronoun
+    input_tool: kb_search
+    request:
+      query: 这个为什么不行？
+      domain: auto
+      view: auto
+      granularity: auto
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: unknown
+      primary_tool: kb_search
+      route_mode: explore
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: [router.low_confidence]
+      allowed_warning_codes: []
+    expected_evidence:
+      - kind: query_refinement
+        locator: symbol_or_path_or_error_text

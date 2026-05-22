@@ -25,6 +25,7 @@ from active_knowledge_server.config.workdir import (
     initialize_workdir,
     layout_from_config,
 )
+from active_knowledge_server.eval import EvalRunner
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
     SecurityConfigError,
@@ -192,6 +193,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     clean_parser.set_defaults(handler=handle_clean)
+
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="Run eval suites and emit machine-readable gate summaries.",
+    )
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", metavar="EVAL_COMMAND")
+
+    eval_run_parser = eval_subparsers.add_parser(
+        "run",
+        parents=[common],
+        help="Load and execute one eval case suite.",
+    )
+    eval_run_parser.add_argument(
+        "--gate",
+        default="v1",
+        help="Gate identifier recorded in the eval report.",
+    )
+    eval_run_parser.add_argument(
+        "--cases",
+        type=Path,
+        default=Path("eval") / "cases.yaml",
+        help="Eval case YAML file.",
+    )
+    eval_run_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional output path for the eval report JSON.",
+    )
+    eval_run_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    eval_run_parser.set_defaults(handler=handle_eval_run)
 
     return parser
 
@@ -403,6 +439,36 @@ def handle_clean(args: argparse.Namespace) -> int:
         if report.compact:
             print(f"Compact: {report.compact}")
     return 0
+
+
+def handle_eval_run(args: argparse.Namespace) -> int:
+    """Load and execute the configured eval suite."""
+
+    resolved = resolve_from_args(args)
+    runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
+    report = runner.run(Path(args.cases), gate_id=str(args.gate))
+    if args.report is not None:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = report.model_copy(update={"artifacts": report.artifacts + (str(report_path),)})
+        report_path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    payload = {
+        "command": "eval run",
+        **report.to_dict(),
+        "config": config_summary(resolved),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Eval suite: {report.suite_id}")
+        print(f"Gate: {report.gate_id}")
+        print(f"Status: {report.status}")
+        print(
+            f"Cases: {report.metrics['passed_cases']}/{report.metrics['executed_cases']} passed"
+        )
+        for warning in report.warnings:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
+    return 1 if report.status == "fail" else 0
 
 
 def resolve_from_args(
