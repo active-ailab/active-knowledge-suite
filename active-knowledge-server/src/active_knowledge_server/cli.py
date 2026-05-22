@@ -446,7 +446,7 @@ def handle_eval_run(args: argparse.Namespace) -> int:
 
     resolved = resolve_from_args(args)
     runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
-    report = runner.run(Path(args.cases), gate_id=str(args.gate))
+    report = runner.run(resolve_eval_cases_path(args), gate_id=str(args.gate))
     if args.report is not None:
         report_path = Path(args.report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -469,6 +469,19 @@ def handle_eval_run(args: argparse.Namespace) -> int:
         for warning in report.warnings:
             print(f"Warning [{warning['code']}]: {warning['message']}")
     return 1 if report.status == "fail" else 0
+
+
+def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
+    """Resolve the default eval suite path for the selected gate."""
+
+    cases_path = getattr(args, "cases", None)
+    if cases_path is not None:
+        candidate = Path(cases_path)
+        if candidate != Path("eval") / "cases.yaml":
+            return candidate
+    if str(args.gate) == "quality":
+        return Path("eval") / "quality_cases.yaml"
+    return Path("eval") / "cases.yaml"
 
 
 def resolve_from_args(

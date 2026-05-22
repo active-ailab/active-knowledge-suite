@@ -5,6 +5,7 @@ from pathlib import Path
 from active_knowledge_server.eval import load_eval_suite
 
 CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
+QUALITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "quality_cases.yaml"
 
 
 def test_load_eval_suite_parses_seed_cases_file() -> None:
@@ -33,3 +34,13 @@ def test_seed_eval_suite_has_warning_and_profile_cases() -> None:
     assert any(case.expected_route.required_warning_codes for case in suite.cases)
     assert all(case.profile_requirement.expected_status for case in suite.cases)
     assert all(case.source_refs for case in suite.cases)
+
+
+def test_load_quality_eval_suite_parses_quality_cases_file() -> None:
+    suite = load_eval_suite(QUALITY_CASES_FILE)
+
+    assert suite.schema_version == "eval_cases.v1"
+    assert suite.suite_id == "quality-benchmark-v1"
+    assert len(suite.cases) == 8
+    assert all(case.execution_mode == "query_quality" for case in suite.cases)
+    assert all(case.expected_result_status is not None for case in suite.cases)

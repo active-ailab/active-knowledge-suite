@@ -190,6 +190,45 @@ def test_eval_run_json_reports_seed_suite_summary(tmp_path: Path, capsys) -> Non
     assert payload["warnings"] == []
 
 
+def test_eval_run_quality_json_uses_quality_suite_and_reports_gate_summary(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    exit_code = main(
+        [
+            "eval",
+            "run",
+            "--gate",
+            "quality",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval run"
+    assert payload["gate_id"] == "quality"
+    assert payload["suite_id"] == "quality-benchmark-v1"
+    assert payload["status"] == "pass"
+    assert payload["metrics"]["quality_gate"]["passed"] is True
+    assert payload["metrics"]["blocked_security_probe"]["ok"] is True
+
+
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(
     tmp_path: Path,
     capsys,

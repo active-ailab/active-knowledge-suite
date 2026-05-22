@@ -1347,25 +1347,27 @@ TODO：
 
 ### E7-02 质量阈值 gate
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`TEST`、`CONTRACT`
 - 依赖：`E7-01`、`Q5-10`
+- 输出：已新增 `eval/quality_cases.yaml`、`src/active_knowledge_server/eval/benchmark.py`、质量阈值判定与 blocker check 汇总；`active-kb eval run --gate quality` 现在默认执行 deterministic quality suite，输出 `quality_gate.metrics/checks` 与 `blocked_security_probe`，并在任一 blocker 阈值未达标时失败退出。
 
 V1 最低门槛：
 
-- [ ] Schema compliance：100%。
-- [ ] Evidence Hit Rate：整体 `>= 0.85`。
-- [ ] Top-5 Recall：整体 `>= 0.90`。
-- [ ] 符号定位 Top-3 Recall：`>= 0.95`。
-- [ ] MRR：整体 `>= 0.75`。
-- [ ] Profile Correctness：`>= 0.90`。
-- [ ] Warning Quality：`>= 0.85`。
-- [ ] blocked/security contract：100%。
+- [x] Schema compliance：100%。
+- [x] Evidence Hit Rate：整体 `>= 0.85`。
+- [x] Top-5 Recall：整体 `>= 0.90`。
+- [x] 符号定位 Top-3 Recall：`>= 0.95`。
+- [x] MRR：整体 `>= 0.75`。
+- [x] Profile Correctness：`>= 0.90`。
+- [x] Warning Quality：`>= 0.85`。
+- [x] blocked/security contract：100%。
 
 验收标准：
 
-- `active-kb eval run --gate quality` 低于 blocker 阈值时失败退出。
+- [x] `active-kb eval run --gate quality` 低于 blocker 阈值时失败退出。
+- [x] 质量报告输出统一 blocker 阈值、实际值、逐项 pass/fail、以及 blocked security probe 结果。
 
 ### E7-03 性能阈值 gate
 

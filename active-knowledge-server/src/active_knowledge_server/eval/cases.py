@@ -24,7 +24,7 @@ EvalCaseCategory = Literal[
 ]
 EvalCasePriority = Literal["P0", "P1", "P2"]
 EvalBlockingLevel = Literal["blocker", "warning", "advisory"]
-EvalExecutionMode = Literal["router_contract"]
+EvalExecutionMode = Literal["router_contract", "query_quality"]
 EvalExpectedEvidenceKind = Literal[
 	"symbol",
 	"module",
@@ -35,6 +35,16 @@ EvalExpectedEvidenceKind = Literal[
 	"query_refinement",
 ]
 EvalProfileStatus = Literal["resolved", "unresolved", "not_required"]
+EvalExpectedResultStatus = Literal[
+	"ok",
+	"zero_result",
+	"multi_result",
+	"ambiguous",
+	"low_confidence",
+	"partial_ready",
+	"blocked",
+	"error",
+]
 
 
 class EvalExpectedEvidence(BaseModel):
@@ -89,6 +99,7 @@ class EvalCase(BaseModel):
 	snapshot_requirement: str = "current"
 	profile_requirement: EvalProfileRequirement
 	expected_route: EvalRouteExpectation
+	expected_result_status: EvalExpectedResultStatus | None = None
 	expected_evidence: tuple[EvalExpectedEvidence, ...] = ()
 	tags: tuple[str, ...] = ()
 
@@ -108,6 +119,10 @@ class EvalCase(BaseModel):
 		if self.profile_requirement.requested_profile_id != self.request.profile_id:
 			raise ValueError(
 				"profile_requirement.requested_profile_id must match request.profile_id"
+			)
+		if self.execution_mode == "query_quality" and self.expected_result_status is None:
+			raise ValueError(
+				"query_quality eval cases must declare expected_result_status"
 			)
 		compare_to = self.profile_requirement.compare_to
 		if compare_to is not None and self.request.client_context.get("compare_to") != compare_to:
