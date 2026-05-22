@@ -1,0 +1,251 @@
+route_matrix:
+  - intent: code_exact
+    question_type: 函数、宏、路径、文件定位
+    primary_tool: code_resolve
+    fallback_tools: [code_context, evidence_bundle]
+    skill_rule: 先收紧到精确锚点，再决定是否扩展上下文。
+  - intent: code_concept
+    question_type: 模块职责、机制说明、子系统解释
+    primary_tool: code_context
+    fallback_tools: [kb_search, evidence_bundle]
+    skill_rule: 先拿模块级摘要，再补关键证据，避免一开始就做全局召回。
+  - intent: call_trace
+    question_type: 调用链、谁调用了谁、入口到出口
+    primary_tool: code_resolve
+    fallback_tools: [code_trace, evidence_bundle]
+    skill_rule: 先定位链路锚点，再做 graph-aware trace。
+  - intent: runtime_flow
+    question_type: ISR、task、queue、startup、事件传播
+    primary_tool: workspace_view
+    fallback_tools: [code_trace, evidence_bundle]
+    skill_rule: 先建立 feature 或目录落点，再解释运行时流转。
+  - intent: profile_diff
+    question_type: 宏影响、profile 差异、配置开关影响
+    primary_tool: config_impact
+    fallback_tools: [code_resolve, evidence_bundle]
+    skill_rule: 先输出受影响 profile 和模块，再补符号级证据。
+  - intent: api_lookup
+    question_type: API 用法、参数、返回值
+    primary_tool: docs_search
+    fallback_tools: [code_resolve, evidence_bundle]
+    skill_rule: 先用权威文档回答，再按需下钻实现入口。
+  - intent: widget_lookup
+    question_type: 控件属性、绑定方式、UI 约束
+    primary_tool: docs_search
+    fallback_tools: [workspace_view, evidence_bundle]
+    skill_rule: 先用 widget 文档给能力边界，再定位 feature 视图。
+  - intent: workspace_nav
+    question_type: 去哪看、目录职责、层次边界
+    primary_tool: workspace_view
+    fallback_tools: [code_context, kb_search]
+    skill_rule: 先回答看哪里，再决定是否展开模块解释。
+  - intent: product_project_context
+    question_type: 产品范围、项目计划、交付风险
+    primary_tool: docs_search
+    fallback_tools: [workspace_view, evidence_bundle]
+    skill_rule: 先回到 product/project 原始文档，不把派生理解当成权威事实。
+  - intent: evidence_lookup
+    question_type: 证据包、出处、来源回溯
+    primary_tool: evidence_bundle
+    fallback_tools: [code_resolve, docs_search]
+    skill_rule: 直接返回 evidence_refs，不重复生成推断结论。
+  - intent: unknown
+    question_type: 模糊、上下文缺失、跨域探索
+    primary_tool: kb_search
+    fallback_tools: [workspace_view, docs_search]
+    skill_rule: 只做探索性召回，并显式保留 low-confidence 语义。
+
+examples:
+  - id: kb_search_concept_bootstrap
+    question: Active 的运动数据缓存机制是怎么实现的？
+    intent: code_concept
+    route_mode: explore
+    tool_calls:
+      - tool: kb_search
+        args:
+          query: Active 的运动数据缓存机制是怎么实现的？
+      - tool: code_context
+        args:
+          query: 运动数据缓存机制
+          granularity: module
+      - tool: evidence_bundle
+        args:
+          query: 运动数据缓存机制
+    expected_focus: [候选模块, 关键证据, 不确定点]
+  - id: docs_api_usage_then_resolve
+    question: sensor.subscribe API 怎么用？
+    intent: api_lookup
+    route_mode: chain
+    tool_calls:
+      - tool: docs_search
+        args:
+          query: sensor.subscribe API 怎么用？
+          doc_type: api
+      - tool: code_resolve
+        args:
+          query: sensor.subscribe
+      - tool: evidence_bundle
+        args:
+          query: sensor.subscribe API 怎么用？
+    expected_focus: [原始文档, 参数返回值, 实现入口]
+  - id: widget_doc_then_feature_view
+    question: Active Text widget 支持哪些属性？
+    intent: widget_lookup
+    route_mode: chain
+    tool_calls:
+      - tool: docs_search
+        args:
+          query: Active Text widget 支持哪些属性？
+          doc_type: widget
+      - tool: workspace_view
+        args:
+          view: feature
+          query: Active Text
+    expected_focus: [控件属性, 绑定入口, 相关 feature]
+  - id: exact_macro_resolution
+    question: CONFIG_HEALTH_SLEEP 在哪里定义？
+    intent: code_exact
+    route_mode: direct
+    tool_calls:
+      - tool: code_resolve
+        args:
+          query: CONFIG_HEALTH_SLEEP 在哪里定义？
+      - tool: evidence_bundle
+        args:
+          query: CONFIG_HEALTH_SLEEP 在哪里定义？
+    expected_focus: [定义位置, 宏类型, 证据引用]
+  - id: module_context_summary
+    question: packages/services/notification 主要负责什么？
+    intent: code_concept
+    route_mode: direct
+    tool_calls:
+      - tool: code_context
+        args:
+          query: packages/services/notification 主要负责什么？
+          granularity: module
+      - tool: evidence_bundle
+        args:
+          query: packages/services/notification 主要负责什么？
+    expected_focus: [模块职责, 关键文件, 配置入口]
+  - id: trace_after_anchor_resolution
+    question: app_manager_start() 到 screen_create() 的调用链怎么走？
+    intent: call_trace
+    route_mode: chain
+    tool_calls:
+      - tool: code_resolve
+        args:
+          query: app_manager_start
+      - tool: code_trace
+        args:
+          query: app_manager_start() 到 screen_create() 的调用链怎么走？
+          view: runtime
+      - tool: evidence_bundle
+        args:
+          query: app_manager_start() 到 screen_create() 的调用链怎么走？
+    expected_focus: [起终点锚点, 中间链路, 条件边]
+  - id: runtime_flow_from_feature_projection
+    question: PPG 中断之后事件如何进入 health task？
+    intent: runtime_flow
+    route_mode: chain
+    tool_calls:
+      - tool: workspace_view
+        args:
+          view: feature
+          query: PPG health
+      - tool: code_trace
+        args:
+          query: PPG 中断之后事件如何进入 health task？
+          view: runtime
+      - tool: evidence_bundle
+        args:
+          query: PPG 中断之后事件如何进入 health task？
+    expected_focus: [feature 落点, ISR 到 task 链路, 证据包]
+  - id: profile_diff_with_compare
+    question: CONFIG_BT 在 watch 和 sensorhub 的差异是什么？
+    intent: profile_diff
+    route_mode: chain
+    tool_calls:
+      - tool: config_impact
+        args:
+          query: CONFIG_BT 在 watch 和 sensorhub 的差异是什么？
+          profile_id: mhs003_watch
+          compare_to: mhs003_sensorhub
+      - tool: evidence_bundle
+        args:
+          query: CONFIG_BT 在 watch 和 sensorhub 的差异是什么？
+    expected_focus: [差异宏, 影响模块, profile matrix]
+  - id: workspace_nav_entry_points
+    question: 新同事要看蓝牙功能应该从哪些目录开始？
+    intent: workspace_nav
+    route_mode: direct
+    tool_calls:
+      - tool: workspace_view
+        args:
+          view: workspace
+          query: 蓝牙
+      - tool: code_context
+        args:
+          query: 蓝牙功能
+          granularity: module
+    expected_focus: [优先目录, 目录职责, 下一跳模块]
+  - id: product_scope_then_feature_link
+    question: 睡眠功能 V1 的产品范围是什么？
+    intent: product_context
+    route_mode: chain
+    tool_calls:
+      - tool: docs_search
+        args:
+          query: 睡眠功能 V1 的产品范围是什么？
+          doc_type: product
+      - tool: workspace_view
+        args:
+          view: feature
+          query: 睡眠
+      - tool: evidence_bundle
+        args:
+          query: 睡眠功能 V1 的产品范围是什么？
+    expected_focus: [产品范围, feature 落点, 证据来源]
+  - id: evidence_bundle_followup
+    question: 给我 app_manager_start 的证据包。
+    intent: evidence_lookup
+    route_mode: direct
+    tool_calls:
+      - tool: evidence_bundle
+        args:
+          query: 给我 app_manager_start 的证据包。
+      - tool: code_resolve
+        args:
+          query: app_manager_start
+    expected_focus: [evidence_refs, 文件行号, authority_level]
+
+warning_examples:
+  - id: ambiguous_widget_or_api
+    query: 这个控件 API 怎么用？
+    intent: api_lookup
+    primary_tool: docs_search
+    expected_warning_codes: [router.ambiguous_intent]
+    skill_action: 先声明它可能是 API 文档也可能是 widget 文档，再要求补充控件名或模块名，必要时保留候选而不下确定结论。
+  - id: low_confidence_missing_anchor
+    query: 这个为什么不行？
+    intent: unknown
+    primary_tool: kb_search
+    expected_warning_codes: [router.low_confidence]
+    skill_action: 不直接回答原因，先要求补充符号、路径、报错、profile 或最近变更；如果继续探索，只返回 next_queries 和低置信候选线索。
+
+forbidden_dependencies:
+  ops_tools:
+    - ops_get_config
+    - ops_validate_setup
+    - ops_index_status
+    - ops_start_index
+    - ops_cancel_index
+    - ops_list_profiles
+    - ops_list_sources
+  storage_terms:
+    - sqlite
+    - lancedb
+    - collection
+    - local/db
+    - local/vectors
+    - local/artifacts
+    - baseline/db

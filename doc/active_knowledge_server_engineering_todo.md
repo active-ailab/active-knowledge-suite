@@ -1301,17 +1301,18 @@ TODO：
 
 ### M6-06 Skill 路由说明与示例
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`DOC`、`TEST`
 - 依赖：`D0-02`、`M6-02`
+- 输出：已新增 [active_knowledge_skill_routing_examples.md](./active_knowledge_skill_routing_examples.md) 作为当前仓库 `question-intents.md` 的等价实施文档，固化 Skill 路由矩阵、10 个典型问题的真实 MCP tool call 示例、低置信/歧义处理骨架和禁止依赖清单；同时新增 `active-knowledge-server/tests/fixtures/skill_routing_examples.yaml` 与 `active-knowledge-server/tests/contracts/test_skill_routing_examples.py`，用夹具驱动的 contract smoke test 校验示例中的 tool 名称、warning 行为和边界约束，并通过 `uv run --group dev python -m pytest tests/contracts/test_skill_routing_examples.py tests/unit/test_query_router.py tests/unit/test_mcp_query_tools.py` 聚焦回归。
 
 TODO：
 
-- [ ] 输出 Skill 路由矩阵。
-- [ ] 输出 10 个典型问题的 tool call 示例。
-- [ ] 输出低置信/歧义时的 Skill 处理示例。
-- [ ] 明确 Skill 不依赖 ops tools 和内部存储。
+- [x] 输出 Skill 路由矩阵。
+- [x] 输出 10 个典型问题的 tool call 示例。
+- [x] 输出低置信/歧义时的 Skill 处理示例。
+- [x] 明确 Skill 不依赖 ops tools 和内部存储。
 
 验收标准：
 
