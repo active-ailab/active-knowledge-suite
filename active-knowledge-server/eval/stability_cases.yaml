@@ -1,0 +1,283 @@
+schema_version: eval_cases.v1
+suite_id: stability-mixed-query-v1
+description: Deterministic mixed-query corpus used by the E7-04 stability benchmark.
+generated_from:
+  - eval/quality_cases.yaml
+
+cases:
+  - case_id: stability_symbol_health_init
+    title: 函数定义稳定性混合查询
+    category: symbol_lookup
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_symbol_health_init
+    input_tool: code_resolve
+    request:
+      query: health_init 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: symbol
+        locator: health_init
+
+  - case_id: stability_symbol_error_macro
+    title: 宏定义稳定性混合查询
+    category: symbol_lookup
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_symbol_error_macro
+    input_tool: code_resolve
+    request:
+      query: ERR_HEALTH_TIMEOUT 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: symbol
+        locator: ERR_HEALTH_TIMEOUT
+
+  - case_id: stability_file_module_lookup
+    title: 文件模块归属稳定性混合查询
+    category: symbol_lookup
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_file_module_lookup
+    input_tool: code_resolve
+    request:
+      query: components/health/main.c 这个文件属于哪个模块？
+      domain: code
+      view: code
+      granularity: file
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: file
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: path
+        locator: components/health/main.c
+
+  - case_id: stability_api_sensor_close
+    title: API 文档稳定性混合查询
+    category: api_documentation
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_api_sensor_close
+    input_tool: docs_search
+    request:
+      query: sensor_close API
+      domain: api
+      view: evidence
+      granularity: doc_section
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: api_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: doc_section
+        locator: sensor_close
+
+  - case_id: stability_widget_heart_tile
+    title: 控件文档稳定性混合查询
+    category: widget_usage
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_widget_heart_tile
+    input_tool: docs_search
+    request:
+      query: heart_tile 有哪些属性？
+      domain: widget
+      view: evidence
+      granularity: doc_section
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: widget_lookup
+      primary_tool: docs_search
+      route_mode: direct
+      selected_view: evidence
+      selected_granularity: doc_section
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: doc_section
+        locator: heart_tile
+
+  - case_id: stability_profile_watch_symbol
+    title: watch profile 稳定性混合查询
+    category: profile_impact
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_profile_watch_symbol
+    input_tool: code_resolve
+    request:
+      query: profile_only 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: watch
+      expected_status: resolved
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: profile
+        locator: watch
+      - kind: symbol
+        locator: profile_only
+
+  - case_id: stability_profile_sensorhub_symbol
+    title: sensorhub profile 稳定性混合查询
+    category: profile_impact
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_profile_sensorhub_symbol
+    input_tool: code_resolve
+    request:
+      query: profile_only 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: sensorhub
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: sensorhub
+      expected_status: resolved
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: profile
+        locator: sensorhub
+      - kind: symbol
+        locator: profile_only
+
+  - case_id: stability_zero_result_unknown_symbol
+    title: 零结果稳定性排除样本
+    category: feature_domain_cross_layer
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/stability_cases.yaml#stability_zero_result_unknown_symbol
+    input_tool: code_resolve
+    request:
+      query: UNKNOWN_HEALTH_SENTINEL 在哪里定义？
+      domain: code
+      view: code
+      granularity: symbol
+      profile_id: auto
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: auto
+      expected_status: not_required
+    expected_route:
+      intent: code_exact
+      primary_tool: code_resolve
+      route_mode: direct
+      selected_view: code
+      selected_granularity: symbol
+      required_warning_codes:
+        - retrieval.zero_result
+      allowed_warning_codes: []
+    expected_result_status: zero_result
+    expected_evidence:
+      - kind: symbol
+        locator: UNKNOWN_HEALTH_SENTINEL

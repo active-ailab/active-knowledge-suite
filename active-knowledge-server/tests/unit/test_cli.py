@@ -11,7 +11,17 @@ from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAME
 
 
 def test_subcommands_have_help() -> None:
-    for command in ("init", "serve", "index", "status", "validate", "clean", "eval", "perf"):
+    for command in (
+        "init",
+        "serve",
+        "index",
+        "status",
+        "validate",
+        "clean",
+        "eval",
+        "perf",
+        "stability",
+    ):
         result = subprocess.run(
             [sys.executable, "-m", "active_knowledge_server.cli", command, "--help"],
             check=True,
@@ -45,6 +55,18 @@ def test_perf_run_subcommand_has_help() -> None:
 
     assert "usage: active-kb perf run" in result.stdout
     assert "--cases" in result.stdout
+
+
+def test_stability_run_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "stability", "run", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb stability run" in result.stdout
+    assert "--soak-seconds" in result.stdout
 
 
 def test_status_json_is_machine_readable(capsys) -> None:
@@ -383,6 +405,170 @@ def test_perf_run_json_uses_performance_suite_and_reports_gate_summary(
     assert payload["suite_id"] == "performance-benchmark-v1"
     assert payload["status"] == "pass"
     assert payload["metrics"]["performance_gate"]["passed"] is True
+
+
+def test_eval_run_stability_json_uses_stability_suite_and_reports_gate_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    stability_cases = Path("eval") / "stability_cases.yaml"
+
+    class DummyRunner:
+        def run(
+            self,
+            cases_file: Path,
+            *,
+            gate_id: str,
+            suite_kind: str | None = None,
+        ) -> EvalRunReport:
+            assert cases_file == stability_cases
+            assert gate_id == "stability"
+            assert suite_kind is None
+            return EvalRunReport(
+                gate_id="stability",
+                suite_id="stability-mixed-query-v1",
+                status="partial_ready",
+                started_at="2026-05-06T00:00:00Z",
+                finished_at="2026-05-06T00:00:01Z",
+                cases_file=str(cases_file),
+                metrics={
+                    "executed_cases": 8,
+                    "passed_cases": 8,
+                    "failed_cases": 0,
+                    "stability_gate": {
+                        "passed": True,
+                        "release_window": {"passed": False},
+                    },
+                },
+                failures=(),
+                warnings=(
+                    {
+                        "code": "eval.stability_release_window_incomplete",
+                        "message": "short soak",
+                    },
+                ),
+            )
+
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.EvalRunner.from_config",
+        lambda *args, **kwargs: DummyRunner(),
+    )
+
+    exit_code = main(
+        [
+            "eval",
+            "run",
+            "--gate",
+            "stability",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval run"
+    assert payload["gate_id"] == "stability"
+    assert payload["suite_id"] == "stability-mixed-query-v1"
+    assert payload["status"] == "partial_ready"
+    assert payload["metrics"]["stability_gate"]["passed"] is True
+
+
+def test_stability_run_json_uses_stability_suite_and_reports_gate_summary(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    stability_cases = Path("eval") / "stability_cases.yaml"
+
+    class DummyRunner:
+        def run(
+            self,
+            cases_file: Path,
+            *,
+            gate_id: str,
+            suite_kind: str | None = None,
+        ) -> EvalRunReport:
+            assert cases_file == stability_cases
+            assert gate_id == "v1"
+            assert suite_kind == "stability"
+            return EvalRunReport(
+                gate_id="v1",
+                suite_id="stability-mixed-query-v1",
+                status="partial_ready",
+                started_at="2026-05-06T00:00:00Z",
+                finished_at="2026-05-06T00:00:01Z",
+                cases_file=str(cases_file),
+                metrics={
+                    "executed_cases": 8,
+                    "passed_cases": 8,
+                    "failed_cases": 0,
+                    "stability_gate": {
+                        "passed": True,
+                        "release_window": {
+                            "passed": False,
+                            "actual_soak_seconds": 60.0,
+                            "actual_mixed_query_count": 500,
+                        },
+                    },
+                },
+                failures=(),
+                warnings=(
+                    {
+                        "code": "eval.stability_release_window_incomplete",
+                        "message": "short soak",
+                    },
+                ),
+            )
+
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.EvalRunner.from_config",
+        lambda *args, **kwargs: DummyRunner(),
+    )
+
+    exit_code = main(
+        [
+            "stability",
+            "run",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "stability run"
+    assert payload["gate_id"] == "v1"
+    assert payload["suite_id"] == "stability-mixed-query-v1"
+    assert payload["status"] == "partial_ready"
+    assert payload["metrics"]["stability_gate"]["passed"] is True
 
 
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(

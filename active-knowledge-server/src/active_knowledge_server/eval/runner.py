@@ -19,16 +19,18 @@ from active_knowledge_server.eval.metrics import (
 	build_category_coverage,
 	build_performance_gate_metrics,
 	build_quality_gate_metrics,
+	build_stability_gate_metrics,
 	build_suite_metrics,
 )
 from active_knowledge_server.eval.performance import PerformanceBenchmark
+from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.models import QueryRequest
 from active_knowledge_server.models.responses import QueryResult
 from active_knowledge_server.query import QueryRouter
 
 EvalCaseRunStatus = Literal["passed", "failed"]
 EvalRunStatus = Literal["pass", "partial_ready", "fail"]
-EvalSuiteKind = Literal["router", "quality", "performance"]
+EvalSuiteKind = Literal["router", "quality", "performance", "stability"]
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,7 @@ class EvalRunner:
 		profile_collector: object | None = None,
 		quality_benchmark_factory: Callable[[], object] | None = None,
 		performance_benchmark_factory: Callable[[], object] | None = None,
+		stability_benchmark_factory: Callable[[], object] | None = None,
 	) -> None:
 		self._cwd = cwd
 		self._router = QueryRouter.from_config(
@@ -149,6 +152,9 @@ class EvalRunner:
 		self._performance_benchmark_factory = (
 			performance_benchmark_factory or PerformanceBenchmark
 		)
+		self._stability_benchmark_factory = (
+			stability_benchmark_factory or StabilityBenchmark
+		)
 
 	@classmethod
 	def from_config(
@@ -159,6 +165,7 @@ class EvalRunner:
 		profile_collector: object | None = None,
 		quality_benchmark_factory: Callable[[], object] | None = None,
 		performance_benchmark_factory: Callable[[], object] | None = None,
+		stability_benchmark_factory: Callable[[], object] | None = None,
 	) -> EvalRunner:
 		return cls(
 			config,
@@ -166,6 +173,7 @@ class EvalRunner:
 			profile_collector=profile_collector,
 			quality_benchmark_factory=quality_benchmark_factory,
 			performance_benchmark_factory=performance_benchmark_factory,
+			stability_benchmark_factory=stability_benchmark_factory,
 		)
 
 	def run(
@@ -189,6 +197,13 @@ class EvalRunner:
 			)
 		if resolved_suite_kind == "performance":
 			return self._run_performance_suite(
+				suite,
+				cases_file=cases_file,
+				gate_id=gate_id,
+				started_at=started_at,
+			)
+		if resolved_suite_kind == "stability":
+			return self._run_stability_suite(
 				suite,
 				cases_file=cases_file,
 				gate_id=gate_id,
@@ -399,6 +414,84 @@ class EvalRunner:
 				finished_at=_utc_now(),
 				cases_file=str(cases_file),
 				metrics=metrics,
+				warnings=tuple(warnings),
+			)
+		finally:
+			close = getattr(benchmark, "close", None)
+			if callable(close):
+				close()
+
+	def _run_stability_suite(
+		self,
+		suite: EvalCaseSuite,
+		*,
+		cases_file: Path,
+		gate_id: str,
+		started_at: str,
+	) -> EvalRunReport:
+		benchmark = self._stability_benchmark_factory()
+		try:
+			probes = benchmark.measure_suite(suite)
+			metrics = build_suite_metrics(
+				suite,
+				executed_cases=len(suite.cases),
+				passed_cases=len(suite.cases),
+				failed_cases=0,
+			)
+			stability_metrics = build_stability_gate_metrics(
+				mixed_query=dict(probes["mixed_query"]),
+				soak=dict(probes["soak"]),
+				index_recovery=dict(probes["index_recovery"]),
+				migration_idempotence=dict(probes["migration_idempotence"]),
+				partial_ready_query=dict(probes["partial_ready_query"]),
+				readonly_concurrency=dict(probes["readonly_concurrency"]),
+				environment=dict(benchmark.environment()),
+				dataset_scale=dict(benchmark.dataset_scale()),
+			)
+			metrics["stability_gate"] = stability_metrics
+			warnings: list[dict[str, Any]] = []
+			status: EvalRunStatus = "pass"
+			if not stability_metrics["passed"]:
+				failed_checks = [
+					item for item in stability_metrics["checks"] if not item["passed"]
+				]
+				warnings.append(
+					{
+						"code": "eval.stability_gate_failed",
+						"message": "One or more E7-04 stability blocker thresholds were not met.",
+						"details": {"failed_checks": failed_checks},
+					}
+				)
+				status = "fail"
+			elif not stability_metrics["release_window"]["passed"]:
+				warnings.append(
+					{
+						"code": "eval.stability_release_window_incomplete",
+						"message": "Stability probes passed, but the configured soak window is below the release threshold.",
+						"details": stability_metrics["release_window"],
+					}
+				)
+				status = "partial_ready"
+			failures: list[dict[str, Any]] = []
+			if not stability_metrics["passed"]:
+				for probe_name, probe_result in stability_metrics["probe_results"].items():
+					probe_failures = probe_result.get("failures")
+					if isinstance(probe_failures, list) and probe_failures:
+						failures.append(
+							{
+								"probe": probe_name,
+								"failures": probe_failures,
+							}
+						)
+			return EvalRunReport(
+				gate_id=gate_id,
+				suite_id=suite.suite_id,
+				status=status,
+				started_at=started_at,
+				finished_at=_utc_now(),
+				cases_file=str(cases_file),
+				metrics=metrics,
+				failures=tuple(failures),
 				warnings=tuple(warnings),
 			)
 		finally:
@@ -670,4 +763,6 @@ def _infer_suite_kind(gate_id: str) -> EvalSuiteKind:
 		return "quality"
 	if gate_id == "performance":
 		return "performance"
+	if gate_id == "stability":
+		return "stability"
 	return "router"

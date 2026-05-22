@@ -1399,6 +1399,7 @@ V1 初始门槛：
 - 优先级：`P1`
 - 类型：`TEST`、`OPS`
 - 依赖：`S2-07`、`M6-02`
+- 输出：已新增 `active-kb stability run` / `active-kb eval run --gate stability` 自动化 gate，汇总 soak、mixed query、索引恢复、migration 幂等、`partial_ready` 查询与并发只读探针；release 仍需按 8 小时窗口实际产出 artifact。
 
 TODO：
 

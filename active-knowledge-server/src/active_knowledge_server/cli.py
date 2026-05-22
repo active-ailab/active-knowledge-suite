@@ -26,6 +26,7 @@ from active_knowledge_server.config.workdir import (
     layout_from_config,
 )
 from active_knowledge_server.eval import EvalRunner
+from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
     SecurityConfigError,
@@ -263,6 +264,74 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     perf_run_parser.set_defaults(handler=handle_perf_run)
+
+    stability_parser = subparsers.add_parser(
+        "stability",
+        help="Run stability gate benchmarks and emit machine-readable reports.",
+    )
+    stability_subparsers = stability_parser.add_subparsers(
+        dest="stability_command",
+        metavar="STABILITY_COMMAND",
+    )
+
+    stability_run_parser = stability_subparsers.add_parser(
+        "run",
+        parents=[common],
+        help="Load and execute the E7-04 stability suite.",
+    )
+    stability_run_parser.add_argument(
+        "--gate",
+        default="v1",
+        help="Gate identifier recorded in the stability report.",
+    )
+    stability_run_parser.add_argument(
+        "--cases",
+        type=Path,
+        default=Path("eval") / "stability_cases.yaml",
+        help="Stability case YAML file.",
+    )
+    stability_run_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional output path for the stability report JSON.",
+    )
+    stability_run_parser.add_argument(
+        "--soak-seconds",
+        type=int,
+        default=60,
+        help="Timed soak window. Use 28800 for the 8-hour release gate.",
+    )
+    stability_run_parser.add_argument(
+        "--mixed-query-count",
+        type=int,
+        default=500,
+        help="Number of mixed queries to execute for the success-rate probe.",
+    )
+    stability_run_parser.add_argument(
+        "--readonly-workers",
+        type=int,
+        default=8,
+        help="Concurrent readonly worker count for the non-blocking probe.",
+    )
+    stability_run_parser.add_argument(
+        "--readonly-queries",
+        type=int,
+        default=64,
+        help="Total readonly queries to issue in the concurrency probe.",
+    )
+    stability_run_parser.add_argument(
+        "--readonly-timeout-seconds",
+        type=float,
+        default=5.0,
+        help="Per-query timeout for readonly concurrency validation.",
+    )
+    stability_run_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    stability_run_parser.set_defaults(handler=handle_stability_run)
 
     return parser
 
@@ -550,6 +619,58 @@ def handle_perf_run(args: argparse.Namespace) -> int:
     return 1 if report.status == "fail" else 0
 
 
+def handle_stability_run(args: argparse.Namespace) -> int:
+    """Load and execute the configured stability suite."""
+
+    resolved = resolve_from_args(args)
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=Path.cwd(),
+        stability_benchmark_factory=lambda: StabilityBenchmark(
+            soak_seconds=int(args.soak_seconds),
+            mixed_query_count=int(args.mixed_query_count),
+            readonly_workers=int(args.readonly_workers),
+            readonly_query_count=int(args.readonly_queries),
+            readonly_timeout_seconds=float(args.readonly_timeout_seconds),
+        ),
+    )
+    report = runner.run(
+        resolve_stability_cases_path(args),
+        gate_id=str(args.gate),
+        suite_kind="stability",
+    )
+    if args.report is not None:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = report.model_copy(update={"artifacts": report.artifacts + (str(report_path),)})
+        report_path.write_text(
+            json.dumps(report.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    payload = {
+        "command": "stability run",
+        **report.to_dict(),
+        "config": config_summary(resolved),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Stability suite: {report.suite_id}")
+        print(f"Gate: {report.gate_id}")
+        print(f"Status: {report.status}")
+        stability_gate = report.metrics.get("stability_gate", {})
+        release_window = stability_gate.get("release_window", {})
+        if release_window:
+            print(
+                "Release window: "
+                f"{release_window.get('actual_soak_seconds')}s soak / "
+                f"{release_window.get('actual_mixed_query_count')} mixed queries"
+            )
+        for warning in report.warnings:
+            print(f"Warning [{warning['code']}]: {warning['message']}")
+    return 1 if report.status == "fail" else 0
+
+
 def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
     """Resolve the default eval suite path for the selected gate."""
 
@@ -562,6 +683,8 @@ def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
         return Path("eval") / "quality_cases.yaml"
     if str(args.gate) == "performance":
         return Path("eval") / "performance_cases.yaml"
+    if str(args.gate) == "stability":
+        return Path("eval") / "stability_cases.yaml"
     return Path("eval") / "cases.yaml"
 
 
@@ -572,6 +695,15 @@ def resolve_performance_cases_path(args: argparse.Namespace) -> Path:
     if cases_path is not None:
         return Path(cases_path)
     return Path("eval") / "performance_cases.yaml"
+
+
+def resolve_stability_cases_path(args: argparse.Namespace) -> Path:
+    """Resolve the default stability suite path."""
+
+    cases_path = getattr(args, "cases", None)
+    if cases_path is not None:
+        return Path(cases_path)
+    return Path("eval") / "stability_cases.yaml"
 
 
 def resolve_from_args(

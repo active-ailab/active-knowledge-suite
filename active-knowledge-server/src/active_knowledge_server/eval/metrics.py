@@ -40,6 +40,18 @@ PERFORMANCE_GATE_THRESHOLDS: Final[dict[str, tuple[Literal["seconds", "bytes"], 
 	"incremental_index_100_files": ("seconds", 600.0),
 	"serve_resident_memory": ("bytes", float(4 * 1024 * 1024 * 1024)),
 }
+STABILITY_GATE_THRESHOLDS: Final[dict[str, tuple[Literal["gte", "lte"], float]]] = {
+	"soak_unhandled_exceptions": ("lte", 0.0),
+	"mixed_query_success_rate": ("gte", 0.99),
+	"index_recovery_contract": ("gte", 1.0),
+	"migration_idempotence": ("gte", 1.0),
+	"partial_ready_query_contract": ("gte", 1.0),
+	"readonly_query_non_blocking": ("gte", 1.0),
+}
+STABILITY_RELEASE_REQUIREMENTS: Final[dict[str, int]] = {
+	"serve_soak_seconds": 8 * 60 * 60,
+	"mixed_query_count": 500,
+}
 
 
 @dataclass(frozen=True)
@@ -204,6 +216,31 @@ class PerformanceGateCheck:
 		}
 
 
+StabilityComparator = Literal["gte", "lte"]
+
+
+@dataclass(frozen=True)
+class StabilityGateCheck:
+	"""One blocker threshold evaluation for the stability gate."""
+
+	metric: str
+	comparator: StabilityComparator
+	actual: float
+	threshold: float
+	passed: bool
+	blocking_level: str = "blocker"
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"metric": self.metric,
+			"comparator": self.comparator,
+			"actual": round(self.actual, 6),
+			"threshold": round(self.threshold, 6),
+			"passed": self.passed,
+			"blocking_level": self.blocking_level,
+		}
+
+
 def build_category_coverage(suite: EvalCaseSuite) -> tuple[EvalCategoryCoverage, ...]:
 	"""Build category coverage against the Phase 7 minimums."""
 
@@ -347,6 +384,116 @@ def build_performance_gate_metrics(
 		"checks": [item.to_dict() for item in checks],
 		"passed": all(item.passed for item in checks),
 		"probe_observations": [item.to_dict() for item in observations],
+	}
+
+
+def build_stability_gate_metrics(
+	*,
+	mixed_query: dict[str, object],
+	soak: dict[str, object],
+	index_recovery: dict[str, object],
+	migration_idempotence: dict[str, object],
+	partial_ready_query: dict[str, object],
+	readonly_concurrency: dict[str, object],
+	environment: dict[str, object],
+	dataset_scale: dict[str, object],
+) -> dict[str, object]:
+	"""Return E7-04 stability metrics plus blocker-threshold checks."""
+
+	index_recovery_ok = all(
+		bool(index_recovery.get(key))
+		for key in (
+			"checkpoint_resume_available",
+			"failed_state_recorded",
+			"retryable",
+			"stale_lock_reacquired",
+			"lock_cleared",
+		)
+	)
+	migration_ok = (
+		list(migration_idempotence.get("applied_counts", [])) == [1, 0, 0]
+		and int(migration_idempotence.get("history_count", 0)) == 1
+		and str(migration_idempotence.get("schema_version") or "").strip() != ""
+	)
+	partial_ready_ok = (
+		str(partial_ready_query.get("result_status")) == "partial_ready"
+		and bool(partial_ready_query.get("schema_compliant"))
+		and "index.partial_ready" in set(partial_ready_query.get("warning_codes", []))
+	)
+	readonly_ok = (
+		int(readonly_concurrency.get("failure_count", 0)) == 0
+		and int(readonly_concurrency.get("timeout_count", 0)) == 0
+		and int(readonly_concurrency.get("completed_queries", 0))
+		== int(readonly_concurrency.get("total_queries", 0))
+	)
+	metric_values = {
+		"soak_unhandled_exceptions": float(soak.get("unhandled_exceptions", 0)),
+		"mixed_query_success_rate": float(mixed_query.get("success_rate", 0.0)),
+		"index_recovery_contract": 1.0 if index_recovery_ok else 0.0,
+		"migration_idempotence": 1.0 if migration_ok else 0.0,
+		"partial_ready_query_contract": 1.0 if partial_ready_ok else 0.0,
+		"readonly_query_non_blocking": 1.0 if readonly_ok else 0.0,
+	}
+	checks = tuple(
+		StabilityGateCheck(
+			metric=metric,
+			comparator=comparator,
+			actual=value,
+			threshold=threshold,
+			passed=value >= threshold if comparator == "gte" else value <= threshold,
+		)
+		for metric, value in metric_values.items()
+		for comparator, threshold in (STABILITY_GATE_THRESHOLDS[metric],)
+	)
+	required_soak_seconds = STABILITY_RELEASE_REQUIREMENTS["serve_soak_seconds"]
+	required_query_count = STABILITY_RELEASE_REQUIREMENTS["mixed_query_count"]
+	configured_soak_seconds = int(soak.get("configured_seconds", 0))
+	actual_soak_seconds = float(soak.get("actual_seconds", 0.0))
+	configured_query_count = int(mixed_query.get("configured_runs", 0))
+	actual_query_count = int(mixed_query.get("total_runs", 0))
+	release_window_passed = (
+		configured_soak_seconds >= required_soak_seconds
+		and actual_soak_seconds >= float(required_soak_seconds)
+		and configured_query_count >= required_query_count
+		and actual_query_count >= required_query_count
+	)
+	return {
+		"environment": dict(environment),
+		"dataset_scale": dict(dataset_scale),
+		"metrics": {
+			"soak_unhandled_exceptions": int(metric_values["soak_unhandled_exceptions"]),
+			"mixed_query_success_rate": round(metric_values["mixed_query_success_rate"], 6),
+			"index_recovery_contract": int(metric_values["index_recovery_contract"]),
+			"migration_idempotence": int(metric_values["migration_idempotence"]),
+			"partial_ready_query_contract": int(metric_values["partial_ready_query_contract"]),
+			"readonly_query_non_blocking": int(metric_values["readonly_query_non_blocking"]),
+		},
+		"thresholds": {
+			metric: {
+				"comparator": comparator,
+				"threshold": round(threshold, 6),
+			}
+			for metric, (comparator, threshold) in STABILITY_GATE_THRESHOLDS.items()
+		},
+		"checks": [item.to_dict() for item in checks],
+		"passed": all(item.passed for item in checks),
+		"release_window": {
+			"required_soak_seconds": required_soak_seconds,
+			"configured_soak_seconds": configured_soak_seconds,
+			"actual_soak_seconds": round(actual_soak_seconds, 6),
+			"required_mixed_query_count": required_query_count,
+			"configured_mixed_query_count": configured_query_count,
+			"actual_mixed_query_count": actual_query_count,
+			"passed": release_window_passed,
+		},
+		"probe_results": {
+			"mixed_query": dict(mixed_query),
+			"soak": dict(soak),
+			"index_recovery": dict(index_recovery),
+			"migration_idempotence": dict(migration_idempotence),
+			"partial_ready_query": dict(partial_ready_query),
+			"readonly_concurrency": dict(readonly_concurrency),
+		},
 	}
 
 

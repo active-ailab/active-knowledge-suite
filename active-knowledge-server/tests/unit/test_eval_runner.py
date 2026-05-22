@@ -10,10 +10,12 @@ from active_knowledge_server.eval.metrics import (
     PerformanceProbeObservation,
 )
 from active_knowledge_server.eval.performance import PerformanceBenchmark
+from active_knowledge_server.eval.stability import StabilityBenchmark
 
 CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
 QUALITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "quality_cases.yaml"
 PERFORMANCE_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "performance_cases.yaml"
+STABILITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "stability_cases.yaml"
 
 
 def _resolved_config(tmp_path: Path) -> object:
@@ -245,6 +247,282 @@ def test_eval_runner_executes_real_performance_benchmark_smoke(tmp_path: Path) -
     assert report.metrics["performance_gate"]["passed"] is True
     assert report.metrics["performance_gate"]["metrics"]["docs_search"]["p95"] >= 0.0
     assert report.metrics["performance_gate"]["metrics"]["serve_resident_memory"]["p95"] > 0
+
+
+def test_eval_runner_executes_stability_suite_and_reports_pass(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class PassingStabilityBenchmark:
+        def measure_suite(self, suite):
+            assert suite.suite_id == "stability-mixed-query-v1"
+            return {
+                "mixed_query": {
+                    "configured_runs": 500,
+                    "total_runs": 500,
+                    "eligible_runs": 440,
+                    "success_count": 436,
+                    "success_rate": 0.990909,
+                    "exception_count": 0,
+                    "excluded_status_counts": {"zero_result": 60},
+                    "failure_count": 0,
+                    "failures": [],
+                },
+                "soak": {
+                    "configured_seconds": 28800,
+                    "actual_seconds": 28800.5,
+                    "iterations": 240000,
+                    "unhandled_exceptions": 0,
+                },
+                "index_recovery": {
+                    "checkpoint_resume_available": True,
+                    "failed_state_recorded": True,
+                    "retryable": True,
+                    "stale_lock_reacquired": True,
+                    "lock_cleared": True,
+                },
+                "migration_idempotence": {
+                    "schema_version": "1.0.1",
+                    "applied_counts": [1, 0, 0],
+                    "history_count": 1,
+                },
+                "partial_ready_query": {
+                    "result_status": "partial_ready",
+                    "warning_codes": ["index.partial_ready"],
+                    "schema_compliant": True,
+                    "item_count": 1,
+                },
+                "readonly_concurrency": {
+                    "workers": 8,
+                    "total_queries": 64,
+                    "completed_queries": 64,
+                    "timeout_count": 0,
+                    "failure_count": 0,
+                    "max_latency_seconds": 0.32,
+                    "mean_latency_seconds": 0.08,
+                    "failures": [],
+                },
+            }
+
+        def environment(self):
+            return {"platform": "test-platform", "transport": "streamable-http"}
+
+        def dataset_scale(self):
+            return {"workspace_files": 103, "source_docs_files": 3}
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        stability_benchmark_factory=PassingStabilityBenchmark,
+    )
+
+    report = runner.run(
+        STABILITY_CASES_FILE,
+        gate_id="stability",
+        suite_kind="stability",
+    )
+
+    assert report.status == "pass"
+    assert report.failures == ()
+    stability_gate = report.metrics["stability_gate"]
+    assert stability_gate["passed"] is True
+    assert stability_gate["release_window"]["passed"] is True
+    assert all(item["passed"] for item in stability_gate["checks"])
+
+
+def test_eval_runner_marks_stability_suite_partial_ready_when_release_window_is_short(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class ShortWindowStabilityBenchmark:
+        def measure_suite(self, suite):
+            del suite
+            return {
+                "mixed_query": {
+                    "configured_runs": 500,
+                    "total_runs": 500,
+                    "eligible_runs": 440,
+                    "success_count": 440,
+                    "success_rate": 1.0,
+                    "exception_count": 0,
+                    "excluded_status_counts": {"zero_result": 60},
+                    "failure_count": 0,
+                    "failures": [],
+                },
+                "soak": {
+                    "configured_seconds": 30,
+                    "actual_seconds": 30.1,
+                    "iterations": 240,
+                    "unhandled_exceptions": 0,
+                },
+                "index_recovery": {
+                    "checkpoint_resume_available": True,
+                    "failed_state_recorded": True,
+                    "retryable": True,
+                    "stale_lock_reacquired": True,
+                    "lock_cleared": True,
+                },
+                "migration_idempotence": {
+                    "schema_version": "1.0.1",
+                    "applied_counts": [1, 0, 0],
+                    "history_count": 1,
+                },
+                "partial_ready_query": {
+                    "result_status": "partial_ready",
+                    "warning_codes": ["index.partial_ready"],
+                    "schema_compliant": True,
+                    "item_count": 1,
+                },
+                "readonly_concurrency": {
+                    "workers": 8,
+                    "total_queries": 64,
+                    "completed_queries": 64,
+                    "timeout_count": 0,
+                    "failure_count": 0,
+                    "max_latency_seconds": 0.25,
+                    "mean_latency_seconds": 0.07,
+                    "failures": [],
+                },
+            }
+
+        def environment(self):
+            return {}
+
+        def dataset_scale(self):
+            return {}
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        stability_benchmark_factory=ShortWindowStabilityBenchmark,
+    )
+
+    report = runner.run(
+        STABILITY_CASES_FILE,
+        gate_id="stability",
+        suite_kind="stability",
+    )
+
+    assert report.status == "partial_ready"
+    assert report.warnings[0]["code"] == "eval.stability_release_window_incomplete"
+    assert report.metrics["stability_gate"]["passed"] is True
+    assert report.metrics["stability_gate"]["release_window"]["passed"] is False
+
+
+def test_eval_runner_fails_stability_gate_when_mixed_query_success_rate_regresses(
+    tmp_path: Path,
+) -> None:
+    resolved = _resolved_config(tmp_path)
+
+    class FailingStabilityBenchmark:
+        def measure_suite(self, suite):
+            del suite
+            return {
+                "mixed_query": {
+                    "configured_runs": 500,
+                    "total_runs": 500,
+                    "eligible_runs": 440,
+                    "success_count": 430,
+                    "success_rate": 0.977273,
+                    "exception_count": 3,
+                    "excluded_status_counts": {"zero_result": 60},
+                    "failure_count": 10,
+                    "failures": [{"case_id": "stability_api_sensor_close", "error": "boom"}],
+                },
+                "soak": {
+                    "configured_seconds": 28800,
+                    "actual_seconds": 28801.0,
+                    "iterations": 240000,
+                    "unhandled_exceptions": 0,
+                },
+                "index_recovery": {
+                    "checkpoint_resume_available": True,
+                    "failed_state_recorded": True,
+                    "retryable": True,
+                    "stale_lock_reacquired": True,
+                    "lock_cleared": True,
+                },
+                "migration_idempotence": {
+                    "schema_version": "1.0.1",
+                    "applied_counts": [1, 0, 0],
+                    "history_count": 1,
+                },
+                "partial_ready_query": {
+                    "result_status": "partial_ready",
+                    "warning_codes": ["index.partial_ready"],
+                    "schema_compliant": True,
+                    "item_count": 1,
+                },
+                "readonly_concurrency": {
+                    "workers": 8,
+                    "total_queries": 64,
+                    "completed_queries": 64,
+                    "timeout_count": 0,
+                    "failure_count": 0,
+                    "max_latency_seconds": 0.32,
+                    "mean_latency_seconds": 0.08,
+                    "failures": [],
+                },
+            }
+
+        def environment(self):
+            return {}
+
+        def dataset_scale(self):
+            return {}
+
+        def close(self):
+            return None
+
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        stability_benchmark_factory=FailingStabilityBenchmark,
+    )
+
+    report = runner.run(
+        STABILITY_CASES_FILE,
+        gate_id="stability",
+        suite_kind="stability",
+    )
+
+    assert report.status == "fail"
+    assert report.warnings[0]["code"] == "eval.stability_gate_failed"
+    failed_checks = [item for item in report.metrics["stability_gate"]["checks"] if not item["passed"]]
+    assert failed_checks
+    assert failed_checks[0]["metric"] == "mixed_query_success_rate"
+    assert report.failures[0]["probe"] == "mixed_query"
+
+
+def test_eval_runner_executes_real_stability_benchmark_smoke(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path)
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=tmp_path,
+        stability_benchmark_factory=lambda: StabilityBenchmark(
+            soak_seconds=1,
+            mixed_query_count=12,
+            readonly_workers=4,
+            readonly_query_count=8,
+            readonly_timeout_seconds=2.0,
+        ),
+    )
+
+    report = runner.run(
+        STABILITY_CASES_FILE,
+        gate_id="stability",
+        suite_kind="stability",
+    )
+
+    assert report.status == "partial_ready"
+    assert report.metrics["stability_gate"]["passed"] is True
+    assert report.metrics["stability_gate"]["metrics"]["mixed_query_success_rate"] >= 0.99
 
 
 def _performance_observations(
