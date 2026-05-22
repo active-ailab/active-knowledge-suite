@@ -1420,6 +1420,7 @@ TODO：
 - 优先级：`P0`
 - 类型：`TEST`、`OPS`
 - 依赖：`E7-02` 至 `E7-04`
+- 输出：已新增 `active-kb eval-baseline save|compare`，支持保存发布基线、对比上一发布 quality/performance 指标回退，并补充 `tests/regression/test_migration_backup_recovery.py` 覆盖 migration 备份与恢复回归；后续每个新 bug 的最小复现 case 仍需随修复持续补充。
 
 TODO：
 

@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +27,13 @@ from active_knowledge_server.config.workdir import (
     layout_from_config,
 )
 from active_knowledge_server.eval import EvalRunner
+from active_knowledge_server.eval.baseline import (
+    compare_against_baseline,
+    create_baseline_snapshot,
+    load_baseline_snapshot,
+    load_eval_report_payload,
+    save_baseline_snapshot,
+)
 from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
@@ -332,6 +340,90 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     stability_run_parser.set_defaults(handler=handle_stability_run)
+
+    baseline_parser = subparsers.add_parser(
+        "eval-baseline",
+        help="Save and compare release baseline snapshots for E7-05 regression gating.",
+    )
+    baseline_subparsers = baseline_parser.add_subparsers(
+        dest="baseline_command",
+        metavar="BASELINE_COMMAND",
+    )
+
+    baseline_save_parser = baseline_subparsers.add_parser(
+        "save",
+        parents=[common],
+        help="Save the current release baseline snapshot.",
+    )
+    baseline_save_parser.add_argument(
+        "--baseline-id",
+        help="Identifier to embed into the saved baseline snapshot.",
+    )
+    baseline_save_parser.add_argument(
+        "--quality-report",
+        type=Path,
+        help="Existing quality report JSON. When omitted, the command runs the quality gate.",
+    )
+    baseline_save_parser.add_argument(
+        "--performance-report",
+        type=Path,
+        help="Existing performance report JSON. When omitted, the command runs the performance gate.",
+    )
+    baseline_save_parser.add_argument(
+        "--stability-report",
+        type=Path,
+        help="Optional stability report JSON to attach to the baseline snapshot.",
+    )
+    baseline_save_parser.add_argument(
+        "--output",
+        type=Path,
+        help="Optional explicit baseline snapshot path. Defaults to baseline artifacts/eval-baseline/<baseline-id>.json.",
+    )
+    baseline_save_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    baseline_save_parser.set_defaults(handler=handle_eval_baseline_save)
+
+    baseline_compare_parser = baseline_subparsers.add_parser(
+        "compare",
+        parents=[common],
+        help="Compare current gate reports with the previous release baseline.",
+    )
+    baseline_compare_parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="Saved baseline snapshot path. Defaults to baseline artifacts/eval-baseline/latest.json.",
+    )
+    baseline_compare_parser.add_argument(
+        "--quality-report",
+        type=Path,
+        help="Existing current quality report JSON. When omitted, the command runs the quality gate.",
+    )
+    baseline_compare_parser.add_argument(
+        "--performance-report",
+        type=Path,
+        help="Existing current performance report JSON. When omitted, the command runs the performance gate.",
+    )
+    baseline_compare_parser.add_argument(
+        "--stability-report",
+        type=Path,
+        help="Optional current stability report JSON to include in the regression report context.",
+    )
+    baseline_compare_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional output path for the regression comparison report JSON.",
+    )
+    baseline_compare_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    baseline_compare_parser.set_defaults(handler=handle_eval_baseline_compare)
 
     return parser
 
@@ -671,6 +763,124 @@ def handle_stability_run(args: argparse.Namespace) -> int:
     return 1 if report.status == "fail" else 0
 
 
+def handle_eval_baseline_save(args: argparse.Namespace) -> int:
+    """Save one release baseline snapshot."""
+
+    resolved = resolve_from_args(args)
+    quality_report = (
+        load_eval_report_payload(Path(args.quality_report))
+        if args.quality_report is not None
+        else _run_quality_gate_report(resolved)
+    )
+    performance_report = (
+        load_eval_report_payload(Path(args.performance_report))
+        if args.performance_report is not None
+        else _run_performance_gate_report(resolved)
+    )
+    stability_report = (
+        None
+        if args.stability_report is None
+        else load_eval_report_payload(Path(args.stability_report))
+    )
+    baseline_id = str(args.baseline_id or _default_baseline_id())
+    output_path = (
+        Path(args.output)
+        if args.output is not None
+        else _baseline_snapshot_dir(resolved) / f"{baseline_id}.json"
+    )
+    latest_path = output_path.parent / "latest.json"
+    snapshot = create_baseline_snapshot(
+        baseline_id=baseline_id,
+        quality_report=quality_report,
+        performance_report=performance_report,
+        stability_report=stability_report,
+        source_artifacts=tuple(
+            str(path)
+            for path in (
+                Path(args.quality_report) if args.quality_report is not None else None,
+                Path(args.performance_report) if args.performance_report is not None else None,
+                Path(args.stability_report) if args.stability_report is not None else None,
+            )
+            if path is not None
+        ),
+    )
+    save_baseline_snapshot(snapshot, output_path=output_path, latest_path=latest_path)
+    payload = {
+        "command": "eval-baseline save",
+        "status": "ok",
+        "baseline_id": snapshot.baseline_id,
+        "output": str(output_path),
+        "latest": str(latest_path),
+        "baseline": snapshot.to_dict(),
+        "config": config_summary(resolved),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Baseline saved: {snapshot.baseline_id}")
+        print(f"Output: {output_path}")
+        print(f"Latest: {latest_path}")
+    return 0
+
+
+def handle_eval_baseline_compare(args: argparse.Namespace) -> int:
+    """Compare current gate reports with the saved release baseline."""
+
+    resolved = resolve_from_args(args)
+    baseline_path = (
+        Path(args.baseline)
+        if args.baseline is not None
+        else _baseline_snapshot_dir(resolved) / "latest.json"
+    )
+    baseline = load_baseline_snapshot(baseline_path)
+    current_quality_report = (
+        load_eval_report_payload(Path(args.quality_report))
+        if args.quality_report is not None
+        else _run_quality_gate_report(resolved)
+    )
+    current_performance_report = (
+        load_eval_report_payload(Path(args.performance_report))
+        if args.performance_report is not None
+        else _run_performance_gate_report(resolved)
+    )
+    current_stability_report = (
+        None
+        if args.stability_report is None
+        else load_eval_report_payload(Path(args.stability_report))
+    )
+    report = compare_against_baseline(
+        baseline=baseline,
+        baseline_path=baseline_path,
+        current_quality_report=current_quality_report,
+        current_performance_report=current_performance_report,
+        current_stability_report=current_stability_report,
+    )
+    if args.report is not None:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report = report.model_copy(update={"artifacts": report.artifacts + (str(report_path),)})
+        report_path.write_text(
+            json.dumps(report.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    payload = {
+        "command": "eval-baseline compare",
+        **report.to_dict(),
+        "config": config_summary(resolved),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Regression baseline: {report.baseline_id}")
+        print(f"Baseline path: {baseline_path}")
+        print(f"Status: {report.status}")
+        for failure in report.failures:
+            print(f"Failure [{failure['check']}]: {failure}")
+        for warning in report.warnings:
+            print(f"Warning [{warning['check']}]: {warning}")
+    return 1 if report.status == "fail" else 0
+
+
 def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
     """Resolve the default eval suite path for the selected gate."""
 
@@ -704,6 +914,32 @@ def resolve_stability_cases_path(args: argparse.Namespace) -> Path:
     if cases_path is not None:
         return Path(cases_path)
     return Path("eval") / "stability_cases.yaml"
+
+
+def _run_quality_gate_report(resolved: ResolvedConfig) -> EvalRunReport:
+    runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
+    return runner.run(
+        Path("eval") / "quality_cases.yaml",
+        gate_id="quality",
+        suite_kind="quality",
+    )
+
+
+def _run_performance_gate_report(resolved: ResolvedConfig) -> EvalRunReport:
+    runner = EvalRunner.from_config(resolved.model, cwd=Path.cwd())
+    return runner.run(
+        Path("eval") / "performance_cases.yaml",
+        gate_id="performance",
+        suite_kind="performance",
+    )
+
+
+def _baseline_snapshot_dir(resolved: ResolvedConfig) -> Path:
+    return resolve_runtime_path(resolved.model.storage.artifacts_root, Path.cwd()) / "eval-baseline"
+
+
+def _default_baseline_id() -> str:
+    return "release-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def resolve_from_args(

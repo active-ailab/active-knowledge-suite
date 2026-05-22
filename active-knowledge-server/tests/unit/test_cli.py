@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from active_knowledge_server.cli import main
+from active_knowledge_server.eval.baseline import create_baseline_snapshot
+from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
 from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAMES
 
@@ -21,6 +23,7 @@ def test_subcommands_have_help() -> None:
         "eval",
         "perf",
         "stability",
+        "eval-baseline",
     ):
         result = subprocess.run(
             [sys.executable, "-m", "active_knowledge_server.cli", command, "--help"],
@@ -67,6 +70,30 @@ def test_stability_run_subcommand_has_help() -> None:
 
     assert "usage: active-kb stability run" in result.stdout
     assert "--soak-seconds" in result.stdout
+
+
+def test_eval_baseline_save_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "eval-baseline", "save", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb eval-baseline save" in result.stdout
+    assert "--quality-report" in result.stdout
+
+
+def test_eval_baseline_compare_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "eval-baseline", "compare", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb eval-baseline compare" in result.stdout
+    assert "--baseline" in result.stdout
 
 
 def test_status_json_is_machine_readable(capsys) -> None:
@@ -571,6 +598,156 @@ def test_stability_run_json_uses_stability_suite_and_reports_gate_summary(
     assert payload["metrics"]["stability_gate"]["passed"] is True
 
 
+def test_eval_baseline_save_json_persists_snapshot(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    quality_path = tmp_path / "quality.json"
+    performance_path = tmp_path / "performance.json"
+    quality_path.write_text(json.dumps(_quality_report().to_dict()), encoding="utf-8")
+    performance_path.write_text(json.dumps(_performance_report().to_dict()), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "eval-baseline",
+            "save",
+            "--baseline-id",
+            "release-20260522",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--quality-report",
+            str(quality_path),
+            "--performance-report",
+            str(performance_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval-baseline save"
+    assert payload["baseline_id"] == "release-20260522"
+    assert Path(payload["output"]).exists()
+    assert Path(payload["latest"]).exists()
+
+
+def test_eval_baseline_compare_json_reports_partial_ready_for_perf_regression(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    baseline_dir = workdir / "baseline" / "artifacts" / "eval-baseline"
+    baseline_dir.mkdir(parents=True)
+    baseline_path = baseline_dir / "latest.json"
+    snapshot = create_baseline_snapshot(
+        baseline_id="release-20260522",
+        quality_report=_quality_report(),
+        performance_report=_performance_report(),
+    )
+    baseline_path.write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
+    current_quality_path = tmp_path / "current-quality.json"
+    current_performance_path = tmp_path / "current-performance.json"
+    current_quality_path.write_text(json.dumps(_quality_report().to_dict()), encoding="utf-8")
+    current_performance_path.write_text(
+        json.dumps(_performance_report(p95_overrides={"kb_search": 2.0}).to_dict()),
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "eval-baseline",
+            "compare",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--quality-report",
+            str(current_quality_path),
+            "--performance-report",
+            str(current_performance_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "eval-baseline compare"
+    assert payload["status"] == "partial_ready"
+    assert payload["warnings"][0]["check"] == "performance_regression_warning"
+
+
+def test_eval_baseline_compare_json_fails_on_quality_regression(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    baseline_dir = workdir / "baseline" / "artifacts" / "eval-baseline"
+    baseline_dir.mkdir(parents=True)
+    baseline_path = baseline_dir / "latest.json"
+    snapshot = create_baseline_snapshot(
+        baseline_id="release-20260522",
+        quality_report=_quality_report(),
+        performance_report=_performance_report(),
+    )
+    baseline_path.write_text(json.dumps(snapshot.to_dict()), encoding="utf-8")
+    current_quality_path = tmp_path / "current-quality.json"
+    current_performance_path = tmp_path / "current-performance.json"
+    current_quality_path.write_text(
+        json.dumps(_quality_report(evidence_hit_rate=0.87, schema_compliance=0.99).to_dict()),
+        encoding="utf-8",
+    )
+    current_performance_path.write_text(json.dumps(_performance_report().to_dict()), encoding="utf-8")
+
+    exit_code = main(
+        [
+            "eval-baseline",
+            "compare",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--quality-report",
+            str(current_quality_path),
+            "--performance-report",
+            str(current_performance_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 1
+    assert payload["command"] == "eval-baseline compare"
+    assert payload["status"] == "fail"
+    assert any(item["check"] == "quality_metric_regression" for item in payload["failures"])
+
+
 def test_serve_returns_blocked_json_for_invalid_deployment_mode(
     tmp_path: Path,
     capsys,
@@ -620,3 +797,87 @@ def test_serve_without_json_runs_server(monkeypatch, tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert called["run"] is True
+
+
+def _quality_report(
+    *,
+    evidence_hit_rate: float = 0.90,
+    top_5_recall: float = 0.93,
+    symbol_top_3_recall: float = 0.97,
+    mrr: float = 0.80,
+    profile_correctness: float = 0.94,
+    warning_quality: float = 0.90,
+    schema_compliance: float = 1.0,
+    blocked_security_contract: float = 1.0,
+) -> EvalRunReport:
+    observations = []
+    for category in (
+        "symbol_lookup",
+        "api_documentation",
+        "widget_usage",
+        "workspace_navigation",
+        "profile_impact",
+        "feature_domain_cross_layer",
+    ):
+        observations.append(
+            {
+                "case_id": f"{category}:1",
+                "category": category,
+                "result_status": "ok",
+                "schema_compliant": True,
+                "warning_quality_ok": True,
+                "profile_correct": True,
+                "evidence_hit": True,
+                "top_5_hit": True,
+                "symbol_top_3_hit": True,
+                "reciprocal_rank": 1.0,
+            }
+        )
+    return EvalRunReport(
+        gate_id="quality",
+        suite_id="quality-benchmark-v1",
+        status="pass",
+        started_at="2026-05-22T00:00:00Z",
+        finished_at="2026-05-22T00:00:01Z",
+        cases_file="eval/quality_cases.yaml",
+        metrics={
+            "quality_gate": {
+                "metrics": {
+                    "schema_compliance": schema_compliance,
+                    "evidence_hit_rate": evidence_hit_rate,
+                    "top_5_recall": top_5_recall,
+                    "symbol_top_3_recall": symbol_top_3_recall,
+                    "mrr": mrr,
+                    "profile_correctness": profile_correctness,
+                    "warning_quality": warning_quality,
+                    "blocked_security_contract": blocked_security_contract,
+                },
+                "case_observations": observations,
+            }
+        },
+    )
+
+
+def _performance_report(
+    *,
+    p95_overrides: dict[str, float] | None = None,
+) -> EvalRunReport:
+    metrics = {}
+    for probe_id, (unit, threshold) in PERFORMANCE_GATE_THRESHOLDS.items():
+        p95 = (p95_overrides or {}).get(probe_id, threshold / 2.0)
+        metrics[probe_id] = {
+            "unit": unit,
+            "p50": p95 / 2.0,
+            "p95": p95,
+            "mean": p95 / 2.0,
+            "max": p95,
+        }
+    return EvalRunReport(
+        gate_id="performance",
+        suite_id="performance-benchmark-v1",
+        status="pass",
+        started_at="2026-05-22T00:00:00Z",
+        finished_at="2026-05-22T00:00:01Z",
+        cases_file="eval/performance_cases.yaml",
+        metrics={"performance_gate": {"metrics": metrics}},
+    )
