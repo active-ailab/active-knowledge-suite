@@ -16,6 +16,12 @@ from active_knowledge_server.connectors.workspace import (
 	WorkspaceInventory,
 	WorkspaceWarning,
 )
+from active_knowledge_server.indexing.progress import (
+	IndexProgressCallback,
+	IndexProgressEvent,
+	noop_progress_callback,
+	utc_timestamp,
+)
 from active_knowledge_server.indexing.snapshot import CURRENT_SNAPSHOT_ID
 from active_knowledge_server.parsers.ctags import (
 	CodeParseWarning,
@@ -158,9 +164,11 @@ class CodeIndexer:
 		*,
 		snapshot_id: str = CURRENT_SNAPSHOT_ID,
 		workspace_inventory: WorkspaceInventory | None = None,
+		progress_callback: IndexProgressCallback | None = None,
 	) -> IndexedCode:
 		"""Collect code entities, chunks, relations, and evidence without persisting them."""
 
+		callback = progress_callback or noop_progress_callback
 		inventory = workspace_inventory or self._connector.scan()
 		warnings: list[CodeIndexingWarning] = [
 			_warning_from_workspace_warning(item) for item in inventory.warnings
@@ -176,8 +184,10 @@ class CodeIndexer:
 		file_texts: dict[str, str] = {}
 		code_parses: dict[str, ParsedCodeFile] = {}
 		makefile_parses: dict[str, ParsedMakefile] = {}
+		stage_total = len(indexed_entries)
+		started_at = utc_timestamp()
 
-		for entry in indexed_entries:
+		for index, entry in enumerate(indexed_entries, start=1):
 			absolute_path = workspace_root / entry.relative_path
 			text = absolute_path.read_text(encoding="utf-8", errors="replace")
 			file_texts[entry.relative_path] = text
@@ -208,8 +218,7 @@ class CodeIndexer:
 					_warning_from_code_parse_warning(entry.relative_path, warning)
 					for warning in parsed_code.warnings
 				)
-				continue
-			if entry.language == "makefile":
+			elif entry.language == "makefile":
 				sibling_paths = ()
 				try:
 					sibling_paths = tuple(child.name for child in absolute_path.parent.iterdir())
@@ -232,6 +241,18 @@ class CodeIndexer:
 					_warning_from_makefile_parse_warning(entry.relative_path, warning)
 					for warning in parsed_makefile.warnings
 				)
+			callback(
+				IndexProgressEvent(
+					phase="code_collect",
+					stage_total=stage_total,
+					stage_done=index,
+					current_path=entry.relative_path,
+					message="Collecting code files",
+					warnings_count=len(warnings),
+					started_at=started_at,
+					updated_at=utc_timestamp(),
+				)
+			)
 
 		directory_anchor_records: dict[str, FileRecord] = {}
 		for relative_path in physical_file_records:
@@ -671,10 +692,15 @@ class CodeIndexer:
 		*,
 		snapshot_id: str = CURRENT_SNAPSHOT_ID,
 		workspace_inventory: WorkspaceInventory | None = None,
+		progress_callback: IndexProgressCallback | None = None,
 	) -> IndexedCode:
 		"""Collect code records and persist them through the metadata writer."""
 
-		indexed = self.collect(snapshot_id=snapshot_id, workspace_inventory=workspace_inventory)
+		indexed = self.collect(
+			snapshot_id=snapshot_id,
+			workspace_inventory=workspace_inventory,
+			progress_callback=progress_callback,
+		)
 		for record in indexed.source_records:
 			writer.upsert_source(record)
 		for record in indexed.file_records:
@@ -689,6 +715,12 @@ class CodeIndexer:
 			writer.upsert_evidence(record)
 		writer.flush()
 		return indexed
+
+
+def count_indexable_workspace_files(inventory: WorkspaceInventory) -> int:
+	"""Return the number of workspace files scanned by the code indexer."""
+
+	return sum(1 for entry in inventory.files if entry.language in _WORKSPACE_LANGUAGE_SET)
 
 
 def _warning_from_workspace_warning(warning: WorkspaceWarning) -> CodeIndexingWarning:

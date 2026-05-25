@@ -5,10 +5,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from active_knowledge_server.cli import main
+from active_knowledge_server.cli import main, resolve_index_output_mode
 from active_knowledge_server.eval.baseline import create_baseline_snapshot
 from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
 from active_knowledge_server.eval.runner import EvalRunReport
+from active_knowledge_server.indexing.pipeline import IncrementalIndexPlan, IncrementalIndexResult
+from active_knowledge_server.indexing.progress import IndexProgressEvent
 from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAMES
 
 
@@ -1026,6 +1028,99 @@ def test_index_baseline_requires_publish_mode(capsys) -> None:
     assert payload["warnings"][0]["code"] == "baseline.publish_mode_required"
 
 
+def test_index_incremental_json_is_machine_readable(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+        ) -> IncrementalIndexResult:
+            assert snapshot_id == "current"
+            assert source == "all"
+            assert progress_callback is not None
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=IncrementalIndexPlan(
+                    snapshot_id=snapshot_id,
+                    source="all",
+                    previous_state=None,
+                    current_state=object(),
+                    workspace_inventory=object(),
+                    source_docs_manifest=object(),
+                    collected_profiles=object(),
+                ),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "index"
+    assert payload["status"] == "ok"
+    assert payload["result"]["result_status"] == "ready"
+
+
+def test_resolve_index_output_mode_contract() -> None:
+    class DummyStream:
+        def __init__(self, *, is_tty: bool) -> None:
+            self._is_tty = is_tty
+
+        def isatty(self) -> bool:
+            return self._is_tty
+
+    assert resolve_index_output_mode(output_format="json") == "json_final"
+    assert (
+        resolve_index_output_mode(output_format="text", stream=DummyStream(is_tty=True))
+        == "text_dynamic"
+    )
+    assert (
+        resolve_index_output_mode(output_format="text", stream=DummyStream(is_tty=False))
+        == "text_plain"
+    )
+    assert (
+        resolve_index_output_mode(
+            output_format="text",
+            stream=DummyStream(is_tty=True),
+            rich_available=False,
+        )
+        == "text_plain"
+    )
+
+
 def test_baseline_publish_json_writes_manifest(
     tmp_path: Path,
     capsys,
@@ -1039,7 +1134,7 @@ def test_baseline_publish_json_writes_manifest(
 
     monkeypatch.setattr(
         "active_knowledge_server.cli.run_full_index",
-        lambda resolved, target, source, operation_mode: {
+        lambda resolved, target, source, operation_mode, progress_callback=None: {
             "schema_version": "index_full_result.v1",
             "result_status": "ready",
             "snapshot_id": "current",
@@ -1078,6 +1173,67 @@ def test_baseline_publish_json_writes_manifest(
     assert payload["command"] == "baseline publish"
     assert payload["baseline_id"] == "baseline-o8-02"
     assert manifest_payload["baseline_id"] == "baseline-o8-02"
+
+
+def test_index_interrupt_prints_snapshot_without_traceback(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+        ) -> IncrementalIndexResult:
+            progress_callback(
+                IndexProgressEvent(
+                    phase="doc_collect",
+                    stage_total=4,
+                    stage_done=2,
+                    global_total=8,
+                    global_done=3,
+                    current_path="knowledge-sources/api/sensor.md",
+                    message="Collecting source documents",
+                )
+            )
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.resolve_index_output_mode",
+        lambda output_format: "text_plain",
+    )
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+        ]
+    )
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 130
+    assert "Index interrupted." in captured.out
+    assert "Traceback" not in captured.out
 
 
 def test_baseline_validate_json_reports_missing_manifest(

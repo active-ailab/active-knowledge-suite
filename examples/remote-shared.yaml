@@ -99,6 +99,8 @@ indexing:
   incremental: true
   reuse_baseline: true
   write_target: local_overlay
+  # Phase 0 boundary: workers only affects collect/parse work.
+  # Set workers: 1 to force serial collect; SQLite and LanceDB writes remain single-writer.
   workers: auto
   code:
     enable_full_code_scan: true

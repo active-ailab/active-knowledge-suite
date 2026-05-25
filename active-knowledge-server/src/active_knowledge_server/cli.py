@@ -9,9 +9,10 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, TextIO, cast
 
 from active_knowledge_server import __version__
+from active_knowledge_server.cli_progress import create_index_progress_reporter
 from active_knowledge_server.config.loader import (
     ConfigDict,
     ConfigError,
@@ -28,6 +29,8 @@ from active_knowledge_server.config.workdir import (
     initialize_workdir,
     layout_from_config,
 )
+from active_knowledge_server.connectors.source_docs import SourceDocsConnector
+from active_knowledge_server.connectors.workspace import WorkspaceConnector
 from active_knowledge_server.eval import EvalRunner
 from active_knowledge_server.eval.baseline import (
     compare_against_baseline,
@@ -42,10 +45,14 @@ from active_knowledge_server.indexing import (
     CodeIndexer,
     DocumentIndexer,
     IncrementalIndexPipeline,
+    IndexProgressEvent,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
     SnapshotCollector,
     WorkspaceMapBuilder,
+    count_indexable_workspace_files,
+    noop_progress_callback,
+    utc_timestamp,
 )
 from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
 from active_knowledge_server.models import QueryResult, Warning
@@ -69,6 +76,26 @@ from active_knowledge_server.storage.validation import validate_storage_consiste
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
+IndexOutputMode = Literal["json_final", "text_dynamic", "text_plain"]
+
+
+def resolve_index_output_mode(
+    *,
+    output_format: str,
+    stream: TextIO | None = None,
+    rich_available: bool = True,
+) -> IndexOutputMode:
+    """Resolve the Phase 0 CLI output contract for indexing progress."""
+
+    if output_format == "json":
+        return "json_final"
+    if output_format != "text":
+        raise ValueError(f"unsupported output format: {output_format}")
+    output_stream = stream or sys.stdout
+    is_tty = bool(getattr(output_stream, "isatty", lambda: False)())
+    if not is_tty or not rich_available:
+        return "text_plain"
+    return "text_dynamic"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -695,35 +722,46 @@ def handle_index(args: argparse.Namespace) -> int:
     )
     if blocked is not None:
         return blocked
+    output_mode = resolve_index_output_mode(output_format=args.format)
+    progress_callback = noop_progress_callback
+    reporter = None
+    if output_mode != "json_final":
+        reporter = create_index_progress_reporter(output_mode=output_mode)
+        progress_callback = reporter.handle
 
-    if mode == "incremental" and target == "local":
-        pipeline = IncrementalIndexPipeline(resolved.model, cwd=Path.cwd())
-        result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source=args.source)
-        payload = {
-            "command": "index",
-            "status": "ok",
-            "target": target,
-            "source": args.source,
-            "mode": mode,
-            "result": result.to_dict(),
-            "config": summary,
-        }
-    else:
-        full_result = run_full_index(
-            resolved,
-            target=target,
-            source=args.source,
-            operation_mode="baseline_publish" if target == "baseline" else "normal",
-        )
-        payload = {
-            "command": "index",
-            "status": "ok",
-            "target": target,
-            "source": args.source,
-            "mode": mode,
-            "result": full_result,
-            "config": summary,
-        }
+    try:
+        if reporter is None:
+            payload = _run_index_command(
+                resolved,
+                summary=summary,
+                mode=mode,
+                target=target,
+                source=str(args.source),
+                progress_callback=progress_callback,
+            )
+        else:
+            with reporter:
+                payload = _run_index_command(
+                    resolved,
+                    summary=summary,
+                    mode=mode,
+                    target=target,
+                    source=str(args.source),
+                    progress_callback=progress_callback,
+                )
+    except KeyboardInterrupt:
+        if reporter is not None:
+            reporter.emit_interrupt_summary()
+        elif args.format == "json":
+            print_json(
+                {
+                    "command": "index",
+                    "status": "interrupted",
+                    "message": "Indexing was interrupted before completion.",
+                }
+            )
+        return 130
+
     if args.format == "json":
         print_json(payload)
     else:
@@ -733,6 +771,52 @@ def handle_index(args: argparse.Namespace) -> int:
         result_status = payload["result"].get("result_status", "ready")
         print(f"Result status: {result_status}")
     return 0
+
+
+def _run_index_command(
+    resolved: ResolvedConfig,
+    *,
+    summary: dict[str, str | int | bool | list[str] | dict[str, Any]],
+    mode: str,
+    target: str,
+    source: str,
+    progress_callback,
+) -> dict[str, object]:
+    """Execute the index command and return the final payload."""
+
+    if mode == "incremental" and target == "local":
+        pipeline = IncrementalIndexPipeline(resolved.model, cwd=Path.cwd())
+        result = pipeline.run(
+            snapshot_id=CURRENT_SNAPSHOT_ID,
+            source=cast(Any, source),
+            progress_callback=progress_callback,
+        )
+        return {
+            "command": "index",
+            "status": "ok",
+            "target": target,
+            "source": source,
+            "mode": mode,
+            "result": result.to_dict(),
+            "config": summary,
+        }
+
+    full_result = run_full_index(
+        resolved,
+        target=target,
+        source=source,
+        operation_mode="baseline_publish" if target == "baseline" else "normal",
+        progress_callback=progress_callback,
+    )
+    return {
+        "command": "index",
+        "status": "ok",
+        "target": target,
+        "source": source,
+        "mode": mode,
+        "result": full_result,
+        "config": summary,
+    }
 
 
 def handle_rebuild(args: argparse.Namespace) -> int:
@@ -1421,11 +1505,14 @@ def run_full_index(
     target: str,
     source: str,
     operation_mode: str,
+    progress_callback=None,
 ) -> dict[str, object]:
     """Execute one full indexing pass for local overlay or baseline target."""
 
     model = resolved.model
     cwd = Path.cwd()
+    callback = progress_callback or noop_progress_callback
+    started_at = utc_timestamp()
     request = StorageWriteRequest(target=cast(Any, target), operation_mode=cast(Any, operation_mode))
 
     if target == "baseline":
@@ -1438,26 +1525,144 @@ def run_full_index(
     vector_adapter = LanceDBVectorAdapter.from_config(model, cwd=cwd, metadata_adapter=metadata_adapter)
     writer = metadata_adapter.writer(request)
     vector_writer = vector_adapter.writer(request)
+    workspace_inventory = None
+    if source in {"all", "code"}:
+        workspace_inventory = WorkspaceConnector.from_config(model, cwd=cwd).scan()
+    source_docs_manifest = None
+    if source in {"all", "docs"}:
+        source_docs_manifest = SourceDocsConnector.from_config(model, cwd=cwd).scan()
+
+    code_collect_total = (
+        0
+        if workspace_inventory is None
+        else count_indexable_workspace_files(workspace_inventory)
+    )
+    doc_collect_total = 0 if source_docs_manifest is None else len(source_docs_manifest.files)
+    vectors_apply_total = int(source_docs_manifest is not None)
+    profile_relations_total = int(source in {"all", "code"})
+    workspace_map_total = int(source in {"all", "code"})
+    global_total = (
+        1
+        + 2
+        + code_collect_total
+        + doc_collect_total
+        + vectors_apply_total
+        + profile_relations_total
+        + workspace_map_total
+    )
+    global_done = 0
+
+    def emit(
+        *,
+        phase: str,
+        stage_total: int | None,
+        stage_done: int | None,
+        current_path: str | None = None,
+        message: str | None = None,
+        explicit_global_done: int | None = None,
+    ) -> None:
+        callback(
+            IndexProgressEvent(
+                phase=cast(Any, phase),
+                stage_total=stage_total,
+                stage_done=stage_done,
+                global_total=global_total,
+                global_done=global_done if explicit_global_done is None else explicit_global_done,
+                current_path=current_path,
+                message=message,
+                started_at=started_at,
+                updated_at=utc_timestamp(),
+            )
+        )
+
+    global_done += 1
+    emit(phase="plan", stage_total=1, stage_done=1, message="Full index plan ready")
 
     snapshot = SnapshotCollector.from_config(model, cwd=cwd).collect_and_store(writer)
+    global_done += 1
+    emit(
+        phase="discover",
+        stage_total=2,
+        stage_done=1,
+        current_path=snapshot.snapshot_record.snapshot_id,
+        message="Collecting snapshot metadata",
+    )
     profiles = ProfileCollector.from_config(model, cwd=cwd).collect_and_store(
         writer,
         snapshot_id=snapshot.snapshot_record.snapshot_id,
     )
+    global_done += 1
+    emit(
+        phase="discover",
+        stage_total=2,
+        stage_done=2,
+        current_path=profiles.resolution.resolved_profile_id,
+        message="Collecting profile metadata",
+    )
 
     code_records = None
     if source in {"all", "code"}:
+        code_collect_base = global_done
+
+        def handle_code_collect(event: IndexProgressEvent) -> None:
+            callback(
+                IndexProgressEvent(
+                    phase=event.phase,
+                    stage_total=event.stage_total,
+                    stage_done=event.stage_done,
+                    global_total=global_total,
+                    global_done=code_collect_base + (event.stage_done or 0),
+                    current_path=event.current_path,
+                    message=event.message,
+                    warnings_count=event.warnings_count,
+                    started_at=started_at,
+                    updated_at=utc_timestamp(),
+                )
+            )
+
         code_records = CodeIndexer.from_config(model, cwd=cwd).collect_and_store(
             writer,
             snapshot_id=snapshot.snapshot_record.snapshot_id,
+            workspace_inventory=workspace_inventory,
+            progress_callback=handle_code_collect,
         )
+        global_done += code_collect_total
 
     doc_records = None
     if source in {"all", "docs"}:
+        doc_collect_base = global_done
+
+        def handle_doc_collect(event: IndexProgressEvent) -> None:
+            callback(
+                IndexProgressEvent(
+                    phase=event.phase,
+                    stage_total=event.stage_total,
+                    stage_done=event.stage_done,
+                    global_total=global_total,
+                    global_done=doc_collect_base + (event.stage_done or 0),
+                    current_path=event.current_path,
+                    message=event.message,
+                    warnings_count=event.warnings_count,
+                    started_at=started_at,
+                    updated_at=utc_timestamp(),
+                )
+            )
+
         doc_records = DocumentIndexer.from_config(model, cwd=cwd).collect_and_store(
             writer,
             vector_writer=vector_writer,
             snapshot_id=snapshot.snapshot_record.snapshot_id,
+            source_docs_manifest=source_docs_manifest,
+            progress_callback=handle_doc_collect,
+        )
+        global_done += doc_collect_total
+        global_done += vectors_apply_total
+        emit(
+            phase="vectors_apply",
+            stage_total=vectors_apply_total,
+            stage_done=vectors_apply_total,
+            message="Applying document vectors",
+            explicit_global_done=global_done,
         )
 
     relation_records = None
@@ -1469,12 +1674,37 @@ def run_full_index(
             entities=code_records.entity_records,
             relations=code_records.relation_records,
         )
+        global_done += 1
+        emit(
+            phase="profile_relations",
+            stage_total=1,
+            stage_done=1,
+            message="Refreshing profile-conditioned relations",
+        )
 
     if source in {"all", "code"}:
-        WorkspaceMapBuilder.from_config(model, cwd=cwd).collect_and_store(
-            writer,
+        WorkspaceMapBuilder.from_config(model, cwd=cwd).collect_and_write(
             snapshot_id=snapshot.snapshot_record.snapshot_id,
+            workspace_inventory=workspace_inventory,
+            reader=metadata_adapter.reader(),
+            profiles=profiles.profile_records,
+            profile_resolution=profiles.resolution.to_dict(),
         )
+        global_done += 1
+        emit(
+            phase="workspace_map",
+            stage_total=1,
+            stage_done=1,
+            message="Refreshing workspace map",
+        )
+
+    emit(
+        phase="done",
+        stage_total=1,
+        stage_done=1,
+        message="Full indexing finished",
+        explicit_global_done=global_total,
+    )
 
     return {
         "schema_version": "index_full_result.v1",

@@ -125,14 +125,21 @@
 
 新增统一进度事件（示例字段）：
 
-- `phase`: discover | code_collect | code_apply | doc_collect | doc_apply | profile_relations | workspace_map | done
+- `phase`: plan | discover | code_collect | code_apply | doc_collect | doc_apply | vectors_apply | profile_relations | workspace_map | done
 - `stage_total`: 当前阶段总量
 - `stage_done`: 当前阶段已完成
 - `global_total`: 全流程总量
 - `global_done`: 全流程已完成
 - `current_path`: 当前处理文件
-- `recent_paths`: 最近 10 条（CLI 侧维护）
+- `message`: 当前阶段简述（可选）
+- `warnings_count`: 当前累计 warning 数
+- `started_at` / `updated_at`: UTC 时间戳
 - `eta_seconds`: 估算剩余时间（可选，按滑动窗口速率估计）
+
+说明：
+
+- `recent_paths` 不进入 pipeline 事件本体，由 CLI 侧基于 `current_path` 维护最近 10 条滚动窗口
+- 事件必须保持 JSON-safe，不承载源码片段、记录对象或 embedding 内容
 
 ### 5.2 总量定义
 
@@ -158,7 +165,8 @@
 刷新策略：
 
 - 默认 5Hz（200ms）
-- 仅 text 模式启用
+- 仅 text + TTY 模式启用
+- text + 非 TTY 模式保留低频纯文本摘要
 - json 模式禁用动态 UI，保留机器可读稳定输出
 
 ### 5.4 取消与异常
@@ -223,6 +231,11 @@
 - `indexing.parallel.mode`: thread | process | hybrid
 - `indexing.writer.batch_size`: 默认 200~1000（需压测）
 - `indexing.writer.commit_interval_ms`: 默认 200~500
+
+Phase 0 决议：
+
+- 先只固化 `indexing.workers` 的语义，不在 Phase 0 引入新的 `parallel.enabled` 或 `parallel.mode` 配置
+- `indexing.workers = 1` 作为串行回退开关
 
 ---
 

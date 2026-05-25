@@ -14,6 +14,7 @@ dependencies = [
     { name = "fastmcp" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
@@ -29,6 +30,7 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=3.3.1" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rich", specifier = ">=15.0.0" },
 ]
 
 [package.metadata.requires-dev]

@@ -19,6 +19,7 @@ from active_knowledge_server.indexing import (
     ProfileConditionedRelationExtractor,
     summarize_entity_profile_states_from_reader,
 )
+from active_knowledge_server.indexing.progress import IndexProgressEvent
 from active_knowledge_server.storage import QueryScope, StorageWriteRequest
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.sqlite_store import (
@@ -514,6 +515,48 @@ This change should trip the synthetic failure path.
         warning.code == "index.doc_incremental_failed" for warning in result.warnings
     )
     assert failing_pipeline.load_state() == previous_state
+
+
+def test_incremental_pipeline_emits_monotonic_progress_events(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    _metadata_adapter, _vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(
+            config,
+            cwd=tmp_path,
+            include_docs=True,
+        )
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+int health_progress_probe(void)
+{
+    return 7;
+}
+""",
+        encoding="utf-8",
+    )
+
+    events: list[IndexProgressEvent] = []
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        progress_callback=events.append,
+    )
+
+    assert result.result_status == "ready"
+    assert events
+    assert events[0].phase == "plan"
+    assert events[-1].phase == "done"
+    assert events[-1].global_done == events[-1].global_total
+    assert [event.global_done for event in events if event.global_done is not None] == sorted(
+        event.global_done for event in events if event.global_done is not None
+    )
 
 
 def write_workspace_fixture(workspace_root: Path) -> None:

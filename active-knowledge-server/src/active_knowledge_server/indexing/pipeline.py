@@ -7,7 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Final, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from active_knowledge_server.config.loader import resolve_runtime_path
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
@@ -20,11 +20,18 @@ from active_knowledge_server.indexing.code_indexer import (
     CODE_INDEXER_SCHEMA_VERSION,
     CodeIndexer,
     IndexedCode,
+    count_indexable_workspace_files,
 )
 from active_knowledge_server.indexing.doc_indexer import (
     DOC_INDEXER_SCHEMA_VERSION,
     DocumentIndexer,
     IndexedDocuments,
+)
+from active_knowledge_server.indexing.progress import (
+    IndexProgressCallback,
+    IndexProgressEvent,
+    noop_progress_callback,
+    utc_timestamp,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -487,10 +494,51 @@ class IncrementalIndexPipeline:
         *,
         snapshot_id: str = CURRENT_SNAPSHOT_ID,
         source: Literal["all", "code", "docs"] = "all",
+        progress_callback: IndexProgressCallback | None = None,
     ) -> IncrementalIndexResult:
         """Execute one incremental overlay update and persist the next incremental state."""
 
         plan = self.plan(snapshot_id=snapshot_id, source=source)
+        callback = progress_callback or noop_progress_callback
+        started_at = utc_timestamp()
+        doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
+        progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)
+        global_total = progress_totals["global_total"]
+        global_done = 0
+
+        def emit(
+            *,
+            phase: str,
+            stage_total: int | None,
+            stage_done: int | None,
+            current_path: str | None = None,
+            message: str | None = None,
+            warnings_count: int = 0,
+            explicit_global_done: int | None = None,
+        ) -> None:
+            callback(
+                IndexProgressEvent(
+                    phase=cast(Any, phase),
+                    stage_total=stage_total,
+                    stage_done=stage_done,
+                    global_total=global_total,
+                    global_done=global_done if explicit_global_done is None else explicit_global_done,
+                    current_path=current_path,
+                    message=message,
+                    warnings_count=warnings_count,
+                    started_at=started_at,
+                    updated_at=utc_timestamp(),
+                )
+            )
+
+        global_done += 1
+        emit(
+            phase="plan",
+            stage_total=1,
+            stage_done=1,
+            message="Incremental plan ready",
+            warnings_count=len(plan.warnings),
+        )
         reader = self._metadata_adapter.reader()
         writer = self._metadata_adapter.writer(StorageWriteRequest(target="overlay"))
         vector_writer = self._vector_adapter.writer(StorageWriteRequest(target="overlay"))
@@ -503,11 +551,27 @@ class IncrementalIndexPipeline:
             plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
         ):
             try:
+                code_collect_base = global_done
+
+                def handle_code_collect(event: IndexProgressEvent) -> None:
+                    callback(
+                        replace(
+                            event,
+                            global_total=global_total,
+                            global_done=code_collect_base + (event.stage_done or 0),
+                            started_at=started_at,
+                            updated_at=utc_timestamp(),
+                        )
+                    )
+
                 code_indexed = self._code_indexer.collect(
                     snapshot_id=snapshot_id,
                     workspace_inventory=plan.workspace_inventory,
+                    progress_callback=handle_code_collect,
                 )
+                global_done += progress_totals["code_collect"]
                 new_code_bundles = _code_bundles_by_path(code_indexed)
+                code_apply_done = 0
                 for relative_path in plan.deleted_code_paths:
                     self._tombstone_deleted_path(
                         reader,
@@ -515,6 +579,15 @@ class IncrementalIndexPipeline:
                         relative_path=relative_path,
                         snapshot_id=snapshot_id,
                         reason="incremental_delete",
+                    )
+                    code_apply_done += 1
+                    global_done += 1
+                    emit(
+                        phase="code_apply",
+                        stage_total=progress_totals["code_apply"],
+                        stage_done=code_apply_done,
+                        current_path=relative_path,
+                        message="Applying code changes",
                     )
                 for relative_path in plan.changed_code_paths:
                     bundle = new_code_bundles.get(relative_path)
@@ -526,6 +599,15 @@ class IncrementalIndexPipeline:
                         relative_path=relative_path,
                         new_bundle=bundle,
                         snapshot_id=snapshot_id,
+                    )
+                    code_apply_done += 1
+                    global_done += 1
+                    emit(
+                        phase="code_apply",
+                        stage_total=progress_totals["code_apply"],
+                        stage_done=code_apply_done,
+                        current_path=relative_path,
+                        message="Applying code changes",
                     )
                 writer.flush()
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
@@ -547,6 +629,8 @@ class IncrementalIndexPipeline:
             or plan.reindex_all_docs
             or plan.rebuild_vectors
         ):
+            doc_apply_done = 0
+            vector_apply_done = 0
             for relative_path in plan.deleted_doc_paths:
                 try:
                     self._tombstone_deleted_path(
@@ -571,13 +655,29 @@ class IncrementalIndexPipeline:
                             details={"path": relative_path, "error": str(exc)},
                         )
                     )
+                else:
+                    doc_apply_done += 1
+                    global_done += 1
+                    emit(
+                        phase="doc_apply",
+                        stage_total=progress_totals["doc_apply"],
+                        stage_done=doc_apply_done,
+                        current_path=relative_path,
+                        message="Applying document changes",
+                    )
 
-            doc_paths_to_collect = set(plan.changed_doc_paths)
-            if plan.reindex_all_docs or (plan.rebuild_vectors and not doc_paths_to_collect):
-                doc_paths_to_collect.update(plan.current_state.doc_files)
-
-            for relative_path in sorted(doc_paths_to_collect):
+            doc_collect_done = 0
+            for relative_path in doc_paths_to_collect:
                 try:
+                    doc_collect_done += 1
+                    global_done += 1
+                    emit(
+                        phase="doc_collect",
+                        stage_total=progress_totals["doc_collect"],
+                        stage_done=doc_collect_done,
+                        current_path=relative_path,
+                        message="Collecting source documents",
+                    )
                     storage_relative_path = _doc_storage_relative_path(
                         plan.source_docs_manifest,
                         relative_path,
@@ -604,11 +704,29 @@ class IncrementalIndexPipeline:
                             new_bundle=new_bundle,
                             snapshot_id=snapshot_id,
                         )
+                        doc_apply_done += 1
+                        global_done += 1
+                        emit(
+                            phase="doc_apply",
+                            stage_total=progress_totals["doc_apply"],
+                            stage_done=doc_apply_done,
+                            current_path=storage_relative_path,
+                            message="Applying document changes",
+                        )
                     if plan.rebuild_vectors or metadata_changed:
                         self._upsert_doc_vectors(
                             vector_writer,
                             indexed,
                             relative_path=storage_relative_path,
+                        )
+                        vector_apply_done += 1
+                        global_done += 1
+                        emit(
+                            phase="vectors_apply",
+                            stage_total=progress_totals["vectors_apply"],
+                            stage_done=vector_apply_done,
+                            current_path=storage_relative_path,
+                            message="Applying document vectors",
                         )
                 except Exception as exc:  # noqa: BLE001
                     failed = True
@@ -633,6 +751,13 @@ class IncrementalIndexPipeline:
                     removed_profile_ids=set(plan.removed_profile_ids),
                 )
                 writer.flush()
+                global_done += 1
+                emit(
+                    phase="profile_relations",
+                    stage_total=1,
+                    stage_done=1,
+                    message="Refreshing profile-conditioned relations",
+                )
             except Exception as exc:  # noqa: BLE001
                 failed = True
                 warnings.append(
@@ -655,6 +780,13 @@ class IncrementalIndexPipeline:
                     profiles=plan.collected_profiles.profile_records,
                     profile_resolution=plan.collected_profiles.resolution.to_dict(),
                 )
+                global_done += 1
+                emit(
+                    phase="workspace_map",
+                    stage_total=1,
+                    stage_done=1,
+                    message="Refreshing workspace map",
+                )
             except Exception as exc:  # noqa: BLE001
                 failed = True
                 warnings.append(
@@ -670,6 +802,15 @@ class IncrementalIndexPipeline:
 
         if not failed:
             self.save_state(plan.current_state)
+
+        emit(
+            phase="done",
+            stage_total=1,
+            stage_done=1,
+            message="Incremental indexing finished",
+            warnings_count=len(warnings),
+            explicit_global_done=global_total,
+        )
 
         return IncrementalIndexResult(
             schema_version=INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION,
@@ -996,6 +1137,73 @@ def _diff_maps(
     )
     deleted = tuple(sorted(path for path in previous if path not in current))
     return changed, deleted
+
+
+def _incremental_doc_paths_to_collect(plan: IncrementalIndexPlan) -> tuple[str, ...]:
+    doc_paths_to_collect = set(plan.changed_doc_paths)
+    if plan.reindex_all_docs or (plan.rebuild_vectors and not doc_paths_to_collect):
+        doc_paths_to_collect.update(plan.current_state.doc_files)
+    return tuple(sorted(doc_paths_to_collect))
+
+
+def _incremental_progress_totals(
+    plan: IncrementalIndexPlan,
+    source: Literal["all", "code", "docs"],
+    doc_paths_to_collect: Sequence[str],
+) -> dict[str, int]:
+    code_collect = 0
+    code_apply = 0
+    if source in {"all", "code"} and (
+        plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
+    ):
+        code_collect = count_indexable_workspace_files(plan.workspace_inventory)
+        code_apply = len(plan.changed_code_paths) + len(plan.deleted_code_paths)
+
+    doc_collect = 0
+    doc_apply = 0
+    vectors_apply = 0
+    if source in {"all", "docs"} and (
+        plan.changed_doc_paths
+        or plan.deleted_doc_paths
+        or plan.reindex_all_docs
+        or plan.rebuild_vectors
+    ):
+        doc_collect = len(doc_paths_to_collect)
+        doc_apply = len(plan.deleted_doc_paths) + sum(
+            1
+            for path in doc_paths_to_collect
+            if plan.reindex_all_docs or path in plan.changed_doc_paths
+        )
+        vectors_apply = sum(
+            1
+            for path in doc_paths_to_collect
+            if plan.rebuild_vectors or plan.reindex_all_docs or path in plan.changed_doc_paths
+        )
+
+    profile_relations = int(
+        source in {"all", "code"} and plan.rebuild_profile_conditioned_relations
+    )
+    workspace_map = int(_workspace_map_refresh_required(plan))
+    global_total = (
+        1
+        + code_collect
+        + code_apply
+        + doc_collect
+        + doc_apply
+        + vectors_apply
+        + profile_relations
+        + workspace_map
+    )
+    return {
+        "code_collect": code_collect,
+        "code_apply": code_apply,
+        "doc_collect": doc_collect,
+        "doc_apply": doc_apply,
+        "vectors_apply": vectors_apply,
+        "profile_relations": profile_relations,
+        "workspace_map": workspace_map,
+        "global_total": global_total,
+    }
 
 
 def _workspace_map_refresh_required(plan: IncrementalIndexPlan) -> bool:

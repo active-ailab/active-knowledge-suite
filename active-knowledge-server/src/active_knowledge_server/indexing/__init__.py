@@ -5,6 +5,7 @@ from active_knowledge_server.indexing.code_indexer import (
     CodeIndexer,
     CodeIndexingWarning,
     IndexedCode,
+    count_indexable_workspace_files,
 )
 from active_knowledge_server.indexing.doc_indexer import (
     DOC_INDEXER_SCHEMA_VERSION,
@@ -21,6 +22,14 @@ from active_knowledge_server.indexing.pipeline import (
     IncrementalIndexResult,
     IncrementalIndexState,
     IncrementalIndexWarning,
+)
+from active_knowledge_server.indexing.progress import (
+    INDEX_PROGRESS_PHASES,
+    IndexProgressCallback,
+    IndexProgressEvent,
+    IndexProgressPhase,
+    noop_progress_callback,
+    utc_timestamp,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -71,6 +80,7 @@ __all__ = [
     "DOC_INDEXER_SCHEMA_VERSION",
     "INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION",
     "INCREMENTAL_INDEX_STATE_SCHEMA_VERSION",
+    "INDEX_PROGRESS_PHASES",
     "PROFILE_COLLECTOR_SCHEMA_VERSION",
     "SNAPSHOT_COLLECTOR_SCHEMA_VERSION",
     "WORKSPACE_MAP_SCHEMA_VERSION",
@@ -85,6 +95,9 @@ __all__ = [
     "IncrementalIndexResult",
     "IncrementalIndexState",
     "IncrementalIndexWarning",
+    "IndexProgressCallback",
+    "IndexProgressEvent",
+    "IndexProgressPhase",
     "IndexedCode",
     "IndexedDocuments",
     "ProfileCandidate",
@@ -102,6 +115,7 @@ __all__ = [
     "WorkspaceProjectionView",
     "WorkspaceTreeNode",
     "WorkspaceViewItem",
+    "count_indexable_workspace_files",
     "compute_profile_manifest_hash",
     "compute_profile_record_id",
     "compute_repo_manifest_hash",
@@ -113,7 +127,9 @@ __all__ = [
     "profile_config_hash",
     "profile_macro_assignments",
     "root_git_head",
+    "noop_progress_callback",
     "summarize_entity_profile_states",
     "summarize_entity_profile_states_from_reader",
     "snapshot_aliases",
+    "utc_timestamp",
 ]

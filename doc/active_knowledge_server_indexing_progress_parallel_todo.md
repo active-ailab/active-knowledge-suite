@@ -102,20 +102,23 @@ Phase 0 的目标是避免实现阶段反复改接口。先固定事件契约、
 
 ### IP0-01 定义索引进度事件契约
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`DOC`
 - 依赖：设计文档第 5 节
 - 目标：新增统一 `IndexProgressEvent` 契约，供 pipeline、CLI、测试共用。
 - 建议落点：`active_knowledge_server/indexing/progress.py`
+- 完成产物：
+  [progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/progress.py:1)
+  [test_index_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_index_progress.py:1)
 
 TODO：
 
-- [ ] 定义 `phase` 枚举：`plan`、`discover`、`code_collect`、`code_apply`、`doc_collect`、`doc_apply`、`vectors_apply`、`profile_relations`、`workspace_map`、`done`。
-- [ ] 定义字段：`stage_total`、`stage_done`、`global_total`、`global_done`、`current_path`、`message`、`warnings_count`、`started_at`、`updated_at`、`eta_seconds`。
-- [ ] 定义 callback 类型：`IndexProgressCallback = Callable[[IndexProgressEvent], None]`。
-- [ ] 提供 `noop_progress_callback`，保证默认调用路径零行为变化。
-- [ ] 明确事件只表达进度，不承载记录内容、源码片段、embedding 或敏感信息。
+- [x] 定义 `phase` 枚举：`plan`、`discover`、`code_collect`、`code_apply`、`doc_collect`、`doc_apply`、`vectors_apply`、`profile_relations`、`workspace_map`、`done`。
+- [x] 定义字段：`stage_total`、`stage_done`、`global_total`、`global_done`、`current_path`、`message`、`warnings_count`、`started_at`、`updated_at`、`eta_seconds`。
+- [x] 定义 callback 类型：`IndexProgressCallback = Callable[[IndexProgressEvent], None]`。
+- [x] 提供 `noop_progress_callback`，保证默认调用路径零行为变化。
+- [x] 明确事件只表达进度，不承载记录内容、源码片段、embedding 或敏感信息。
 
 验收标准：
 
@@ -125,19 +128,22 @@ TODO：
 
 ### IP0-02 固定 text/JSON 输出边界
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`TEST`
 - 依赖：`IP0-01`
 - 目标：确保进度 UI 不破坏现有脚本和 JSON 消费方。
 - 建议落点：`active_knowledge_server/cli.py`
+- 完成产物：
+  [cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli.py:26)
+  [test_cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli.py:1)
 
 TODO：
 
-- [ ] 规定 `--format json` 只输出最终 payload，不输出中间动态事件。
-- [ ] 规定 text + TTY 才启用 Rich 动态 UI。
-- [ ] 规定 text + 非 TTY 使用低频 line progress 或仅最终摘要。
-- [ ] 增加 CLI 测试，断言 JSON 输出可被 `json.loads` 直接解析。
+- [x] 规定 `--format json` 只输出最终 payload，不输出中间动态事件。
+- [x] 规定 text + TTY 才启用 Rich 动态 UI。
+- [x] 规定 text + 非 TTY 使用低频 line progress 或仅最终摘要。
+- [x] 增加 CLI 测试，断言 JSON 输出可被 `json.loads` 直接解析。
 
 验收标准：
 
@@ -146,19 +152,21 @@ TODO：
 
 ### IP0-03 建立索引性能基线脚本
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`OPS`、`TEST`
 - 依赖：无
 - 目标：在改并发前拿到可比较的基线，不凭感觉调 workers 和 batch size。
 - 建议落点：`active-knowledge-server/scripts/benchmark_index.py` 或 `tests/perf/`
+- 完成产物：
+  [benchmark_index.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/scripts/benchmark_index.py:1)
 
 TODO：
 
-- [ ] 支持同一 config 下跑 `workers=1/2/4/8/auto`。
-- [ ] 记录 wall time、CPU time、峰值 RSS、索引文件数、chunk/entity/evidence/vector 数、warning 数。
-- [ ] 支持冷启动和热缓存两种模式，结果写入 JSONL。
-- [ ] 固化小/中/大三档数据集定义：`<5k`、`5k-30k`、`>30k` 文件。
+- [x] 支持同一 config 下跑 `workers=1/2/4/8/auto`。
+- [x] 记录 wall time、CPU time、峰值 RSS、索引文件数、chunk/entity/evidence/vector 数、warning 数。
+- [x] 支持冷启动和热缓存两种模式，结果写入 JSONL。
+- [x] 固化小/中/大三档数据集定义：`<5k`、`5k-30k`、`>30k` 文件。
 
 验收标准：
 
@@ -167,18 +175,22 @@ TODO：
 
 ### IP0-04 明确并发边界与回退开关
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`DOC`
 - 依赖：`IP0-03`
 - 目标：先定义安全边界，避免实现时误引入多 writer。
+- 完成产物：
+  [active_knowledge_server_indexing_progress_parallel_design.md](/home/gangan/GANLab/ActiveTools/active-knowledge/doc/active_knowledge_server_indexing_progress_parallel_design.md:1)
+  [local-single-user.yaml](/home/gangan/GANLab/ActiveTools/active-knowledge/examples/local-single-user.yaml:78)
+  [remote-shared.yaml](/home/gangan/GANLab/ActiveTools/active-knowledge/examples/remote-shared.yaml:80)
 
 TODO：
 
-- [ ] 规定 v1 并行只覆盖 scan/read/parse/chunk/entity/evidence/vector input 构建。
-- [ ] 规定 SQLite/LanceDB 写入保持单 writer。
-- [ ] 规定 `indexing.workers: 1` 等价关闭并行。
-- [ ] 规定失败回退：某个 worker 失败时只降级该文件/文档，pipeline 保持现有 `partial_ready` 语义。
+- [x] 规定 v1 并行只覆盖 scan/read/parse/chunk/entity/evidence/vector input 构建。
+- [x] 规定 SQLite/LanceDB 写入保持单 writer。
+- [x] 规定 `indexing.workers: 1` 等价关闭并行。
+- [x] 规定失败回退：某个 worker 失败时只降级该文件/文档，pipeline 保持现有 `partial_ready` 语义。
 
 验收标准：
 
@@ -193,20 +205,25 @@ Phase 1 不改变并发和写入语义，只让用户在长时间索引时持续
 
 ### IP1-01 在增量 pipeline 接入 progress callback
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP0-01`
 - 建议落点：`indexing/pipeline.py`
+- 完成产物：
+  [pipeline.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/pipeline.py:485)
+  [code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py:145)
+  [doc_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/doc_indexer.py:185)
+  [test_incremental_pipeline.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_incremental_pipeline.py:519)
 
 TODO：
 
-- [ ] `IncrementalIndexPipeline.run(...)` 新增可选 `progress_callback` 参数，默认 noop。
-- [ ] 在 plan 完成后发出 `plan` 事件，带上 global total。
-- [ ] 在 deleted code/doc tombstone 循环发出 apply 事件。
-- [ ] 在 changed code/doc collect/apply 循环发出当前 path。
-- [ ] 在 profile relations、workspace map 阶段发出固定步数事件。
-- [ ] 异常降级时更新 `warnings_count`，但不把异常栈塞入进度事件。
+- [x] `IncrementalIndexPipeline.run(...)` 新增可选 `progress_callback` 参数，默认 noop。
+- [x] 在 plan 完成后发出 `plan` 事件，带上 global total。
+- [x] 在 deleted code/doc tombstone 循环发出 apply 事件。
+- [x] 在 changed code/doc collect/apply 循环发出当前 path。
+- [x] 在 profile relations、workspace map 阶段发出固定步数事件。
+- [x] 异常降级时更新 `warnings_count`，但不把异常栈塞入进度事件。
 
 验收标准：
 
@@ -215,17 +232,21 @@ TODO：
 
 ### IP1-02 扩展全量索引进度事件
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP1-01`
 - 建议落点：`cli.py` 的 `run_full_index(...)` 路径及相关 indexer 调用
+- 完成产物：
+  [cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli.py:1571)
+  [code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py:145)
+  [doc_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/doc_indexer.py:185)
 
 TODO：
 
-- [ ] 为 full index 定义 code/docs/profile/workspace_map 的阶段总量。
-- [ ] 让 full index 路径复用同一 `IndexProgressEvent` 契约。
-- [ ] 无法提前知道总量的阶段先发 `total=None` 或 indeterminate 事件，发现总量后补齐。
+- [x] 为 full index 定义 code/docs/profile/workspace_map 的阶段总量。
+- [x] 让 full index 路径复用同一 `IndexProgressEvent` 契约。
+- [x] 无法提前知道总量的阶段先发 `total=None` 或 indeterminate 事件，发现总量后补齐。
 
 验收标准：
 
@@ -234,19 +255,23 @@ TODO：
 
 ### IP1-03 实现 CLI Rich renderer
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP0-02`、`IP1-01`
 - 建议落点：`active_knowledge_server/cli.py` 或 `active_knowledge_server/cli_progress.py`
+- 完成产物：
+  [cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli_progress.py:1)
+  [cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli.py:72)
+  [test_cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli_progress.py:1)
 
 TODO：
 
-- [ ] 增加 `IndexProgressRenderer`，维护 global task、stage task、`deque(maxlen=10)` recent paths。
-- [ ] 使用 Rich `Live` 或 `Progress`，刷新频率默认 4-5Hz。
-- [ ] 动态 UI 完成后保留最终摘要，避免用户看不到最后状态。
-- [ ] 日志或 warning 输出必须通过 Rich console 打在进度区上方，避免破坏进度条。
-- [ ] 如果 Rich 不可用，降级为纯文本摘要并给出轻量 warning。
+- [x] 增加 `IndexProgressRenderer`，维护 global task、stage task、`deque(maxlen=10)` recent paths。
+- [x] 使用 Rich `Live` 或 `Progress`，刷新频率默认 4-5Hz。
+- [x] 动态 UI 完成后保留最终摘要，避免用户看不到最后状态。
+- [x] 日志或 warning 输出必须通过 Rich console 打在进度区上方，避免破坏进度条。
+- [x] 如果 Rich 不可用，降级为纯文本摘要并给出轻量 warning。
 
 验收标准：
 
@@ -256,17 +281,20 @@ TODO：
 
 ### IP1-04 补齐依赖声明
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`
 - 依赖：`IP1-03`
 - 建议落点：`active-knowledge-server/pyproject.toml`
+- 完成产物：
+  [pyproject.toml](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/pyproject.toml:1)
+  [uv.lock](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/uv.lock:1)
 
 TODO：
 
-- [ ] 确认 `rich` 是否应作为直接 runtime dependency。
-- [ ] 如果使用 Rich，显式加入 `dependencies`，不要依赖传递依赖偶然存在。
-- [ ] 更新 lock 文件。
+- [x] 确认 `rich` 是否应作为直接 runtime dependency。
+- [x] 如果使用 Rich，显式加入 `dependencies`，不要依赖传递依赖偶然存在。
+- [x] 更新 lock 文件。
 
 验收标准：
 
@@ -274,18 +302,22 @@ TODO：
 
 ### IP1-05 统一 Ctrl+C 中断体验
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP1-03`
 - 建议落点：`cli.py`
+- 完成产物：
+  [cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli.py:692)
+  [cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli_progress.py:24)
+  [test_cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli.py:1162)
 
 TODO：
 
-- [ ] 捕获 `KeyboardInterrupt` 并停止 Live renderer。
-- [ ] 输出中断快照：`phase`、`stage_done/stage_total`、`global_done/global_total`、最后处理文件。
-- [ ] 保持普通用户不看到冗长 traceback。
-- [ ] 确认中断后重跑增量仍能收敛，不提前保存错误 state。
+- [x] 捕获 `KeyboardInterrupt` 并停止 Live renderer。
+- [x] 输出中断快照：`phase`、`stage_done/stage_total`、`global_done/global_total`、最后处理文件。
+- [x] 保持普通用户不看到冗长 traceback。
+- [x] 确认中断后重跑增量仍能收敛，不提前保存错误 state。
 
 验收标准：
 

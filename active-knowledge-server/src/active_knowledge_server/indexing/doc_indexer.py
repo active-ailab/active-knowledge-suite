@@ -18,6 +18,12 @@ from active_knowledge_server.connectors.source_docs import (
 	SourceDocsManifest,
 	SourceDocsWarning,
 )
+from active_knowledge_server.indexing.progress import (
+	IndexProgressCallback,
+	IndexProgressEvent,
+	noop_progress_callback,
+	utc_timestamp,
+)
 from active_knowledge_server.indexing.embeddings import (
 	EMBEDDING_PREPARATION_SCHEMA_VERSION,
 	EmbeddingInput,
@@ -198,9 +204,11 @@ class DocumentIndexer:
 		*,
 		snapshot_id: str = CURRENT_SNAPSHOT_ID,
 		source_docs_manifest: SourceDocsManifest | None = None,
+		progress_callback: IndexProgressCallback | None = None,
 	) -> IndexedDocuments:
 		"""Collect document records and prepared vectors without persisting them."""
 
+		callback = progress_callback or noop_progress_callback
 		manifest = source_docs_manifest or self._connector.scan()
 		warnings: list[DocumentIndexingWarning] = [
 			_warning_from_source_docs_warning(item) for item in manifest.warnings
@@ -211,8 +219,10 @@ class DocumentIndexer:
 		entity_records: list[EntityRecord] = []
 		evidence_records: list[EvidenceRecord] = []
 		embedding_inputs: list[EmbeddingInput] = []
+		stage_total = len(manifest.files)
+		started_at = utc_timestamp()
 
-		for entry in manifest.files:
+		for index, entry in enumerate(manifest.files, start=1):
 			absolute_path = Path(manifest.source_docs_root) / entry.relative_path
 			storage_relative_path = _storage_relative_path(manifest, entry)
 			if not self._format_enabled(entry.format):
@@ -224,100 +234,113 @@ class DocumentIndexer:
 						details={"format": entry.format},
 					)
 				)
-				continue
-
-			parsed = self._parse_document(absolute_path, entry)
-			warnings.extend(
-				_warning_from_parse_warning(storage_relative_path, item) for item in parsed.warnings
-			)
-
-			doc_metadata = _build_doc_metadata(absolute_path, entry, parsed)
-			if doc_metadata["doc_type"] == "api" and doc_metadata["version"] is None:
-				warnings.append(
-					DocumentIndexingWarning(
-						code="docs.version_missing",
-						message="API document is missing front matter version metadata.",
-						relative_path=storage_relative_path,
-						details={
-							"doc_type": doc_metadata["doc_type"],
-							"freshness_ts": doc_metadata["freshness_ts"],
-						},
-					)
+			else:
+				parsed = self._parse_document(absolute_path, entry)
+				warnings.extend(
+					_warning_from_parse_warning(storage_relative_path, item)
+					for item in parsed.warnings
 				)
 
-			source_id = _source_id_for_category(entry.category)
-			source_scope = entry.category
-			file_id = _stable_id("file", snapshot_id, source_id, storage_relative_path)
-			file_record = FileRecord(
-				file_id=file_id,
-				snapshot_id=snapshot_id,
-				source_id=source_id,
-				relative_path=storage_relative_path,
-				content_hash=entry.content_hash or _hash_text(absolute_path.read_text(encoding="utf-8")),
-				source_scope=source_scope,
-				profile_id=ALL_SCOPE,
-				language=parsed.format,
-				metadata=doc_metadata,
-			)
-			file_records.append(file_record)
+				doc_metadata = _build_doc_metadata(absolute_path, entry, parsed)
+				if doc_metadata["doc_type"] == "api" and doc_metadata["version"] is None:
+					warnings.append(
+						DocumentIndexingWarning(
+							code="docs.version_missing",
+							message="API document is missing front matter version metadata.",
+							relative_path=storage_relative_path,
+							details={
+								"doc_type": doc_metadata["doc_type"],
+								"freshness_ts": doc_metadata["freshness_ts"],
+							},
+						)
+					)
 
-			base_chunk_records = tuple(
-				self._build_parsed_chunk_record(
+				source_id = _source_id_for_category(entry.category)
+				source_scope = entry.category
+				file_id = _stable_id("file", snapshot_id, source_id, storage_relative_path)
+				file_record = FileRecord(
+					file_id=file_id,
+					snapshot_id=snapshot_id,
+					source_id=source_id,
+					relative_path=storage_relative_path,
+					content_hash=entry.content_hash
+					or _hash_text(absolute_path.read_text(encoding="utf-8")),
+					source_scope=source_scope,
+					profile_id=ALL_SCOPE,
+					language=parsed.format,
+					metadata=doc_metadata,
+				)
+				file_records.append(file_record)
+
+				base_chunk_records = tuple(
+					self._build_parsed_chunk_record(
+						snapshot_id=snapshot_id,
+						file_record=file_record,
+						parsed_chunk=parsed_chunk,
+						entry=entry,
+						parsed=parsed,
+						doc_metadata=doc_metadata,
+						storage_relative_path=storage_relative_path,
+					)
+					for parsed_chunk in parsed.chunks
+				)
+				chunk_records.extend(base_chunk_records)
+				chunk_by_ordinal = {record.ordinal: record for record in base_chunk_records}
+
+				document_entity, document_evidence = self._build_document_entity_and_evidence(
 					snapshot_id=snapshot_id,
 					file_record=file_record,
-					parsed_chunk=parsed_chunk,
 					entry=entry,
 					parsed=parsed,
 					doc_metadata=doc_metadata,
 					storage_relative_path=storage_relative_path,
+					chunk_by_ordinal=chunk_by_ordinal,
 				)
-				for parsed_chunk in parsed.chunks
-			)
-			chunk_records.extend(base_chunk_records)
-			chunk_by_ordinal = {record.ordinal: record for record in base_chunk_records}
+				if document_entity is not None:
+					entity_records.append(document_entity)
+				if document_evidence is not None:
+					evidence_records.append(document_evidence)
 
-			document_entity, document_evidence = self._build_document_entity_and_evidence(
-				snapshot_id=snapshot_id,
-				file_record=file_record,
-				entry=entry,
-				parsed=parsed,
-				doc_metadata=doc_metadata,
-				storage_relative_path=storage_relative_path,
-				chunk_by_ordinal=chunk_by_ordinal,
-			)
-			if document_entity is not None:
-				entity_records.append(document_entity)
-			if document_evidence is not None:
-				evidence_records.append(document_evidence)
+				synthetic_chunks, item_entities, item_evidences = self._build_item_records(
+					snapshot_id=snapshot_id,
+					file_record=file_record,
+					entry=entry,
+					parsed=parsed,
+					doc_metadata=doc_metadata,
+					storage_relative_path=storage_relative_path,
+					base_chunks=base_chunk_records,
+				)
+				chunk_records.extend(synthetic_chunks)
+				entity_records.extend(item_entities)
+				evidence_records.extend(item_evidences)
 
-			synthetic_chunks, item_entities, item_evidences = self._build_item_records(
-				snapshot_id=snapshot_id,
-				file_record=file_record,
-				entry=entry,
-				parsed=parsed,
-				doc_metadata=doc_metadata,
-				storage_relative_path=storage_relative_path,
-				base_chunks=base_chunk_records,
-			)
-			chunk_records.extend(synthetic_chunks)
-			entity_records.extend(item_entities)
-			evidence_records.extend(item_evidences)
-
-			for chunk_record in (*base_chunk_records, *synthetic_chunks):
-				embedding_inputs.append(
-					EmbeddingInput(
-						object_id=chunk_record.chunk_id,
-						object_type="chunk",
-						source_path=storage_relative_path,
-						content=chunk_record.text,
-						metadata={
-							"title": doc_metadata["title"],
-							"doc_type": doc_metadata["doc_type"],
-							"domain": doc_metadata["domain"],
-							"source_scope": source_scope,
-						},
+				for chunk_record in (*base_chunk_records, *synthetic_chunks):
+					embedding_inputs.append(
+						EmbeddingInput(
+							object_id=chunk_record.chunk_id,
+							object_type="chunk",
+							source_path=storage_relative_path,
+							content=chunk_record.text,
+							metadata={
+								"title": doc_metadata["title"],
+								"doc_type": doc_metadata["doc_type"],
+								"domain": doc_metadata["domain"],
+								"source_scope": source_scope,
+							},
+						)
 					)
+			callback(
+				IndexProgressEvent(
+					phase="doc_collect",
+					stage_total=stage_total,
+					stage_done=index,
+					current_path=storage_relative_path,
+					message="Collecting source documents",
+					warnings_count=len(warnings),
+					started_at=started_at,
+					updated_at=utc_timestamp(),
 				)
+			)
 
 		embedding_preparation = (
 			prepare_embedding_inputs(embedding_inputs, secret_scanner=self._secret_scanner)
@@ -356,10 +379,15 @@ class DocumentIndexer:
 		vector_writer: VectorStoreWriter | None = None,
 		snapshot_id: str = CURRENT_SNAPSHOT_ID,
 		source_docs_manifest: SourceDocsManifest | None = None,
+		progress_callback: IndexProgressCallback | None = None,
 	) -> IndexedDocuments:
 		"""Collect document records and persist them through storage writers."""
 
-		indexed = self.collect(snapshot_id=snapshot_id, source_docs_manifest=source_docs_manifest)
+		indexed = self.collect(
+			snapshot_id=snapshot_id,
+			source_docs_manifest=source_docs_manifest,
+			progress_callback=progress_callback,
+		)
 		for record in indexed.source_records:
 			writer.upsert_source(record)
 		for record in indexed.file_records:
