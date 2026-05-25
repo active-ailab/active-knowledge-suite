@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
@@ -31,9 +32,7 @@ def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> Active
             "default_profile": "auto",
         },
         "storage": {
-            "baseline": {
-                "manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")
-            },
+            "baseline": {"manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")},
             "metadata": {
                 "path": str(tmp_path / ".active-kb" / "baseline" / "db" / "metadata.db"),
                 "mode": "readwrite",
@@ -166,7 +165,11 @@ Heart tile shows bpm, status, and warning indicators on the watch face.
     }
     assert any(record.chunk_type == "doc.api_item" for record in indexed.chunk_records)
     assert any(record.chunk_type == "doc.widget_item" for record in indexed.chunk_records)
-    assert {record.entity_type for record in indexed.entity_records} >= {"Document", "API", "Widget"}
+    assert {record.entity_type for record in indexed.entity_records} >= {
+        "Document",
+        "API",
+        "Widget",
+    }
     assert {record.name for record in indexed.entity_records if record.entity_type == "API"} == {
         "sensor_open",
         "sensor_close",
@@ -176,7 +179,8 @@ Heart tile shows bpm, status, and warning indicators on the watch face.
     }
     assert all(record.object_type == "entity" for record in indexed.evidence_records)
     assert any(
-        record.citation_label is not None and "knowledge-sources/api/sensor.md" in record.citation_label
+        record.citation_label is not None
+        and "knowledge-sources/api/sensor.md" in record.citation_label
         for record in indexed.evidence_records
     )
 
@@ -209,10 +213,9 @@ Heart tile shows bpm, status, and warning indicators on the watch face.
     stored_vectors = read_collection(delta_vectors)
     assert len(stored_vectors) == len(indexed.vector_writes)
     chunk_ids = {record.chunk_id for record in indexed.vector_refs}
-    assert {
-        record.chunk_id
-        for record in indexed.vector_refs
-    } <= {record.chunk_id for record in indexed.chunk_records}
+    assert {record.chunk_id for record in indexed.vector_refs} <= {
+        record.chunk_id for record in indexed.chunk_records
+    }
 
     vector_result = vector_adapter.reader().search(
         VectorQuery(
@@ -253,6 +256,69 @@ Open the sensor register.
     assert indexed.chunk_records
 
 
+def test_doc_indexer_parallel_collect_matches_serial_output(tmp_path: Path) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"workers": 1}},
+    )
+    parallel_config = config.model_copy(
+        update={"indexing": config.indexing.model_copy(update={"workers": 4})}
+    )
+    docs_root = Path(config.runtime.source_docs_root)
+    (docs_root / "api").mkdir()
+    (docs_root / "widgets").mkdir()
+    (docs_root / "api" / "sensor.md").write_text(
+        """---
+title: Sensor Register API
+authority_level: official
+version: 1.2.0
+module: sensor
+code_symbols:
+  - sensor_open
+---
+# Sensor Register API
+
+## sensor_open
+Open the sensor register.
+""",
+        encoding="utf-8",
+    )
+    (docs_root / "widgets" / "heart_tile.md").write_text(
+        """---
+title: Heart Tile Widget
+authority_level: official
+widget: heart_tile
+---
+# Heart Tile Widget
+
+## Properties
+Heart tile shows bpm.
+""",
+        encoding="utf-8",
+    )
+
+    serial = DocumentIndexer.from_config(config, cwd=tmp_path).collect(
+        snapshot_id=CURRENT_SNAPSHOT_ID
+    )
+    parallel = DocumentIndexer.from_config(parallel_config, cwd=tmp_path).collect(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source_docs_manifest=serial.source_manifest,
+    )
+
+    assert _record_signature(serial.file_records) == _record_signature(parallel.file_records)
+    assert _record_signature(serial.chunk_records) == _record_signature(parallel.chunk_records)
+    assert _record_signature(serial.entity_records) == _record_signature(parallel.entity_records)
+    assert _record_signature(serial.evidence_records) == _record_signature(
+        parallel.evidence_records
+    )
+    assert _record_signature(serial.vector_refs) == _record_signature(parallel.vector_refs)
+    assert [write.embedding for write in serial.vector_writes] == [
+        write.embedding for write in parallel.vector_writes
+    ]
+    assert serial.metadata["collect_workers"]["workers"] == 1
+    assert parallel.metadata["collect_workers"]["workers"] == 2
+
+
 def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
     merged = dict(base)
     for key, value in overrides.items():
@@ -263,3 +329,9 @@ def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
             continue
         merged[key] = value
     return merged
+
+
+def _record_signature(records: tuple[object, ...]) -> tuple[str, ...]:
+    return tuple(
+        sorted(json.dumps(asdict(record), ensure_ascii=True, sort_keys=True) for record in records)
+    )

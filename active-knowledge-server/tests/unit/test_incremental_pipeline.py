@@ -4,6 +4,7 @@ import json
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
@@ -33,6 +34,28 @@ class BrokenDocumentIndexer:
         raise RuntimeError(f"synthetic doc failure for {snapshot_id}")
 
 
+class SpyCodeIndexer:
+    def __init__(self, inner: CodeIndexer) -> None:
+        self.inner = inner
+        self.include_paths_calls: list[tuple[str, ...] | None] = []
+
+    def collect(
+        self,
+        *,
+        snapshot_id: str,
+        workspace_inventory: Any,
+        include_paths: tuple[str, ...] | None = None,
+        progress_callback: Any | None = None,
+    ) -> IndexedCode:
+        self.include_paths_calls.append(include_paths)
+        return self.inner.collect(
+            snapshot_id=snapshot_id,
+            workspace_inventory=workspace_inventory,
+            include_paths=include_paths,
+            progress_callback=progress_callback,
+        )
+
+
 def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
     workspace = tmp_path / "workspace"
     docs = tmp_path / "knowledge-sources"
@@ -60,9 +83,7 @@ def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> Active
             }
         },
         "storage": {
-            "baseline": {
-                "manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")
-            },
+            "baseline": {"manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")},
             "metadata": {
                 "path": str(tmp_path / ".active-kb" / "baseline" / "db" / "metadata.db"),
                 "mode": "readwrite",
@@ -301,8 +322,7 @@ int health_bootstrap(void)
 
     with sqlite3.connect(overlay_path) as connection:
         overlay_files = {
-            row[0]
-            for row in connection.execute("SELECT relative_path FROM file").fetchall()
+            row[0] for row in connection.execute("SELECT relative_path FROM file").fetchall()
         }
     assert "knowledge-sources/api/sensor.md" not in overlay_files
 
@@ -444,9 +464,7 @@ def test_incremental_pipeline_rebuilds_doc_vectors_on_embedding_model_change(
 
     stored_vectors = read_vector_collection(delta_vectors)
     assert stored_vectors
-    assert {
-        row["embedding_model_version"] for row in stored_vectors
-    } == {"text-embedding-local-v2"}
+    assert {row["embedding_model_version"] for row in stored_vectors} == {"text-embedding-local-v2"}
 
 
 def test_incremental_pipeline_returns_partial_ready_when_doc_increment_fails(
@@ -511,9 +529,7 @@ This change should trip the synthetic failure path.
     result = failing_pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
 
     assert result.result_status == "partial_ready"
-    assert any(
-        warning.code == "index.doc_incremental_failed" for warning in result.warnings
-    )
+    assert any(warning.code == "index.doc_incremental_failed" for warning in result.warnings)
     assert failing_pipeline.load_state() == previous_state
 
 
@@ -557,6 +573,49 @@ int health_progress_probe(void)
     assert [event.global_done for event in events if event.global_done is not None] == sorted(
         event.global_done for event in events if event.global_done is not None
     )
+
+
+def test_incremental_pipeline_collects_only_changed_code_bundle_inputs(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path, overrides={"indexing": {"workers": 2}})
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    previous_state = pipeline.load_state()
+    assert previous_state is not None
+
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+int health_incremental_probe(void)
+{
+    return 42;
+}
+""",
+        encoding="utf-8",
+    )
+    spy = SpyCodeIndexer(CodeIndexer.from_config(config, cwd=tmp_path))
+    pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        code_indexer=spy,
+    )
+
+    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+
+    assert result.result_status == "ready"
+    assert spy.include_paths_calls
+    include_paths = spy.include_paths_calls[-1]
+    assert include_paths is not None
+    assert "components/health/main.c" in include_paths
+    assert "components/health/module.mk" in include_paths
+    assert "components/health/bt.c" not in include_paths
+    assert len(include_paths) < len(previous_state.code_files)
+    assert result.metadata["code_collect_workers"]["workers"] == 2
 
 
 def write_workspace_fixture(workspace_root: Path) -> None:

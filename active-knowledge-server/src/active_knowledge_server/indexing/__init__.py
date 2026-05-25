@@ -14,6 +14,12 @@ from active_knowledge_server.indexing.doc_indexer import (
     IndexedDocuments,
     VectorWrite,
 )
+from active_knowledge_server.indexing.parallel import (
+    ParallelMapItemResult,
+    ResolvedIndexingWorkers,
+    parallel_map_ordered,
+    resolve_indexing_workers,
+)
 from active_knowledge_server.indexing.pipeline import (
     INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION,
     INCREMENTAL_INDEX_STATE_SCHEMA_VERSION,
@@ -22,14 +28,6 @@ from active_knowledge_server.indexing.pipeline import (
     IncrementalIndexResult,
     IncrementalIndexState,
     IncrementalIndexWarning,
-)
-from active_knowledge_server.indexing.progress import (
-    INDEX_PROGRESS_PHASES,
-    IndexProgressCallback,
-    IndexProgressEvent,
-    IndexProgressPhase,
-    noop_progress_callback,
-    utc_timestamp,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -40,6 +38,14 @@ from active_knowledge_server.indexing.profile import (
     ProfileResolution,
     compute_profile_manifest_hash,
     compute_profile_record_id,
+)
+from active_knowledge_server.indexing.progress import (
+    INDEX_PROGRESS_PHASES,
+    IndexProgressCallback,
+    IndexProgressEvent,
+    IndexProgressPhase,
+    noop_progress_callback,
+    utc_timestamp,
 )
 from active_knowledge_server.indexing.relation_extractor import (
     PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
@@ -109,6 +115,8 @@ __all__ = [
     "ProfileResolution",
     "SnapshotCollector",
     "VectorWrite",
+    "ParallelMapItemResult",
+    "ResolvedIndexingWorkers",
     "WorkspaceMapArtifact",
     "WorkspaceMapBuilder",
     "WorkspaceMapWriteResult",
@@ -126,6 +134,8 @@ __all__ = [
     "plan_profile_conditioned_relation_rebuild",
     "profile_config_hash",
     "profile_macro_assignments",
+    "parallel_map_ordered",
+    "resolve_indexing_workers",
     "root_git_head",
     "noop_progress_callback",
     "summarize_entity_profile_states",

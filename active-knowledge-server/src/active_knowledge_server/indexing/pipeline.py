@@ -27,16 +27,16 @@ from active_knowledge_server.indexing.doc_indexer import (
     DocumentIndexer,
     IndexedDocuments,
 )
+from active_knowledge_server.indexing.profile import (
+    PROFILE_COLLECTOR_SCHEMA_VERSION,
+    CollectedProfiles,
+    ProfileCollector,
+)
 from active_knowledge_server.indexing.progress import (
     IndexProgressCallback,
     IndexProgressEvent,
     noop_progress_callback,
     utc_timestamp,
-)
-from active_knowledge_server.indexing.profile import (
-    PROFILE_COLLECTOR_SCHEMA_VERSION,
-    CollectedProfiles,
-    ProfileCollector,
 )
 from active_knowledge_server.indexing.relation_extractor import (
     PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
@@ -208,6 +208,7 @@ class IncrementalIndexResult:
     result_status: Literal["ready", "partial_ready"]
     plan: IncrementalIndexPlan
     warnings: tuple[IncrementalIndexWarning, ...] = ()
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable execution result."""
@@ -218,6 +219,7 @@ class IncrementalIndexResult:
             "result_status": self.result_status,
             "plan": self.plan.to_dict(),
             "warnings": [warning.to_dict() for warning in self.warnings],
+            "metadata": dict(self.metadata),
         }
 
 
@@ -345,8 +347,7 @@ class IncrementalIndexPipeline:
             workspace_inventory_hash=workspace_inventory.inventory_hash,
             source_docs_manifest_hash=source_docs_manifest.manifest_hash,
             code_files={
-                entry.relative_path: entry.content_hash or ""
-                for entry in workspace_inventory.files
+                entry.relative_path: entry.content_hash or "" for entry in workspace_inventory.files
             },
             doc_files={
                 entry.relative_path: entry.content_hash or ""
@@ -382,8 +383,7 @@ class IncrementalIndexPipeline:
         )
         profile_schema_changed = (
             previous is None
-            or previous.profile_collector_schema_version
-            != current.profile_collector_schema_version
+            or previous.profile_collector_schema_version != current.profile_collector_schema_version
             or previous.profile_conditioned_relation_schema_version
             != current.profile_conditioned_relation_schema_version
         )
@@ -411,8 +411,7 @@ class IncrementalIndexPipeline:
                 IncrementalIndexWarning(
                     code="index.code_schema_changed",
                     message=(
-                        "Code parser/extractor version changed; all code files "
-                        "will be rebuilt."
+                        "Code parser/extractor version changed; all code files will be rebuilt."
                     ),
                     level="caution",
                     details={
@@ -502,6 +501,7 @@ class IncrementalIndexPipeline:
         callback = progress_callback or noop_progress_callback
         started_at = utc_timestamp()
         doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
+        code_paths_to_collect = _incremental_code_paths_to_collect(plan)
         progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)
         global_total = progress_totals["global_total"]
         global_done = 0
@@ -522,7 +522,9 @@ class IncrementalIndexPipeline:
                     stage_total=stage_total,
                     stage_done=stage_done,
                     global_total=global_total,
-                    global_done=global_done if explicit_global_done is None else explicit_global_done,
+                    global_done=global_done
+                    if explicit_global_done is None
+                    else explicit_global_done,
                     current_path=current_path,
                     message=message,
                     warnings_count=warnings_count,
@@ -545,6 +547,7 @@ class IncrementalIndexPipeline:
 
         warnings = list(plan.warnings)
         failed = False
+        result_metadata: dict[str, object] = {}
 
         code_indexed: IndexedCode | None = None
         if source in {"all", "code"} and (
@@ -567,8 +570,34 @@ class IncrementalIndexPipeline:
                 code_indexed = self._code_indexer.collect(
                     snapshot_id=snapshot_id,
                     workspace_inventory=plan.workspace_inventory,
+                    include_paths=None if plan.reindex_all_code else code_paths_to_collect,
                     progress_callback=handle_code_collect,
                 )
+                result_metadata["code_collect_workers"] = code_indexed.metadata.get(
+                    "collect_workers",
+                    {},
+                )
+                if any(
+                    warning.code == "code_indexer.collect_failed"
+                    for warning in code_indexed.warnings
+                ):
+                    failed = True
+                    warnings.append(
+                        IncrementalIndexWarning(
+                            code="index.code_collect_partial",
+                            message=(
+                                "One or more code files failed during collect; successful "
+                                "files were applied and the previous incremental state was kept."
+                            ),
+                            details={
+                                "paths": [
+                                    warning.relative_path
+                                    for warning in code_indexed.warnings
+                                    if warning.code == "code_indexer.collect_failed"
+                                ],
+                            },
+                        )
+                    )
                 global_done += progress_totals["code_collect"]
                 new_code_bundles = _code_bundles_by_path(code_indexed)
                 code_apply_done = 0
@@ -616,8 +645,7 @@ class IncrementalIndexPipeline:
                     IncrementalIndexWarning(
                         code="index.code_incremental_failed",
                         message=(
-                            "Code incremental indexing failed; keeping previous "
-                            "live code state."
+                            "Code incremental indexing failed; keeping previous live code state."
                         ),
                         details={"error": str(exc)},
                     )
@@ -666,77 +694,127 @@ class IncrementalIndexPipeline:
                         message="Applying document changes",
                     )
 
-            doc_collect_done = 0
-            for relative_path in doc_paths_to_collect:
+            indexed_docs: IndexedDocuments | None = None
+            if doc_paths_to_collect:
                 try:
-                    doc_collect_done += 1
-                    global_done += 1
-                    emit(
-                        phase="doc_collect",
-                        stage_total=progress_totals["doc_collect"],
-                        stage_done=doc_collect_done,
-                        current_path=relative_path,
-                        message="Collecting source documents",
-                    )
-                    storage_relative_path = _doc_storage_relative_path(
-                        plan.source_docs_manifest,
-                        relative_path,
-                    )
+                    doc_collect_base = global_done
+
+                    def handle_doc_collect(event: IndexProgressEvent) -> None:
+                        callback(
+                            replace(
+                                event,
+                                global_total=global_total,
+                                global_done=doc_collect_base + (event.stage_done or 0),
+                                started_at=started_at,
+                                updated_at=utc_timestamp(),
+                            )
+                        )
+
                     manifest = _filter_source_docs_manifest(
                         plan.source_docs_manifest,
-                        include_paths=(relative_path,),
+                        include_paths=doc_paths_to_collect,
                     )
-                    indexed = self._doc_indexer.collect(
+                    indexed_docs = self._doc_indexer.collect(
                         snapshot_id=snapshot_id,
                         source_docs_manifest=manifest,
+                        progress_callback=handle_doc_collect,
                     )
-                    new_bundle = _doc_bundle_from_indexed(indexed, storage_relative_path)
-                    if new_bundle is None:
-                        continue
-                    metadata_changed = (
-                        plan.reindex_all_docs or relative_path in plan.changed_doc_paths
+                    result_metadata["doc_collect_workers"] = indexed_docs.metadata.get(
+                        "collect_workers",
+                        {},
                     )
-                    if metadata_changed:
-                        self._apply_doc_bundle(
-                            reader,
-                            writer,
-                            relative_path=storage_relative_path,
-                            new_bundle=new_bundle,
-                            snapshot_id=snapshot_id,
+                    if any(
+                        warning.code == "docs.collect_failed" for warning in indexed_docs.warnings
+                    ):
+                        failed = True
+                        warnings.append(
+                            IncrementalIndexWarning(
+                                code="index.doc_collect_partial",
+                                message=(
+                                    "One or more source documents failed during collect; "
+                                    "successful documents were applied and the previous "
+                                    "incremental state was kept."
+                                ),
+                                details={
+                                    "paths": [
+                                        warning.relative_path
+                                        for warning in indexed_docs.warnings
+                                        if warning.code == "docs.collect_failed"
+                                    ],
+                                },
+                            )
                         )
-                        doc_apply_done += 1
-                        global_done += 1
-                        emit(
-                            phase="doc_apply",
-                            stage_total=progress_totals["doc_apply"],
-                            stage_done=doc_apply_done,
-                            current_path=storage_relative_path,
-                            message="Applying document changes",
-                        )
-                    if plan.rebuild_vectors or metadata_changed:
-                        self._upsert_doc_vectors(
-                            vector_writer,
-                            indexed,
-                            relative_path=storage_relative_path,
-                        )
-                        vector_apply_done += 1
-                        global_done += 1
-                        emit(
-                            phase="vectors_apply",
-                            stage_total=progress_totals["vectors_apply"],
-                            stage_done=vector_apply_done,
-                            current_path=storage_relative_path,
-                            message="Applying document vectors",
-                        )
+                    global_done += progress_totals["doc_collect"]
                 except Exception as exc:  # noqa: BLE001
                     failed = True
                     warnings.append(
                         IncrementalIndexWarning(
                             code="index.doc_incremental_failed",
-                            message="A source document failed during incremental indexing.",
-                            details={"path": relative_path, "error": str(exc)},
+                            message="Source document collect failed during incremental indexing.",
+                            details={"error": str(exc)},
                         )
                     )
+
+            if indexed_docs is not None:
+                indexed_by_path = {
+                    record.relative_path: _doc_bundle_from_indexed(
+                        indexed_docs, record.relative_path
+                    )
+                    for record in indexed_docs.file_records
+                }
+                for relative_path in doc_paths_to_collect:
+                    storage_relative_path = _doc_storage_relative_path(
+                        plan.source_docs_manifest,
+                        relative_path,
+                    )
+                    try:
+                        new_bundle = indexed_by_path.get(storage_relative_path)
+                        if new_bundle is None:
+                            continue
+                        metadata_changed = (
+                            plan.reindex_all_docs or relative_path in plan.changed_doc_paths
+                        )
+                        if metadata_changed:
+                            self._apply_doc_bundle(
+                                reader,
+                                writer,
+                                relative_path=storage_relative_path,
+                                new_bundle=new_bundle,
+                                snapshot_id=snapshot_id,
+                            )
+                            doc_apply_done += 1
+                            global_done += 1
+                            emit(
+                                phase="doc_apply",
+                                stage_total=progress_totals["doc_apply"],
+                                stage_done=doc_apply_done,
+                                current_path=storage_relative_path,
+                                message="Applying document changes",
+                            )
+                        if plan.rebuild_vectors or metadata_changed:
+                            self._upsert_doc_vectors(
+                                vector_writer,
+                                indexed_docs,
+                                relative_path=storage_relative_path,
+                            )
+                            vector_apply_done += 1
+                            global_done += 1
+                            emit(
+                                phase="vectors_apply",
+                                stage_total=progress_totals["vectors_apply"],
+                                stage_done=vector_apply_done,
+                                current_path=storage_relative_path,
+                                message="Applying document vectors",
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        failed = True
+                        warnings.append(
+                            IncrementalIndexWarning(
+                                code="index.doc_incremental_failed",
+                                message="A source document failed during incremental indexing.",
+                                details={"path": relative_path, "error": str(exc)},
+                            )
+                        )
             writer.flush()
             vector_writer.flush()
 
@@ -818,6 +896,7 @@ class IncrementalIndexPipeline:
             result_status="partial_ready" if failed else "ready",
             plan=plan,
             warnings=tuple(warnings),
+            metadata=result_metadata,
         )
 
     def _apply_code_bundle(
@@ -1130,11 +1209,7 @@ def _diff_maps(
     previous: Mapping[str, str],
     current: Mapping[str, str],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    changed = tuple(
-        sorted(
-            path for path, value in current.items() if previous.get(path) != value
-        )
-    )
+    changed = tuple(sorted(path for path, value in current.items() if previous.get(path) != value))
     deleted = tuple(sorted(path for path in previous if path not in current))
     return changed, deleted
 
@@ -1144,6 +1219,20 @@ def _incremental_doc_paths_to_collect(plan: IncrementalIndexPlan) -> tuple[str, 
     if plan.reindex_all_docs or (plan.rebuild_vectors and not doc_paths_to_collect):
         doc_paths_to_collect.update(plan.current_state.doc_files)
     return tuple(sorted(doc_paths_to_collect))
+
+
+def _incremental_code_paths_to_collect(plan: IncrementalIndexPlan) -> tuple[str, ...]:
+    if plan.reindex_all_code:
+        return tuple(sorted(plan.current_state.code_files))
+    if not plan.changed_code_paths:
+        return ()
+    paths = set(plan.changed_code_paths)
+    paths.update(
+        path
+        for path in plan.current_state.code_files
+        if Path(path).name == "Makefile" or Path(path).suffix == ".mk"
+    )
+    return tuple(sorted(paths))
 
 
 def _incremental_progress_totals(
@@ -1156,7 +1245,13 @@ def _incremental_progress_totals(
     if source in {"all", "code"} and (
         plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
     ):
-        code_collect = count_indexable_workspace_files(plan.workspace_inventory)
+        code_include_paths = (
+            None if plan.reindex_all_code else _incremental_code_paths_to_collect(plan)
+        )
+        code_collect = count_indexable_workspace_files(
+            plan.workspace_inventory,
+            include_paths=code_include_paths,
+        )
         code_apply = len(plan.changed_code_paths) + len(plan.deleted_code_paths)
 
     doc_collect = 0

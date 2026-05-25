@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from pathlib import Path
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
@@ -28,9 +30,7 @@ def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> Active
             "workspace_root": str(workspace),
         },
         "storage": {
-            "baseline": {
-                "manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")
-            },
+            "baseline": {"manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")},
             "metadata": {
                 "path": str(tmp_path / ".active-kb" / "baseline" / "db" / "metadata.db"),
                 "mode": "readwrite",
@@ -226,10 +226,67 @@ int health_bt_init(void)
         for record in indexed.relation_records
     )
     assert any(
-        record.relation_type == "guarded_by_macro"
-        and record.dst_entity_id == guarded_macro_id
+        record.relation_type == "guarded_by_macro" and record.dst_entity_id == guarded_macro_id
         for record in indexed.relation_records
     )
+
+
+def test_code_indexer_parallel_collect_matches_serial_output(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path, overrides={"indexing": {"workers": 1}})
+    parallel_config = config.model_copy(
+        update={"indexing": config.indexing.model_copy(update={"workers": 4})}
+    )
+    workspace_root = Path(config.project.workspace_root)
+    component_dir = workspace_root / "components" / "health"
+    component_dir.mkdir(parents=True)
+    (component_dir / "module.mk").write_text(
+        """NAME = health
+MODULE = health.logic
+HEALTH_SOURCES = main.c health.h
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+#define HEALTH_DEFAULT 1
+
+int health_init(void)
+{
+    return HEALTH_DEFAULT;
+}
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_init(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+
+    serial = CodeIndexer.from_config(config, cwd=tmp_path).collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+    parallel = CodeIndexer.from_config(parallel_config, cwd=tmp_path).collect(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        workspace_inventory=serial.workspace_inventory,
+    )
+
+    assert _record_signature(serial.file_records) == _record_signature(parallel.file_records)
+    assert _record_signature(serial.chunk_records) == _record_signature(parallel.chunk_records)
+    assert _record_signature(serial.entity_records) == _record_signature(parallel.entity_records)
+    assert _record_signature(serial.relation_records) == _record_signature(
+        parallel.relation_records
+    )
+    assert _record_signature(serial.evidence_records) == _record_signature(
+        parallel.evidence_records
+    )
+    assert serial.metadata["collect_workers"]["workers"] == 1
+    assert parallel.metadata["collect_workers"]["workers"] == 3
 
 
 def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
@@ -242,3 +299,9 @@ def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
             continue
         merged[key] = value
     return merged
+
+
+def _record_signature(records: tuple[object, ...]) -> tuple[str, ...]:
+    return tuple(
+        sorted(json.dumps(asdict(record), ensure_ascii=True, sort_keys=True) for record in records)
+    )
