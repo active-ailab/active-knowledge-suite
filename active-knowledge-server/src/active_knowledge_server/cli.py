@@ -25,8 +25,8 @@ from active_knowledge_server.config.loader import (
 from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import (
     WorkdirLayout,
-    inspect_baseline_manifest,
     initialize_workdir,
+    inspect_baseline_manifest,
     layout_from_config,
 )
 from active_knowledge_server.connectors.source_docs import SourceDocsConnector
@@ -39,6 +39,8 @@ from active_knowledge_server.eval.baseline import (
     load_eval_report_payload,
     save_baseline_snapshot,
 )
+from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
+from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.indexing import (
     CURRENT_SNAPSHOT_ID,
@@ -63,9 +65,9 @@ from active_knowledge_server.security.config import (
     validate_startup_security,
 )
 from active_knowledge_server.server import build_server_app, server_name
-from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage import StorageWriteRequest
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
+from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
     configured_sqlite_paths,
@@ -527,7 +529,9 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_save_parser.add_argument(
         "--performance-report",
         type=Path,
-        help="Existing performance report JSON. When omitted, the command runs the performance gate.",
+        help=(
+            "Existing performance report JSON. When omitted, the command runs the performance gate."
+        ),
     )
     baseline_save_parser.add_argument(
         "--stability-report",
@@ -537,7 +541,10 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_save_parser.add_argument(
         "--output",
         type=Path,
-        help="Optional explicit baseline snapshot path. Defaults to baseline artifacts/eval-baseline/<baseline-id>.json.",
+        help=(
+            "Optional explicit baseline snapshot path. "
+            "Defaults to baseline artifacts/eval-baseline/<baseline-id>.json."
+        ),
     )
     baseline_save_parser.add_argument(
         "--format",
@@ -555,22 +562,40 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_compare_parser.add_argument(
         "--baseline",
         type=Path,
-        help="Saved baseline snapshot path. Defaults to baseline artifacts/eval-baseline/latest.json.",
+        help=(
+            "Saved baseline snapshot path. "
+            "Defaults to baseline artifacts/eval-baseline/latest.json."
+        ),
     )
     baseline_compare_parser.add_argument(
         "--quality-report",
         type=Path,
-        help="Existing current quality report JSON. When omitted, the command runs the quality gate.",
+        help=(
+            "Existing current quality report JSON. When omitted, the command runs the quality gate."
+        ),
     )
     baseline_compare_parser.add_argument(
         "--performance-report",
         type=Path,
-        help="Existing current performance report JSON. When omitted, the command runs the performance gate.",
+        help=(
+            "Existing current performance report JSON. "
+            "When omitted, the command runs the performance gate."
+        ),
     )
     baseline_compare_parser.add_argument(
         "--stability-report",
         type=Path,
         help="Optional current stability report JSON to include in the regression report context.",
+    )
+    baseline_compare_parser.add_argument(
+        "--performance-exemption",
+        action="append",
+        default=[],
+        metavar="PROBE_ID=REASON",
+        help=(
+            "Explicitly exempt one P95 regression above 20%%. Repeatable; "
+            "the reason is written into the regression report."
+        ),
     )
     baseline_compare_parser.add_argument(
         "--report",
@@ -1012,9 +1037,7 @@ def handle_validate(args: argparse.Namespace) -> int:
     payload = {
         "schema_version": "active_kb_validate.v1",
         "command": "validate",
-        "status": "error"
-        if errors or str(storage_report["status"]) == "blocked"
-        else "ok",
+        "status": "error" if errors or str(storage_report["status"]) == "blocked" else "ok",
         "checks": checks,
         "storage_report": storage_report,
         "baseline_reuse": baseline_reuse,
@@ -1107,9 +1130,7 @@ def handle_eval_run(args: argparse.Namespace) -> int:
         print(f"Eval suite: {report.suite_id}")
         print(f"Gate: {report.gate_id}")
         print(f"Status: {report.status}")
-        print(
-            f"Cases: {report.metrics['passed_cases']}/{report.metrics['executed_cases']} passed"
-        )
+        print(f"Cases: {report.metrics['passed_cases']}/{report.metrics['executed_cases']} passed")
         for warning in report.warnings:
             print(f"Warning [{warning['code']}]: {warning['message']}")
     return 1 if report.status == "fail" else 0
@@ -1296,6 +1317,7 @@ def handle_eval_baseline_compare(args: argparse.Namespace) -> int:
         current_quality_report=current_quality_report,
         current_performance_report=current_performance_report,
         current_stability_report=current_stability_report,
+        performance_exemptions=parse_performance_exemptions(args.performance_exemption),
     )
     if args.report is not None:
         report_path = Path(args.report)
@@ -1378,6 +1400,27 @@ def _run_performance_gate_report(resolved: ResolvedConfig) -> EvalRunReport:
 
 def _baseline_snapshot_dir(resolved: ResolvedConfig) -> Path:
     return resolve_runtime_path(resolved.model.storage.artifacts_root, Path.cwd()) / "eval-baseline"
+
+
+def parse_performance_exemptions(values: Sequence[str]) -> dict[str, str]:
+    """Parse explicit P95 regression exemptions from CLI values."""
+
+    exemptions: dict[str, str] = {}
+    for value in values:
+        probe_id, separator, reason = value.partition("=")
+        probe_id = probe_id.strip()
+        reason = reason.strip()
+        if separator != "=" or not probe_id or not reason:
+            raise ConfigError(
+                "--performance-exemption must use PROBE_ID=REASON with a non-empty reason"
+            )
+        if probe_id not in PERFORMANCE_GATE_THRESHOLDS:
+            valid = ", ".join(sorted(PERFORMANCE_GATE_THRESHOLDS))
+            raise ConfigError(
+                f"unknown performance exemption probe_id '{probe_id}'. Valid probes: {valid}"
+            )
+        exemptions[probe_id] = reason
+    return exemptions
 
 
 def _default_baseline_id() -> str:
@@ -1513,7 +1556,9 @@ def run_full_index(
     cwd = Path.cwd()
     callback = progress_callback or noop_progress_callback
     started_at = utc_timestamp()
-    request = StorageWriteRequest(target=cast(Any, target), operation_mode=cast(Any, operation_mode))
+    request = StorageWriteRequest(
+        target=cast(Any, target), operation_mode=cast(Any, operation_mode)
+    )
 
     if target == "baseline":
         baseline_path = configured_sqlite_paths(model, cwd=cwd)["baseline_metadata"]
@@ -1522,7 +1567,9 @@ def run_full_index(
         migrate_local_sqlite_stores(model, cwd=cwd)
 
     metadata_adapter = SQLiteStorageAdapter.from_config(model, cwd=cwd)
-    vector_adapter = LanceDBVectorAdapter.from_config(model, cwd=cwd, metadata_adapter=metadata_adapter)
+    vector_adapter = LanceDBVectorAdapter.from_config(
+        model, cwd=cwd, metadata_adapter=metadata_adapter
+    )
     writer = metadata_adapter.writer(request)
     vector_writer = vector_adapter.writer(request)
     workspace_inventory = None
@@ -1533,9 +1580,7 @@ def run_full_index(
         source_docs_manifest = SourceDocsConnector.from_config(model, cwd=cwd).scan()
 
     code_collect_total = (
-        0
-        if workspace_inventory is None
-        else count_indexable_workspace_files(workspace_inventory)
+        0 if workspace_inventory is None else count_indexable_workspace_files(workspace_inventory)
     )
     doc_collect_total = 0 if source_docs_manifest is None else len(source_docs_manifest.files)
     vectors_apply_total = int(source_docs_manifest is not None)
@@ -1717,8 +1762,12 @@ def run_full_index(
         "code_file_count": len(code_records.file_records) if code_records is not None else 0,
         "doc_file_count": len(doc_records.file_records) if doc_records is not None else 0,
         "vector_write_count": len(doc_records.vector_writes) if doc_records is not None else 0,
-        "relation_count": len(relation_records.relation_records) if relation_records is not None else 0,
-        "code_indexer_schema_version": None if code_records is None else code_records.schema_version,
+        "relation_count": len(relation_records.relation_records)
+        if relation_records is not None
+        else 0,
+        "code_indexer_schema_version": None
+        if code_records is None
+        else code_records.schema_version,
         "doc_indexer_schema_version": None if doc_records is None else doc_records.schema_version,
         "profile_collector_schema_version": profiles.schema_version,
         "relation_schema_version": None
@@ -1744,7 +1793,9 @@ def rebuild_vectors(
 
     model = resolved.model
     cwd = Path.cwd()
-    request = StorageWriteRequest(target=cast(Any, target), operation_mode=cast(Any, operation_mode))
+    request = StorageWriteRequest(
+        target=cast(Any, target), operation_mode=cast(Any, operation_mode)
+    )
 
     if target == "baseline":
         baseline_path = configured_sqlite_paths(model, cwd=cwd)["baseline_metadata"]
@@ -1753,7 +1804,9 @@ def rebuild_vectors(
         migrate_local_sqlite_stores(model, cwd=cwd)
 
     metadata_adapter = SQLiteStorageAdapter.from_config(model, cwd=cwd)
-    vector_adapter = LanceDBVectorAdapter.from_config(model, cwd=cwd, metadata_adapter=metadata_adapter)
+    vector_adapter = LanceDBVectorAdapter.from_config(
+        model, cwd=cwd, metadata_adapter=metadata_adapter
+    )
     writer = metadata_adapter.writer(request)
     vector_writer = vector_adapter.writer(request)
 
@@ -1769,7 +1822,9 @@ def rebuild_vectors(
         "source": source,
         "vectors_rebuilt": len(indexed.vector_writes),
         "doc_files_scanned": len(indexed.file_records),
-        "embedding_model_version": DocumentIndexer.from_config(model, cwd=cwd).embedding_model_version,
+        "embedding_model_version": DocumentIndexer.from_config(
+            model, cwd=cwd
+        ).embedding_model_version,
     }
 
 
@@ -1840,7 +1895,9 @@ def collect_baseline_reuse_status(
     """Summarize baseline reuse readiness and related warnings."""
 
     runtime_layout = layout or workdir_layout(resolved)
-    manifest_status, manifest_warning = inspect_baseline_manifest(runtime_layout.baseline_manifest_path)
+    manifest_status, manifest_warning = inspect_baseline_manifest(
+        runtime_layout.baseline_manifest_path
+    )
     manifest_payload, manifest_payload_warning = read_baseline_manifest_payload(
         runtime_layout.baseline_manifest_path
     )
@@ -1914,7 +1971,9 @@ def baseline_reuse_storage_status(
     return status
 
 
-def read_baseline_manifest_payload(path: Path) -> tuple[dict[str, object], dict[str, object] | None]:
+def read_baseline_manifest_payload(
+    path: Path,
+) -> tuple[dict[str, object], dict[str, object] | None]:
     """Read a baseline manifest payload when it is available and valid JSON."""
 
     if not path.exists():
@@ -2007,7 +2066,9 @@ def collect_index_status(
         "job_status_counts": dict(sorted(Counter(job.status for job in recent_jobs_raw).items())),
     }
     warnings = tuple(
-        warning_from_storage_check(check) for check in storage_report.checks if check.severity != "info"
+        warning_from_storage_check(check)
+        for check in storage_report.checks
+        if check.severity != "info"
     )
     return payload, warnings
 
@@ -2023,7 +2084,12 @@ def infer_index_result_status(
     if recent_jobs:
         latest = recent_jobs[0]
         status = str(latest.status)
-        if status in RUNNING_JOB_STATUSES or status in {"pending", "ready", "failed", "partial_ready"}:
+        if status in RUNNING_JOB_STATUSES or status in {
+            "pending",
+            "ready",
+            "failed",
+            "partial_ready",
+        }:
             return status
     if storage_status == "blocked":
         return "blocked"

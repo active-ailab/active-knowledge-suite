@@ -1421,24 +1421,24 @@ TODO：
 
 ### E7-05 失败回归门槛
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`TEST`、`OPS`
 - 依赖：`E7-02` 至 `E7-04`
-- 输出：已新增 `active-kb eval-baseline save|compare`，支持保存发布基线、对比上一发布 quality/performance 指标回退，并补充 `tests/regression/test_migration_backup_recovery.py` 覆盖 migration 备份与恢复回归；后续每个新 bug 的最小复现 case 仍需随修复持续补充。
+- 输出：已新增 `active-kb eval-baseline save|compare`，支持保存发布基线、对比上一发布 quality/performance 指标回退；quality/security/schema/category regression 默认阻断，P95 latency 超过 20% 默认阻断，仅允许通过 `--performance-exemption PROBE_ID=REASON` 显式留痕豁免；已补充 `tests/regression/test_migration_backup_recovery.py` 覆盖 migration 备份与恢复回归；后续每个新 bug 的最小复现 case 仍需随修复持续补充。
 
 TODO：
 
-- [ ] 质量指标整体不得比上一 baseline 下降超过 2 个百分点。
-- [ ] 任一核心类别 Evidence Hit Rate 不得下降超过 5 个百分点。
-- [ ] P95 latency 不得比上一 baseline 恶化超过 20%，除非有明确豁免。
-- [ ] 安全、schema、blocked contract 必须 100% 通过，无豁免。
-- [ ] 每个线上/评审发现的 bug 必须新增 regression case 后再修复。
-- [ ] migration 失败类 bug 必须新增备份和恢复测试。
+- [x] 质量指标整体不得比上一 baseline 下降超过 2 个百分点。
+- [x] 任一核心类别 Evidence Hit Rate 不得下降超过 5 个百分点。
+- [x] P95 latency 不得比上一 baseline 恶化超过 20%，除非有明确豁免。
+- [x] 安全、schema、blocked contract 必须 100% 通过，无豁免。
+- [x] 每个线上/评审发现的 bug 必须新增 regression case 后再修复。
+- [x] migration 失败类 bug 必须新增备份和恢复测试。
 
 验收标准：
 
-- `eval-baseline` 可保存并对比上一发布基线。
+- [x] `eval-baseline` 可保存并对比上一发布基线。
 
 ### E7-06 可重复索引 gate
 

@@ -139,3 +139,26 @@ machine-readable gate report when `--report` is provided. The report includes
 per-probe P50/P95 latency, resident memory samples, blocker threshold
 pass/fail, sample counts, machine environment, and benchmark dataset scale so
 the same artifact can be reviewed locally or in CI.
+
+## Regression Baseline Gate
+
+`active-kb eval-baseline save` stores the release quality and performance
+reports, and `active-kb eval-baseline compare` blocks E7-05 regressions against
+that saved baseline. Quality drops above the configured allowance, category
+evidence regressions, security/schema contract failures, and unexempted P95
+latency regressions above 20% return a failing report.
+
+```bash
+uv run active-kb eval run --gate quality --report .active-kb/local/artifacts/eval/quality.json
+uv run active-kb perf run --gate performance --report .active-kb/local/artifacts/perf/performance.json
+uv run active-kb eval-baseline save \
+  --baseline-id release-20260526 \
+  --quality-report .active-kb/local/artifacts/eval/quality.json \
+  --performance-report .active-kb/local/artifacts/perf/performance.json
+uv run active-kb eval-baseline compare \
+  --quality-report .active-kb/local/artifacts/eval/quality.json \
+  --performance-report .active-kb/local/artifacts/perf/performance.json
+```
+
+If a release intentionally accepts a P95 regression, pass an explicit audited
+exemption such as `--performance-exemption kb_search="larger indexed corpus"`.

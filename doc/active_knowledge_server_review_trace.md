@@ -62,7 +62,7 @@
 | `E7-02` 质量阈值 gate | R-01、R-03、R-04、R-05 | Schema compliance、Evidence Hit Rate、Top-k Recall、Profile Correctness、Warning Quality、blocked/security contract 达标。 |
 | `E7-03` 性能阈值 gate | R-04 | init、server startup、核心查询工具、incremental index 的 P50/P95 可报告。 |
 | `E7-04` 稳定性阈值 gate | R-02、R-04、R-05 | 长时间运行、并发只读、索引中断恢复、migration 幂等、partial_ready 可用。 |
-| `E7-05` 失败回归门槛 | R-01、R-03、R-04 | 质量指标不得明显倒退；新增 bug 必须进入 regression case。 |
+| `E7-05` 失败回归门槛 | R-01、R-03、R-04 | 质量指标不得明显倒退；P95 latency 超 20% 默认阻断，显式豁免必须进入报告；新增 bug 必须进入 regression case。 |
 | `E7-06` 可重复索引 gate | R-02、R-03、R-04 | 同一 snapshot/profile 重复索引 stable ID 和 checksum 稳定。 |
 | `E7-07` Release checklist | R-01 至 R-05 | baseline manifest、版本、schema、gate 报告和本文追踪矩阵都随 release artifact 更新。 |
 

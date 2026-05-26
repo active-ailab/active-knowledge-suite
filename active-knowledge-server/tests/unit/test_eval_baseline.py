@@ -73,7 +73,7 @@ def test_compare_against_baseline_fails_when_quality_regresses_beyond_gate(tmp_p
     assert any(item["check"] == "category_evidence_regression" for item in report.failures)
 
 
-def test_compare_against_baseline_returns_partial_ready_for_perf_p95_regression(
+def test_compare_against_baseline_fails_for_unexempted_perf_p95_regression(
     tmp_path: Path,
 ) -> None:
     baseline = create_baseline_snapshot(
@@ -92,10 +92,36 @@ def test_compare_against_baseline_returns_partial_ready_for_perf_p95_regression(
         current_performance_report=current_performance,
     )
 
+    assert report.status == "fail"
+    assert report.warnings == ()
+    assert any(item["check"] == "performance_regression" for item in report.failures)
+
+
+def test_compare_against_baseline_returns_partial_ready_for_exempted_perf_p95_regression(
+    tmp_path: Path,
+) -> None:
+    baseline = create_baseline_snapshot(
+        baseline_id="release-20260522",
+        quality_report=_quality_report(),
+        performance_report=_performance_report(),
+    )
+    current_performance = _performance_report(
+        p95_overrides={"kb_search": 2.0},
+    )
+
+    report = compare_against_baseline(
+        baseline=baseline,
+        baseline_path=tmp_path / "latest.json",
+        current_quality_report=_quality_report(),
+        current_performance_report=current_performance,
+        performance_exemptions={"kb_search": "accepted for large workspace release"},
+    )
+
     assert report.status == "partial_ready"
     assert report.failures == ()
     assert report.warnings
-    assert report.warnings[0]["check"] == "performance_regression_warning"
+    assert report.warnings[0]["check"] == "performance_regression_exempted"
+    assert report.warnings[0]["exemption_reason"] == "accepted for large workspace release"
 
 
 def _quality_report(

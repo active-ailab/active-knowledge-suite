@@ -5,7 +5,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from active_knowledge_server.cli import main, resolve_index_output_mode
+from active_knowledge_server.cli import (
+    main,
+    parse_performance_exemptions,
+    resolve_index_output_mode,
+)
+from active_knowledge_server.config.loader import ConfigError
 from active_knowledge_server.eval.baseline import create_baseline_snapshot
 from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
 from active_knowledge_server.eval.runner import EvalRunReport
@@ -147,6 +152,27 @@ def test_eval_baseline_compare_subcommand_has_help() -> None:
 
     assert "usage: active-kb eval-baseline compare" in result.stdout
     assert "--baseline" in result.stdout
+    assert "--performance-exemption" in result.stdout
+
+
+def test_parse_performance_exemptions_requires_known_probe_and_reason() -> None:
+    assert parse_performance_exemptions(["kb_search=accepted for large workspace"]) == {
+        "kb_search": "accepted for large workspace"
+    }
+
+    try:
+        parse_performance_exemptions(["kb_search="])
+    except ConfigError as exc:
+        assert "PROBE_ID=REASON" in str(exc)
+    else:
+        raise AssertionError("empty performance exemption reason should fail")
+
+    try:
+        parse_performance_exemptions(["unknown=accepted"])
+    except ConfigError as exc:
+        assert "unknown performance exemption" in str(exc)
+    else:
+        raise AssertionError("unknown performance exemption probe should fail")
 
 
 def test_status_json_is_machine_readable(capsys) -> None:
@@ -849,7 +875,7 @@ def test_eval_baseline_save_json_persists_snapshot(tmp_path: Path, capsys) -> No
     assert Path(payload["latest"]).exists()
 
 
-def test_eval_baseline_compare_json_reports_partial_ready_for_perf_regression(
+def test_eval_baseline_compare_json_reports_partial_ready_for_exempted_perf_regression(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -889,6 +915,8 @@ def test_eval_baseline_compare_json_reports_partial_ready_for_perf_regression(
             str(current_quality_path),
             "--performance-report",
             str(current_performance_path),
+            "--performance-exemption",
+            "kb_search=accepted for larger workspace",
             "--format",
             "json",
         ]
@@ -900,7 +928,8 @@ def test_eval_baseline_compare_json_reports_partial_ready_for_perf_regression(
     assert exit_code == 0
     assert payload["command"] == "eval-baseline compare"
     assert payload["status"] == "partial_ready"
-    assert payload["warnings"][0]["check"] == "performance_regression_warning"
+    assert payload["warnings"][0]["check"] == "performance_regression_exempted"
+    assert payload["warnings"][0]["exemption_reason"] == "accepted for larger workspace"
 
 
 def test_eval_baseline_compare_json_fails_on_quality_regression(
@@ -927,7 +956,9 @@ def test_eval_baseline_compare_json_fails_on_quality_regression(
         json.dumps(_quality_report(evidence_hit_rate=0.87, schema_compliance=0.99).to_dict()),
         encoding="utf-8",
     )
-    current_performance_path.write_text(json.dumps(_performance_report().to_dict()), encoding="utf-8")
+    current_performance_path.write_text(
+        json.dumps(_performance_report().to_dict()), encoding="utf-8"
+    )
 
     exit_code = main(
         [
@@ -990,7 +1021,9 @@ def test_serve_without_json_runs_server(monkeypatch, tmp_path: Path) -> None:
         def run(self) -> None:
             called["run"] = True
 
-    monkeypatch.setattr("active_knowledge_server.cli.build_server_app", lambda resolved: DummyRuntime())
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.build_server_app", lambda resolved: DummyRuntime()
+    )
 
     exit_code = main(
         [
