@@ -132,6 +132,13 @@ emits JSONL events for tool calls and ops operations with query hashes, safe
 short previews, caller/profile/result metadata, warning codes, and redacted
 details. Rotation is controlled by `runtime.logging.rotation`.
 
+## Local Full Integration
+
+For one layered local full-function integration workflow covering live
+workspace validation, MCP handler smoke, synthetic eval/perf/stability gates,
+and baseline/release rehearsal, see
+[`../doc/active_knowledge_server_local_full_integration_test.md`](../doc/active_knowledge_server_local_full_integration_test.md).
+
 ## Performance Gate
 
 `active-kb perf run` executes the E7-03 synthetic benchmark suite and writes a
