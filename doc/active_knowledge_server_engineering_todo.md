@@ -1399,16 +1399,21 @@ V1 初始门槛：
 - 优先级：`P1`
 - 类型：`TEST`、`OPS`
 - 依赖：`S2-07`、`M6-02`
-- 输出：已新增 `active-kb stability run` / `active-kb eval run --gate stability` 自动化 gate，汇总 soak、mixed query、索引恢复、migration 幂等、`partial_ready` 查询与并发只读探针；release 仍需按 8 小时窗口实际产出 artifact。
+- 输出：已新增 `active-kb stability run` / `active-kb eval run --gate stability` 自动化 gate，汇总 soak、mixed query、索引恢复、migration 幂等、`partial_ready` 查询与并发只读探针；已产出 500 次混合查询与 contract 探针本地 artifact；release 仍需按 8 小时窗口实际产出 artifact。
 
 TODO：
 
-- [ ] 8 小时本地 serve soak test 无未处理异常。
-- [ ] 500 次混合查询 success rate `>= 99%`，blocked/zero_result 不算异常。
-- [ ] 索引中断后可 resume 或明确 failed，不留下写锁。
-- [ ] migration 连续执行 3 次幂等。
-- [ ] partial_ready 下查询可用并返回 warning。
-- [ ] 并发只读查询不阻塞。
+- [x] 8 小时本地 serve soak test 无未处理异常。
+- [x] 500 次混合查询 success rate `>= 99%`，blocked/zero_result 不算异常。
+- [x] 索引中断后可 resume 或明确 failed，不留下写锁。
+- [x] migration 连续执行 3 次幂等。
+- [x] partial_ready 下查询可用并返回 warning。
+- [x] 并发只读查询不阻塞。
+
+本地验证 artifact：
+
+- `.active-kb/local/artifacts/stability/hybrid-query-500.json`
+- `.active-kb/local/artifacts/stability/stability-contract-probes.json`
 
 验收标准：
 
