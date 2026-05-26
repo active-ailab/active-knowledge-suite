@@ -241,6 +241,26 @@ class StabilityGateCheck:
 		}
 
 
+@dataclass(frozen=True)
+class ReproducibilityGateCheck:
+	"""One blocker check for the E7-06 reproducible-index gate."""
+
+	check: str
+	passed: bool
+	first: object
+	second: object
+	blocking_level: str = "blocker"
+
+	def to_dict(self) -> dict[str, object]:
+		return {
+			"check": self.check,
+			"passed": self.passed,
+			"first": self.first,
+			"second": self.second,
+			"blocking_level": self.blocking_level,
+		}
+
+
 def build_category_coverage(suite: EvalCaseSuite) -> tuple[EvalCategoryCoverage, ...]:
 	"""Build category coverage against the Phase 7 minimums."""
 
@@ -288,7 +308,9 @@ def build_quality_gate_metrics(
 
 	schema_cases = [item.schema_compliant for item in observations]
 	warning_cases = [item.warning_quality_ok for item in observations]
-	profile_cases = [item.profile_correct for item in observations if item.profile_correct is not None]
+	profile_cases = [
+		item.profile_correct for item in observations if item.profile_correct is not None
+	]
 	evidence_cases = [item.evidence_hit for item in observations if item.evidence_hit is not None]
 	top_5_cases = [item.top_5_hit for item in observations if item.top_5_hit is not None]
 	symbol_top_3_cases = [
@@ -348,7 +370,9 @@ def build_performance_gate_metrics(
 		PerformanceGateCheck(
 			metric=probe_id,
 			unit=unit,
-			actual_p95=None if observation_map.get(probe_id) is None else observation_map[probe_id].p95,
+			actual_p95=None
+			if observation_map.get(probe_id) is None
+			else observation_map[probe_id].p95,
 			threshold_p95=threshold,
 			passed=(
 				probe_id in observation_map
@@ -361,9 +385,7 @@ def build_performance_gate_metrics(
 	return {
 		"environment": dict(environment),
 		"dataset_scale": dict(dataset_scale),
-		"sample_counts": {
-			item.probe_id: item.sample_size for item in observations
-		},
+		"sample_counts": {item.probe_id: item.sample_size for item in observations},
 		"metrics": {
 			item.probe_id: {
 				"unit": item.unit,
@@ -495,6 +517,72 @@ def build_stability_gate_metrics(
 			"readonly_concurrency": dict(readonly_concurrency),
 		},
 	}
+
+
+def build_reproducibility_gate_metrics(
+	probes: dict[str, object],
+	*,
+	environment: dict[str, object],
+	dataset_scale: dict[str, object],
+) -> dict[str, object]:
+	"""Return E7-06 reproducible-index checks and canonical hashes."""
+
+	check_inputs = _reproducibility_check_inputs(probes)
+	checks = tuple(
+		ReproducibilityGateCheck(
+			check=check_name,
+			passed=first == second,
+			first=first,
+			second=second,
+		)
+		for check_name, (first, second) in check_inputs.items()
+	)
+	return {
+		"environment": dict(environment),
+		"dataset_scale": dict(dataset_scale),
+		"metrics": {
+			"stable_check_count": len(checks),
+			"passed_check_count": sum(1 for item in checks if item.passed),
+			"first_core_report_hash": probes.get("first_core_report_hash"),
+			"second_core_report_hash": probes.get("second_core_report_hash"),
+			"entity_id_count": len(_list_metric(probes, "first_entity_ids")),
+			"chunk_id_count": len(_list_metric(probes, "first_chunk_ids")),
+			"evidence_id_count": len(_list_metric(probes, "first_evidence_ids")),
+		},
+		"checks": [item.to_dict() for item in checks],
+		"passed": all(item.passed for item in checks),
+		"probe_results": dict(probes),
+	}
+
+
+def _reproducibility_check_inputs(probes: dict[str, object]) -> dict[str, tuple[object, object]]:
+	return {
+		"snapshot_id_stable": (probes.get("first_snapshot_id"), probes.get("second_snapshot_id")),
+		"profile_ids_stable": (probes.get("first_profile_ids"), probes.get("second_profile_ids")),
+		"profile_record_ids_stable": (
+			probes.get("first_profile_record_ids"),
+			probes.get("second_profile_record_ids"),
+		),
+		"entity_ids_stable": (probes.get("first_entity_ids"), probes.get("second_entity_ids")),
+		"chunk_ids_stable": (probes.get("first_chunk_ids"), probes.get("second_chunk_ids")),
+		"evidence_ids_stable": (
+			probes.get("first_evidence_ids"),
+			probes.get("second_evidence_ids"),
+		),
+		"vector_ref_ids_stable": (
+			probes.get("first_vector_ref_ids"),
+			probes.get("second_vector_ref_ids"),
+		),
+		"core_report_hash_stable": (
+			probes.get("first_core_report_hash"),
+			probes.get("second_core_report_hash"),
+		),
+	}
+
+
+def _list_metric(probes: dict[str, object], key: str) -> list[object]:
+	value = probes.get(key)
+	return value if isinstance(value, list) else []
 
 
 def _boolean_rate(values: list[bool | None]) -> float:

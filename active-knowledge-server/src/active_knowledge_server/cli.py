@@ -1359,6 +1359,8 @@ def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
         return Path("eval") / "performance_cases.yaml"
     if str(args.gate) == "stability":
         return Path("eval") / "stability_cases.yaml"
+    if str(args.gate) == "reproducibility":
+        return Path("eval") / "reproducibility_cases.yaml"
     return Path("eval") / "cases.yaml"
 
 

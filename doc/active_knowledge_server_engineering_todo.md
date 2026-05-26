@@ -1442,20 +1442,21 @@ TODO：
 
 ### E7-06 可重复索引 gate
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：`P4-06`
+- 输出：已新增 `eval/reproducibility_cases.yaml`、`eval/reproducibility.py`、`reproducibility_gate` 指标汇总和 runner 接入；`active-kb eval run --gate reproducibility` 会在合成 code/docs/profile 语料上连续两次收集同一 snapshot/profile，校验 snapshot/profile/entity/chunk/evidence/vector ref ID 稳定，并对去时间字段后的核心 report 做 hash 比对。
 
 TODO：
 
-- [ ] 同一 snapshot/profile 连续两次索引结果 ID 稳定。
-- [ ] chunk/entity/evidence ID 稳定。
-- [ ] report 中允许时间字段不同，但核心内容 hash 相同。
+- [x] 同一 snapshot/profile 连续两次索引结果 ID 稳定。
+- [x] chunk/entity/evidence ID 稳定。
+- [x] report 中允许时间字段不同，但核心内容 hash 相同。
 
 验收标准：
 
-- `active-kb eval run --gate reproducibility` 通过。
+- [x] `active-kb eval run --gate reproducibility` 通过。
 
 ### E7-07 Release checklist
 

@@ -7,6 +7,9 @@ from active_knowledge_server.eval import load_eval_suite
 CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "cases.yaml"
 QUALITY_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "quality_cases.yaml"
 PERFORMANCE_CASES_FILE = Path(__file__).resolve().parents[2] / "eval" / "performance_cases.yaml"
+REPRODUCIBILITY_CASES_FILE = (
+    Path(__file__).resolve().parents[2] / "eval" / "reproducibility_cases.yaml"
+)
 
 
 def test_load_eval_suite_parses_seed_cases_file() -> None:
@@ -61,3 +64,13 @@ def test_load_performance_eval_suite_parses_performance_cases_file() -> None:
         "kb_search",
         "evidence_bundle",
     }
+
+
+def test_load_reproducibility_eval_suite_parses_reproducibility_cases_file() -> None:
+    suite = load_eval_suite(REPRODUCIBILITY_CASES_FILE)
+
+    assert suite.schema_version == "eval_cases.v1"
+    assert suite.suite_id == "reproducibility-index-v1"
+    assert len(suite.cases) == 1
+    assert suite.cases[0].category == "storage_incremental"
+    assert suite.cases[0].profile_requirement.requested_profile_id == "mhs003_watch"

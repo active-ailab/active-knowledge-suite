@@ -1,0 +1,43 @@
+schema_version: eval_cases.v1
+suite_id: reproducibility-index-v1
+description: Deterministic E7-06 reproducible-index suite backed by a synthetic code/docs/profile corpus.
+generated_from:
+  - eval/reproducibility_cases.yaml
+
+cases:
+  - case_id: reproducibility_full_index_stable_ids
+    title: 同一 snapshot/profile 连续索引 stable ID 与核心 report hash 稳定
+    category: storage_incremental
+    priority: P1
+    execution_mode: query_quality
+    blocking_level: blocker
+    source_refs:
+      - eval/reproducibility_cases.yaml#reproducibility_full_index_stable_ids
+    input_tool: workspace_view
+    request:
+      query: reproducible index stable IDs
+      domain: code
+      view: workspace
+      granularity: workspace
+      profile_id: mhs003_watch
+      snapshot_id: current
+      caller_tool: client
+      client_context: {}
+    profile_requirement:
+      requested_profile_id: mhs003_watch
+      expected_status: resolved
+    expected_route:
+      intent: workspace_nav
+      primary_tool: workspace_view
+      route_mode: direct
+      selected_view: workspace
+      selected_granularity: workspace
+      required_warning_codes: []
+      allowed_warning_codes: []
+    expected_result_status: ok
+    expected_evidence:
+      - kind: path
+        locator: workspace
+    tags:
+      - E7-06
+      - reproducibility

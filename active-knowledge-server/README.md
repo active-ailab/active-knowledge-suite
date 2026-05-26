@@ -162,3 +162,15 @@ uv run active-kb eval-baseline compare \
 
 If a release intentionally accepts a P95 regression, pass an explicit audited
 exemption such as `--performance-exemption kb_search="larger indexed corpus"`.
+
+## Reproducibility Gate
+
+`active-kb eval run --gate reproducibility` executes the E7-06 gate. It collects
+the same synthetic code/docs/profile corpus twice, verifies stable
+snapshot/profile/entity/chunk/evidence/vector IDs, and compares the canonical
+core report hash while ignoring time-like fields.
+
+```bash
+uv run active-kb eval run --gate reproducibility \
+  --report .active-kb/local/artifacts/eval/reproducibility.json
+```

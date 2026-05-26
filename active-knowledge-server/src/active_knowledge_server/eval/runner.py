@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from collections.abc import Callable
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -19,10 +19,12 @@ from active_knowledge_server.eval.metrics import (
 	build_category_coverage,
 	build_performance_gate_metrics,
 	build_quality_gate_metrics,
+	build_reproducibility_gate_metrics,
 	build_stability_gate_metrics,
 	build_suite_metrics,
 )
 from active_knowledge_server.eval.performance import PerformanceBenchmark
+from active_knowledge_server.eval.reproducibility import ReproducibilityBenchmark
 from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.models import QueryRequest
 from active_knowledge_server.models.responses import QueryResult
@@ -30,7 +32,7 @@ from active_knowledge_server.query import QueryRouter
 
 EvalCaseRunStatus = Literal["passed", "failed"]
 EvalRunStatus = Literal["pass", "partial_ready", "fail"]
-EvalSuiteKind = Literal["router", "quality", "performance", "stability"]
+EvalSuiteKind = Literal["router", "quality", "performance", "stability", "reproducibility"]
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,7 @@ class EvalRunner:
 		quality_benchmark_factory: Callable[[], object] | None = None,
 		performance_benchmark_factory: Callable[[], object] | None = None,
 		stability_benchmark_factory: Callable[[], object] | None = None,
+		reproducibility_benchmark_factory: Callable[[], object] | None = None,
 	) -> None:
 		self._cwd = cwd
 		self._router = QueryRouter.from_config(
@@ -149,11 +152,10 @@ class EvalRunner:
 			profile_collector=profile_collector or _EvalProfileCollector(),
 		)
 		self._quality_benchmark_factory = quality_benchmark_factory or QualityBenchmark
-		self._performance_benchmark_factory = (
-			performance_benchmark_factory or PerformanceBenchmark
-		)
-		self._stability_benchmark_factory = (
-			stability_benchmark_factory or StabilityBenchmark
+		self._performance_benchmark_factory = performance_benchmark_factory or PerformanceBenchmark
+		self._stability_benchmark_factory = stability_benchmark_factory or StabilityBenchmark
+		self._reproducibility_benchmark_factory = (
+			reproducibility_benchmark_factory or ReproducibilityBenchmark
 		)
 
 	@classmethod
@@ -166,6 +168,7 @@ class EvalRunner:
 		quality_benchmark_factory: Callable[[], object] | None = None,
 		performance_benchmark_factory: Callable[[], object] | None = None,
 		stability_benchmark_factory: Callable[[], object] | None = None,
+		reproducibility_benchmark_factory: Callable[[], object] | None = None,
 	) -> EvalRunner:
 		return cls(
 			config,
@@ -174,6 +177,7 @@ class EvalRunner:
 			quality_benchmark_factory=quality_benchmark_factory,
 			performance_benchmark_factory=performance_benchmark_factory,
 			stability_benchmark_factory=stability_benchmark_factory,
+			reproducibility_benchmark_factory=reproducibility_benchmark_factory,
 		)
 
 	def run(
@@ -204,6 +208,13 @@ class EvalRunner:
 			)
 		if resolved_suite_kind == "stability":
 			return self._run_stability_suite(
+				suite,
+				cases_file=cases_file,
+				gate_id=gate_id,
+				started_at=started_at,
+			)
+		if resolved_suite_kind == "reproducibility":
+			return self._run_reproducibility_suite(
 				suite,
 				cases_file=cases_file,
 				gate_id=gate_id,
@@ -240,7 +251,9 @@ class EvalRunner:
 			warnings.append(
 				{
 					"code": "eval.coverage_incomplete",
-					"message": "Eval suite executes successfully, but category minimums are not met yet.",
+					"message": (
+						"Eval suite executes successfully, but category minimums are not met yet."
+					),
 					"details": {"missing_categories": coverage_gaps},
 				}
 			)
@@ -283,8 +296,7 @@ class EvalRunner:
 		benchmark = self._quality_benchmark_factory()
 		try:
 			case_results = tuple(
-				self._execute_quality_case(case, benchmark=benchmark)
-				for case in suite.cases
+				self._execute_quality_case(case, benchmark=benchmark) for case in suite.cases
 			)
 			failed_results = tuple(result for result in case_results if result.status == "failed")
 			observations = tuple(
@@ -452,9 +464,7 @@ class EvalRunner:
 			warnings: list[dict[str, Any]] = []
 			status: EvalRunStatus = "pass"
 			if not stability_metrics["passed"]:
-				failed_checks = [
-					item for item in stability_metrics["checks"] if not item["passed"]
-				]
+				failed_checks = [item for item in stability_metrics["checks"] if not item["passed"]]
 				warnings.append(
 					{
 						"code": "eval.stability_gate_failed",
@@ -467,7 +477,10 @@ class EvalRunner:
 				warnings.append(
 					{
 						"code": "eval.stability_release_window_incomplete",
-						"message": "Stability probes passed, but the configured soak window is below the release threshold.",
+						"message": (
+							"Stability probes passed, but the configured soak window is below "
+							"the release threshold."
+						),
 						"details": stability_metrics["release_window"],
 					}
 				)
@@ -487,6 +500,66 @@ class EvalRunner:
 				gate_id=gate_id,
 				suite_id=suite.suite_id,
 				status=status,
+				started_at=started_at,
+				finished_at=_utc_now(),
+				cases_file=str(cases_file),
+				metrics=metrics,
+				failures=tuple(failures),
+				warnings=tuple(warnings),
+			)
+		finally:
+			close = getattr(benchmark, "close", None)
+			if callable(close):
+				close()
+
+	def _run_reproducibility_suite(
+		self,
+		suite: EvalCaseSuite,
+		*,
+		cases_file: Path,
+		gate_id: str,
+		started_at: str,
+	) -> EvalRunReport:
+		benchmark = self._reproducibility_benchmark_factory()
+		try:
+			probes = benchmark.measure_suite(suite)
+			metrics = build_suite_metrics(
+				suite,
+				executed_cases=len(suite.cases),
+				passed_cases=len(suite.cases),
+				failed_cases=0,
+			)
+			reproducibility_metrics = build_reproducibility_gate_metrics(
+				dict(probes),
+				environment=dict(benchmark.environment()),
+				dataset_scale=dict(benchmark.dataset_scale()),
+			)
+			metrics["reproducibility_gate"] = reproducibility_metrics
+			warnings: list[dict[str, Any]] = []
+			failures: list[dict[str, Any]] = []
+			if not reproducibility_metrics["passed"]:
+				failed_checks = [
+					item for item in reproducibility_metrics["checks"] if not item["passed"]
+				]
+				warnings.append(
+					{
+						"code": "eval.reproducibility_gate_failed",
+						"message": "One or more E7-06 reproducible-index blocker checks failed.",
+						"details": {"failed_checks": failed_checks},
+					}
+				)
+				failures.extend(
+					{
+						"check": item["check"],
+						"first": item["first"],
+						"second": item["second"],
+					}
+					for item in failed_checks
+				)
+			return EvalRunReport(
+				gate_id=gate_id,
+				suite_id=suite.suite_id,
+				status="pass" if reproducibility_metrics["passed"] else "fail",
 				started_at=started_at,
 				finished_at=_utc_now(),
 				cases_file=str(cases_file),
@@ -520,20 +593,24 @@ class EvalRunner:
 		if decision.tool_plan.primary_tool != case.expected_route.primary_tool:
 			failures.append(
 				"primary_tool mismatch: "
-				f"expected {case.expected_route.primary_tool}, got {decision.tool_plan.primary_tool}"
+				"expected "
+				f"{case.expected_route.primary_tool}, got {decision.tool_plan.primary_tool}"
 			)
 		if decision.tool_plan.route_mode != case.expected_route.route_mode:
 			failures.append(
-				f"route_mode mismatch: expected {case.expected_route.route_mode}, got {decision.tool_plan.route_mode}"
+				"route_mode mismatch: "
+				f"expected {case.expected_route.route_mode}, got {decision.tool_plan.route_mode}"
 			)
 		if decision.selected_view != case.expected_route.selected_view:
 			failures.append(
-				f"selected_view mismatch: expected {case.expected_route.selected_view}, got {decision.selected_view}"
+				"selected_view mismatch: "
+				f"expected {case.expected_route.selected_view}, got {decision.selected_view}"
 			)
 		if decision.selected_granularity != case.expected_route.selected_granularity:
 			failures.append(
 				"selected_granularity mismatch: "
-				f"expected {case.expected_route.selected_granularity}, got {decision.selected_granularity}"
+				"expected "
+				f"{case.expected_route.selected_granularity}, got {decision.selected_granularity}"
 			)
 		required_warning_codes = set(case.expected_route.required_warning_codes)
 		observed_warning_codes = set(warning_codes)
@@ -542,12 +619,12 @@ class EvalRunner:
 				"missing required warnings: "
 				f"expected {sorted(required_warning_codes)}, got {sorted(observed_warning_codes)}"
 			)
-		allowed_warning_codes = required_warning_codes | set(case.expected_route.allowed_warning_codes)
+		allowed_warning_codes = required_warning_codes | set(
+			case.expected_route.allowed_warning_codes
+		)
 		unexpected_warning_codes = observed_warning_codes - allowed_warning_codes
 		if unexpected_warning_codes:
-			failures.append(
-				f"unexpected warnings: {sorted(unexpected_warning_codes)}"
-			)
+			failures.append(f"unexpected warnings: {sorted(unexpected_warning_codes)}")
 		expected_profile_status = case.profile_requirement.expected_status
 		observed_profile_status = str(decision.profile_resolution.get("status"))
 		if observed_profile_status != expected_profile_status:
@@ -582,17 +659,23 @@ class EvalRunner:
 		warning_codes = tuple(warning.code for warning in result.warnings)
 		failures: list[str] = []
 		failures.extend(self._route_failures(case, decision, warning_codes))
-		if case.expected_result_status is not None and result.result_status != case.expected_result_status:
+		if (
+			case.expected_result_status is not None
+			and result.result_status != case.expected_result_status
+		):
 			failures.append(
-				f"result_status mismatch: expected {case.expected_result_status}, got {result.result_status}"
+				"result_status mismatch: "
+				f"expected {case.expected_result_status}, got {result.result_status}"
 			)
 		if result.tool_name != case.expected_route.primary_tool:
 			failures.append(
-				f"tool_name mismatch: expected {case.expected_route.primary_tool}, got {result.tool_name}"
+				"tool_name mismatch: "
+				f"expected {case.expected_route.primary_tool}, got {result.tool_name}"
 			)
 		if result.query_intent != case.expected_route.intent:
 			failures.append(
-				f"query_intent mismatch: expected {case.expected_route.intent}, got {result.query_intent}"
+				"query_intent mismatch: "
+				f"expected {case.expected_route.intent}, got {result.query_intent}"
 			)
 		schema_compliant = self._schema_compliant(result)
 		if not schema_compliant:
@@ -600,20 +683,24 @@ class EvalRunner:
 		first_rank = self._first_relevant_rank(case, result)
 		evidence_hit = self._has_expected_evidence(case, result, first_rank=first_rank)
 		if case.expected_result_status not in {"zero_result", "blocked"} and not evidence_hit:
-			failures.append("expected evidence was not recovered from ranked items or evidence refs")
+			failures.append(
+				"expected evidence was not recovered from ranked items or evidence refs"
+			)
 		observed_profile_status = str(decision.profile_resolution.get("status"))
 		profile_correct = observed_profile_status == case.profile_requirement.expected_status
 		if not profile_correct:
 			failures.append(
 				"profile status mismatch: "
-				f"expected {case.profile_requirement.expected_status}, got {observed_profile_status}"
+				"expected "
+				f"{case.profile_requirement.expected_status}, got {observed_profile_status}"
 			)
 		warning_quality_ok = self._warning_quality_ok(case, warning_codes)
 		if not warning_quality_ok:
 			failures.append(
 				"warning quality mismatch: "
 				f"expected required={list(case.expected_route.required_warning_codes)}, "
-				f"allowed={list(case.expected_route.allowed_warning_codes)}, got {list(warning_codes)}"
+				"allowed="
+				f"{list(case.expected_route.allowed_warning_codes)}, got {list(warning_codes)}"
 			)
 		return EvalCaseResult(
 			case_id=case.case_id,
@@ -645,20 +732,24 @@ class EvalRunner:
 		if decision.tool_plan.primary_tool != case.expected_route.primary_tool:
 			failures.append(
 				"primary_tool mismatch: "
-				f"expected {case.expected_route.primary_tool}, got {decision.tool_plan.primary_tool}"
+				"expected "
+				f"{case.expected_route.primary_tool}, got {decision.tool_plan.primary_tool}"
 			)
 		if decision.tool_plan.route_mode != case.expected_route.route_mode:
 			failures.append(
-				f"route_mode mismatch: expected {case.expected_route.route_mode}, got {decision.tool_plan.route_mode}"
+				"route_mode mismatch: "
+				f"expected {case.expected_route.route_mode}, got {decision.tool_plan.route_mode}"
 			)
 		if decision.selected_view != case.expected_route.selected_view:
 			failures.append(
-				f"selected_view mismatch: expected {case.expected_route.selected_view}, got {decision.selected_view}"
+				"selected_view mismatch: "
+				f"expected {case.expected_route.selected_view}, got {decision.selected_view}"
 			)
 		if decision.selected_granularity != case.expected_route.selected_granularity:
 			failures.append(
 				"selected_granularity mismatch: "
-				f"expected {case.expected_route.selected_granularity}, got {decision.selected_granularity}"
+				"expected "
+				f"{case.expected_route.selected_granularity}, got {decision.selected_granularity}"
 			)
 		required_warning_codes = set(case.expected_route.required_warning_codes)
 		observed_warning_codes = set(warning_codes)
@@ -667,7 +758,9 @@ class EvalRunner:
 				"missing required warnings: "
 				f"expected {sorted(required_warning_codes)}, got {sorted(observed_warning_codes)}"
 			)
-		allowed_warning_codes = required_warning_codes | set(case.expected_route.allowed_warning_codes)
+		allowed_warning_codes = required_warning_codes | set(
+			case.expected_route.allowed_warning_codes
+		)
 		unexpected_warning_codes = observed_warning_codes - allowed_warning_codes
 		if unexpected_warning_codes:
 			failures.append(f"unexpected warnings: {sorted(unexpected_warning_codes)}")
@@ -682,7 +775,9 @@ class EvalRunner:
 
 	def _first_relevant_rank(self, case: EvalCase, result: QueryResult) -> int | None:
 		for index, item in enumerate(result.items, start=1):
-			if any(self._item_matches_expected(item, expected) for expected in case.expected_evidence):
+			if any(
+				self._item_matches_expected(item, expected) for expected in case.expected_evidence
+			):
 				return index
 		return None
 
@@ -765,4 +860,6 @@ def _infer_suite_kind(gate_id: str) -> EvalSuiteKind:
 		return "performance"
 	if gate_id == "stability":
 		return "stability"
+	if gate_id == "reproducibility":
+		return "reproducibility"
 	return "router"
