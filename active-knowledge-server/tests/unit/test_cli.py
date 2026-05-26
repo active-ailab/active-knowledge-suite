@@ -26,6 +26,7 @@ def test_subcommands_have_help() -> None:
         "index",
         "rebuild",
         "baseline",
+        "release",
         "status",
         "validate",
         "clean",
@@ -153,6 +154,19 @@ def test_eval_baseline_compare_subcommand_has_help() -> None:
     assert "usage: active-kb eval-baseline compare" in result.stdout
     assert "--baseline" in result.stdout
     assert "--performance-exemption" in result.stdout
+
+
+def test_release_checklist_subcommand_has_help() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "release", "checklist", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "usage: active-kb release checklist" in result.stdout
+    assert "--quality-report" in result.stdout
+    assert "--remote-config" in result.stdout
 
 
 def test_parse_performance_exemptions_requires_known_probe_and_reason() -> None:
@@ -1206,6 +1220,11 @@ def test_baseline_publish_json_writes_manifest(
     assert payload["command"] == "baseline publish"
     assert payload["baseline_id"] == "baseline-o8-02"
     assert manifest_payload["baseline_id"] == "baseline-o8-02"
+    assert manifest_payload["source_docs_hash"].startswith("sha256:")
+    assert manifest_payload["versions"]["mcp_schema_version"] == "mcp_interface.v1"
+    assert manifest_payload["versions"]["parser_versions"]["doc"] == "doc_parser.v1"
+    assert manifest_payload["versions"]["extractor_versions"]["code_indexer"] == "code_indexer.v1"
+    assert manifest_payload["source_docs"]["manifest_hash"] == manifest_payload["source_docs_hash"]
 
 
 def test_index_interrupt_prints_snapshot_without_traceback(
@@ -1301,6 +1320,173 @@ def test_baseline_validate_json_reports_missing_manifest(
     assert payload["command"] == "baseline validate"
     assert payload["status"] == "fail"
     assert payload["manifest"]["exists"] is False
+
+
+def test_release_checklist_json_reports_pass_with_complete_artifacts(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    readme_path = tmp_path / "README.md"
+    remote_config_path = tmp_path / "remote-shared.yaml"
+    quality_path = tmp_path / "quality.json"
+    performance_path = tmp_path / "performance.json"
+    stability_path = tmp_path / "stability.json"
+
+    readme_path.write_text(
+        "\n".join(
+            (
+                "active-kb init",
+                "active-kb index",
+                "active-kb serve",
+                "active-kb validate",
+                "active-kb clean",
+                "active-kb migrate",
+            )
+        ),
+        encoding="utf-8",
+    )
+    remote_config_path.write_text(
+        _remote_shared_config_fixture(),
+        encoding="utf-8",
+    )
+    quality_path.write_text(json.dumps(_quality_gate_report().to_dict()), encoding="utf-8")
+    performance_path.write_text(json.dumps(_performance_gate_report().to_dict()), encoding="utf-8")
+    stability_path.write_text(json.dumps(_stability_gate_report().to_dict()), encoding="utf-8")
+
+    manifest_path = workdir / "baseline" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_complete_release_manifest(source_docs_root=source_docs), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "release",
+            "checklist",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--quality-report",
+            str(quality_path),
+            "--performance-report",
+            str(performance_path),
+            "--stability-report",
+            str(stability_path),
+            "--readme",
+            str(readme_path),
+            "--remote-config",
+            str(remote_config_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "release checklist"
+    assert payload["status"] == "pass"
+    assert all(check["status"] == "pass" for check in payload["checks"])
+
+
+def test_release_checklist_json_blocks_on_tracked_local_files(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    readme_path = tmp_path / "README.md"
+    remote_config_path = tmp_path / "remote-shared.yaml"
+    quality_path = tmp_path / "quality.json"
+    performance_path = tmp_path / "performance.json"
+    stability_path = tmp_path / "stability.json"
+
+    readme_path.write_text(
+        "\n".join(
+            (
+                "active-kb init",
+                "active-kb index",
+                "active-kb serve",
+                "active-kb validate",
+                "active-kb clean",
+                "active-kb migrate",
+            )
+        ),
+        encoding="utf-8",
+    )
+    remote_config_path.write_text(
+        _remote_shared_config_fixture(),
+        encoding="utf-8",
+    )
+    quality_path.write_text(json.dumps(_quality_gate_report().to_dict()), encoding="utf-8")
+    performance_path.write_text(json.dumps(_performance_gate_report().to_dict()), encoding="utf-8")
+    stability_path.write_text(json.dumps(_stability_gate_report().to_dict()), encoding="utf-8")
+
+    manifest_path = workdir / "baseline" / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(_complete_release_manifest(source_docs_root=source_docs), indent=2, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.inspect_tracked_local_files",
+        lambda *_args, **_kwargs: type(
+            "DummyWarning",
+            (),
+            {"details": ("artifacts/stability/hybrid-query-500.json",)},
+        )(),
+    )
+
+    exit_code = main(
+        [
+            "release",
+            "checklist",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--quality-report",
+            str(quality_path),
+            "--performance-report",
+            str(performance_path),
+            "--stability-report",
+            str(stability_path),
+            "--readme",
+            str(readme_path),
+            "--remote-config",
+            str(remote_config_path),
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    local_check = next(
+        check for check in payload["checks"] if check["check_id"] == "local_artifacts_excluded"
+    )
+
+    assert exit_code == 1
+    assert payload["status"] == "fail"
+    assert local_check["status"] == "fail"
 
 
 def write_profile_fixture(
@@ -1404,6 +1590,16 @@ def _quality_report(
     )
 
 
+def _quality_gate_report() -> EvalRunReport:
+    report = _quality_report()
+    metrics = dict(report.metrics)
+    metrics["quality_gate"] = {
+        **metrics["quality_gate"],
+        "passed": True,
+    }
+    return report.model_copy(update={"metrics": metrics})
+
+
 def _performance_report(
     *,
     p95_overrides: dict[str, float] | None = None,
@@ -1426,4 +1622,154 @@ def _performance_report(
         finished_at="2026-05-22T00:00:01Z",
         cases_file="eval/performance_cases.yaml",
         metrics={"performance_gate": {"metrics": metrics}},
+    )
+
+
+def _performance_gate_report() -> EvalRunReport:
+    report = _performance_report()
+    metrics = dict(report.metrics)
+    metrics["performance_gate"] = {
+        **metrics["performance_gate"],
+        "passed": True,
+    }
+    return report.model_copy(update={"metrics": metrics})
+
+
+def _stability_gate_report() -> EvalRunReport:
+    return EvalRunReport(
+        gate_id="stability",
+        suite_id="stability-mixed-query-v1",
+        status="pass",
+        started_at="2026-05-22T00:00:00Z",
+        finished_at="2026-05-22T08:00:01Z",
+        cases_file="eval/stability_cases.yaml",
+        metrics={
+            "stability_gate": {
+                "passed": True,
+                "release_window": {
+                    "passed": True,
+                    "actual_soak_seconds": 28800,
+                    "actual_mixed_query_count": 500,
+                },
+            }
+        },
+    )
+
+
+def _complete_release_manifest(*, source_docs_root: Path) -> dict[str, object]:
+    return {
+        "schema_version": "active_kb_baseline_manifest.v1",
+        "baseline_id": "release-20260526",
+        "default_profile": "auto",
+        "published_at": "2026-05-26T00:00:00Z",
+        "snapshot_id": "current",
+        "source": "all",
+        "publish_mode": "publish",
+        "snapshots": ["current"],
+        "profiles": ["watch"],
+        "source_docs_hash": "sha256:release",
+        "parser_version": "c_family_parser.v1+doc_parser.v1+kconfig_parser.v1+makefile_parser.v1",
+        "extractor_version": (
+            "snapshot_collector.v1+profile_collector.v1+code_indexer.v1+doc_indexer.v1+"
+            "profile_conditioned_relations.v1+workspace_map.v1"
+        ),
+        "embedding_model": "bge-m3",
+        "embedding_model_version": "bge-m3",
+        "artifacts": {
+            "metadata": "db/metadata.db",
+            "vectors": "vectors/lancedb",
+            "workspace_map": "artifacts/workspace-maps/current.json",
+        },
+        "versions": {
+            "config_schema_version": "0.1",
+            "query_result_schema_version": "query_result.v1",
+            "mcp_schema_version": "mcp_interface.v1",
+            "embedding_model_version": "bge-m3",
+            "parser_versions": {
+                "c_family": "c_family_parser.v1",
+                "doc": "doc_parser.v1",
+                "kconfig": "kconfig_parser.v1",
+                "makefile": "makefile_parser.v1",
+            },
+            "extractor_versions": {
+                "snapshot_collector": "snapshot_collector.v1",
+                "profile_collector": "profile_collector.v1",
+                "code_indexer": "code_indexer.v1",
+                "doc_indexer": "doc_indexer.v1",
+                "profile_conditioned_relations": "profile_conditioned_relations.v1",
+                "workspace_map": "workspace_map.v1",
+            },
+        },
+        "source_docs": {
+            "schema_version": "source_docs_manifest.v1",
+            "manifest_hash": "sha256:release",
+            "root": str(source_docs_root),
+            "file_count": 0,
+            "supported_categories": [],
+            "present_categories": [],
+            "file_count_by_category": {},
+        },
+    }
+
+
+def _remote_shared_config_fixture() -> str:
+    return "\n".join(
+        (
+            "deployment_mode: remote_shared",
+            "server:",
+            "  transport: streamable-http",
+            "  expose_ops_tools: false",
+            "  http:",
+            "    host: 0.0.0.0",
+            "    port: 8765",
+            "    require_auth: true",
+            "    auth_provider: token",
+            "    token:",
+            "      env: ACTIVE_KB_AUTH_TOKEN",
+            "    allowed_origins:",
+            "      - https://chatgpt.com",
+            "runtime:",
+            "  workdir: .active-kb",
+            "  baseline_dir: .active-kb/baseline",
+            "  local_dir: .active-kb/local",
+            "  source_root: .",
+            "  source_docs_root: knowledge-sources",
+            "project:",
+            "  id: active",
+            "  display_name: Active",
+            "  workspace_root: workspace",
+            "storage:",
+            "  baseline:",
+            "    manifest: .active-kb/baseline/manifest.json",
+            "  metadata:",
+            "    backend: sqlite",
+            "    path: .active-kb/baseline/db/metadata.db",
+            "    mode: readonly",
+            "  overlay:",
+            "    backend: sqlite",
+            "    path: .active-kb/local/db/overlay.db",
+            "  jobs:",
+            "    backend: sqlite",
+            "    path: .active-kb/local/db/jobs.db",
+            "  vector:",
+            "    backend: lancedb",
+            "    path: .active-kb/baseline/vectors/lancedb",
+            "    mode: readonly",
+            "  vector_delta:",
+            "    backend: lancedb",
+            "    path: .active-kb/local/vectors/lancedb-delta",
+            "  artifacts_root: .active-kb/baseline/artifacts",
+            "  local_artifacts_root: .active-kb/local/artifacts",
+            "  cache_root: .active-kb/local/cache",
+            "indexing:",
+            "  embeddings:",
+            "    enabled: true",
+            "    model: bge-m3",
+            "query:",
+            "  hybrid:",
+            "    rerank: lightweight",
+            "security:",
+            "  audit:",
+            "    enabled: true",
+        )
     )

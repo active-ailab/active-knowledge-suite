@@ -27,6 +27,7 @@ from active_knowledge_server.config.workdir import (
     WorkdirLayout,
     initialize_workdir,
     inspect_baseline_manifest,
+    inspect_tracked_local_files,
     layout_from_config,
 )
 from active_knowledge_server.connectors.source_docs import SourceDocsConnector
@@ -44,13 +45,19 @@ from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.indexing import (
     CURRENT_SNAPSHOT_ID,
+    CODE_INDEXER_SCHEMA_VERSION,
     CodeIndexer,
+    DOC_INDEXER_SCHEMA_VERSION,
     DocumentIndexer,
     IncrementalIndexPipeline,
     IndexProgressEvent,
+    PROFILE_COLLECTOR_SCHEMA_VERSION,
+    PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
+    SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
     SnapshotCollector,
+    WORKSPACE_MAP_SCHEMA_VERSION,
     WorkspaceMapBuilder,
     count_indexable_workspace_files,
     noop_progress_callback,
@@ -58,6 +65,14 @@ from active_knowledge_server.indexing import (
 )
 from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
 from active_knowledge_server.models import QueryResult, Warning
+from active_knowledge_server.models.responses import QUERY_RESULT_SCHEMA_VERSION
+from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
+from active_knowledge_server.parsers import (
+    C_FAMILY_PARSER_SCHEMA_VERSION,
+    DOC_PARSER_SCHEMA_VERSION,
+    KCONFIG_PARSER_SCHEMA_VERSION,
+    MAKEFILE_PARSER_SCHEMA_VERSION,
+)
 from active_knowledge_server.security.config import (
     SecurityBlockedWarning,
     SecurityConfigError,
@@ -610,6 +625,94 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baseline_compare_parser.set_defaults(handler=handle_eval_baseline_compare)
 
+    release_parser = subparsers.add_parser(
+        "release",
+        help="Run release-oriented checklist validations and emit machine-readable reports.",
+    )
+    release_subparsers = release_parser.add_subparsers(
+        dest="release_command",
+        metavar="RELEASE_COMMAND",
+    )
+
+    release_checklist_parser = release_subparsers.add_parser(
+        "checklist",
+        parents=[common],
+        help="Run the E7-07 release checklist against the current baseline and gate artifacts.",
+    )
+    release_checklist_parser.add_argument(
+        "--quality-report",
+        type=Path,
+        help="Existing quality gate report JSON. When omitted, the command runs the quality gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--performance-report",
+        type=Path,
+        help=(
+            "Existing performance gate report JSON. When omitted, the command runs the "
+            "performance gate."
+        ),
+    )
+    release_checklist_parser.add_argument(
+        "--stability-report",
+        type=Path,
+        help=(
+            "Existing stability gate report JSON. When omitted, the command runs the "
+            "stability gate with the configured probe window."
+        ),
+    )
+    release_checklist_parser.add_argument(
+        "--readme",
+        type=Path,
+        help="README file to verify for the documented release command set.",
+    )
+    release_checklist_parser.add_argument(
+        "--remote-config",
+        type=Path,
+        help="remote_shared example config to validate as part of the release checklist.",
+    )
+    release_checklist_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Optional output path for the checklist JSON report.",
+    )
+    release_checklist_parser.add_argument(
+        "--soak-seconds",
+        type=int,
+        default=60,
+        help="Timed soak window used when the checklist needs to run the stability gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--mixed-query-count",
+        type=int,
+        default=500,
+        help="Mixed-query count used when the checklist needs to run the stability gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--readonly-workers",
+        type=int,
+        default=8,
+        help="Readonly worker count used when the checklist needs to run the stability gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--readonly-queries",
+        type=int,
+        default=64,
+        help="Readonly query count used when the checklist needs to run the stability gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--readonly-timeout-seconds",
+        type=float,
+        default=5.0,
+        help="Per-query timeout used when the checklist needs to run the stability gate.",
+    )
+    release_checklist_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    release_checklist_parser.set_defaults(handler=handle_release_checklist)
+
     return parser
 
 
@@ -941,19 +1044,14 @@ def handle_baseline_publish(args: argparse.Namespace) -> int:
     )
     layout = layout_from_config(resolved)
     baseline_id = str(args.baseline_id or _default_baseline_id())
-    manifest_payload = {
-        "schema_version": "active_kb_baseline_manifest.v1",
-        "baseline_id": baseline_id,
-        "default_profile": resolved.model.project.default_profile,
-        "published_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
-        "snapshot_id": CURRENT_SNAPSHOT_ID,
-        "source": args.source,
-        "publish_mode": args.publish_mode,
-        "code_indexer_schema_version": result.get("code_indexer_schema_version"),
-        "doc_indexer_schema_version": result.get("doc_indexer_schema_version"),
-        "profile_collector_schema_version": result.get("profile_collector_schema_version"),
-        "relation_schema_version": result.get("relation_schema_version"),
-    }
+    manifest_payload = build_baseline_manifest_payload(
+        resolved,
+        layout=layout,
+        baseline_id=baseline_id,
+        source=args.source,
+        publish_mode=args.publish_mode,
+        result=result,
+    )
     layout.baseline_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     layout.baseline_manifest_path.write_text(
         json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n",
@@ -1345,6 +1443,85 @@ def handle_eval_baseline_compare(args: argparse.Namespace) -> int:
     return 1 if report.status == "fail" else 0
 
 
+def handle_release_checklist(args: argparse.Namespace) -> int:
+    """Run the E7-07 release checklist and emit a machine-readable report."""
+
+    resolved = resolve_from_args(args)
+    layout = layout_from_config(resolved)
+    repo_root = discover_release_repo_root(Path.cwd())
+    readme_path = Path(args.readme) if args.readme is not None else default_release_readme_path(repo_root)
+    remote_config_path = (
+        Path(args.remote_config)
+        if args.remote_config is not None
+        else default_release_remote_config_path(repo_root)
+    )
+
+    quality_report = (
+        load_eval_report_payload(Path(args.quality_report))
+        if args.quality_report is not None
+        else _run_quality_gate_report(resolved)
+    )
+    performance_report = (
+        load_eval_report_payload(Path(args.performance_report))
+        if args.performance_report is not None
+        else _run_performance_gate_report(resolved)
+    )
+    stability_report = (
+        load_eval_report_payload(Path(args.stability_report))
+        if args.stability_report is not None
+        else _run_stability_gate_report(resolved, args)
+    )
+
+    checks = [
+        build_manifest_check(layout.baseline_manifest_path),
+        build_quality_gate_check(quality_report),
+        build_performance_gate_check(performance_report),
+        build_stability_gate_check(stability_report),
+        build_tracked_local_release_check(layout.local_dir, cwd=Path.cwd()),
+        build_remote_config_release_check(remote_config_path),
+        build_readme_command_check(readme_path),
+    ]
+    overall_status = summarize_release_checklist_status(checks)
+    payload = {
+        "schema_version": "release_checklist.v1",
+        "command": "release checklist",
+        "status": overall_status,
+        "baseline_manifest": str(layout.baseline_manifest_path),
+        "reports": {
+            "quality": quality_report.to_dict(),
+            "performance": performance_report.to_dict(),
+            "stability": stability_report.to_dict(),
+        },
+        "checks": checks,
+        "warnings": tuple(
+            {
+                "code": str(check["check_id"]),
+                "message": str(check["message"]),
+                "details": dict(check.get("details", {})),
+            }
+            for check in checks
+            if check["status"] != "pass"
+        ),
+        "config": config_summary(resolved),
+    }
+    if args.report is not None:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        payload["artifacts"] = (str(report_path),)
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print("Release checklist")
+        print(f"Status: {overall_status}")
+        for check in checks:
+            print(f"- {check['status']}: {check['check_id']} - {check['message']}")
+    return 0 if overall_status == "pass" else 1
+
+
 def resolve_eval_cases_path(args: argparse.Namespace) -> Path:
     """Resolve the default eval suite path for the selected gate."""
 
@@ -1400,6 +1577,28 @@ def _run_performance_gate_report(resolved: ResolvedConfig) -> EvalRunReport:
     )
 
 
+def _run_stability_gate_report(
+    resolved: ResolvedConfig,
+    args: argparse.Namespace,
+) -> EvalRunReport:
+    runner = EvalRunner.from_config(
+        resolved.model,
+        cwd=Path.cwd(),
+        stability_benchmark_factory=lambda: StabilityBenchmark(
+            soak_seconds=int(args.soak_seconds),
+            mixed_query_count=int(args.mixed_query_count),
+            readonly_workers=int(args.readonly_workers),
+            readonly_query_count=int(args.readonly_queries),
+            readonly_timeout_seconds=float(args.readonly_timeout_seconds),
+        ),
+    )
+    return runner.run(
+        Path("eval") / "stability_cases.yaml",
+        gate_id="stability",
+        suite_kind="stability",
+    )
+
+
 def _baseline_snapshot_dir(resolved: ResolvedConfig) -> Path:
     return resolve_runtime_path(resolved.model.storage.artifacts_root, Path.cwd()) / "eval-baseline"
 
@@ -1427,6 +1626,366 @@ def parse_performance_exemptions(values: Sequence[str]) -> dict[str, str]:
 
 def _default_baseline_id() -> str:
     return "release-" + datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def build_baseline_manifest_payload(
+    resolved: ResolvedConfig,
+    *,
+    layout: WorkdirLayout,
+    baseline_id: str,
+    source: str,
+    publish_mode: str,
+    result: dict[str, object],
+) -> dict[str, object]:
+    """Build the release-oriented baseline manifest payload."""
+
+    del layout
+    cwd = Path.cwd()
+    source_docs_manifest = SourceDocsConnector.from_config(resolved.model, cwd=cwd).scan()
+    profiles = ProfileCollector.from_config(resolved.model, cwd=cwd).collect(
+        snapshot_id=str(result.get("snapshot_id") or CURRENT_SNAPSHOT_ID),
+    )
+    embedding_model_version = DocumentIndexer.from_config(
+        resolved.model,
+        cwd=cwd,
+    ).embedding_model_version
+    parser_versions = {
+        "c_family": C_FAMILY_PARSER_SCHEMA_VERSION,
+        "doc": DOC_PARSER_SCHEMA_VERSION,
+        "kconfig": KCONFIG_PARSER_SCHEMA_VERSION,
+        "makefile": MAKEFILE_PARSER_SCHEMA_VERSION,
+    }
+    extractor_versions = {
+        "snapshot_collector": SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
+        "profile_collector": PROFILE_COLLECTOR_SCHEMA_VERSION,
+        "code_indexer": str(result.get("code_indexer_schema_version") or CODE_INDEXER_SCHEMA_VERSION),
+        "doc_indexer": str(result.get("doc_indexer_schema_version") or DOC_INDEXER_SCHEMA_VERSION),
+        "profile_conditioned_relations": str(
+            result.get("relation_schema_version") or PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION
+        ),
+        "workspace_map": WORKSPACE_MAP_SCHEMA_VERSION,
+    }
+    return {
+        "schema_version": "active_kb_baseline_manifest.v1",
+        "baseline_id": baseline_id,
+        "default_profile": resolved.model.project.default_profile,
+        "published_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "snapshot_id": str(result.get("snapshot_id") or CURRENT_SNAPSHOT_ID),
+        "source": source,
+        "publish_mode": publish_mode,
+        "snapshots": [str(result.get("snapshot_id") or CURRENT_SNAPSHOT_ID)],
+        "profiles": sorted({record.profile_id for record in profiles.profile_records}),
+        "source_docs_hash": source_docs_manifest.manifest_hash,
+        "parser_version": "+".join(parser_versions.values()),
+        "extractor_version": "+".join(str(value) for value in extractor_versions.values()),
+        "embedding_model": resolved.model.indexing.embeddings.model,
+        "embedding_model_version": embedding_model_version,
+        "artifacts": {
+            "metadata": "db/metadata.db",
+            "vectors": "vectors/lancedb",
+            "workspace_map": "artifacts/workspace-maps/current.json",
+        },
+        "versions": {
+            "config_schema_version": resolved.model.config_schema_version,
+            "query_result_schema_version": QUERY_RESULT_SCHEMA_VERSION,
+            "mcp_schema_version": MCP_INTERFACE_SCHEMA_VERSION,
+            "parser_versions": parser_versions,
+            "extractor_versions": extractor_versions,
+            "embedding_model_version": embedding_model_version,
+        },
+        **source_docs_manifest.to_baseline_manifest_fragment(),
+    }
+
+
+def discover_release_repo_root(cwd: Path) -> Path | None:
+    """Discover the repository root that contains release assets."""
+
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / "README.md").exists() and (candidate / "examples" / "remote-shared.yaml").exists():
+            return candidate
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".git").exists() and (candidate / "README.md").exists():
+            return candidate
+    return None
+
+
+def default_release_readme_path(repo_root: Path | None) -> Path:
+    """Return the default README path used by the release checklist."""
+
+    if repo_root is not None:
+        return repo_root / "README.md"
+    return Path("README.md")
+
+
+def default_release_remote_config_path(repo_root: Path | None) -> Path:
+    """Return the default remote_shared example config path."""
+
+    if repo_root is not None:
+        return repo_root / "examples" / "remote-shared.yaml"
+    return Path("examples") / "remote-shared.yaml"
+
+
+def build_manifest_check(manifest_path: Path) -> dict[str, object]:
+    """Validate baseline manifest completeness for release."""
+
+    if not manifest_path.exists():
+        return {
+            "check_id": "baseline_manifest_complete",
+            "status": "fail",
+            "blocking": True,
+            "message": "Baseline manifest is missing.",
+            "details": {"manifest": str(manifest_path)},
+        }
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "check_id": "baseline_manifest_complete",
+            "status": "fail",
+            "blocking": True,
+            "message": "Baseline manifest is unreadable or invalid JSON.",
+            "details": {"manifest": str(manifest_path), "error": str(exc)},
+        }
+
+    missing_fields: list[str] = []
+    for field in (
+        "schema_version",
+        "baseline_id",
+        "published_at",
+        "source_docs_hash",
+        "parser_version",
+        "extractor_version",
+        "embedding_model",
+        "embedding_model_version",
+        "snapshots",
+        "profiles",
+        "artifacts",
+        "versions",
+        "source_docs",
+    ):
+        if field not in payload or payload.get(field) in (None, "", [], {}):
+            missing_fields.append(field)
+
+    versions = payload.get("versions")
+    if not isinstance(versions, dict):
+        missing_fields.append("versions")
+    else:
+        for field in (
+            "config_schema_version",
+            "query_result_schema_version",
+            "mcp_schema_version",
+            "parser_versions",
+            "extractor_versions",
+            "embedding_model_version",
+        ):
+            if field not in versions or versions.get(field) in (None, "", [], {}):
+                missing_fields.append(f"versions.{field}")
+
+    source_docs = payload.get("source_docs")
+    if isinstance(source_docs, dict):
+        manifest_hash = source_docs.get("manifest_hash")
+        if not manifest_hash:
+            missing_fields.append("source_docs.manifest_hash")
+        elif manifest_hash != payload.get("source_docs_hash"):
+            missing_fields.append("source_docs_hash_mismatch")
+    else:
+        missing_fields.append("source_docs")
+
+    status = "pass" if not missing_fields else "fail"
+    return {
+        "check_id": "baseline_manifest_complete",
+        "status": status,
+        "blocking": True,
+        "message": (
+            "Baseline manifest records source docs and version metadata required for release."
+            if status == "pass"
+            else "Baseline manifest is missing required release metadata."
+        ),
+        "details": {
+            "manifest": str(manifest_path),
+            "missing_fields": missing_fields,
+        },
+    }
+
+
+def build_quality_gate_check(report: EvalRunReport) -> dict[str, object]:
+    """Validate the quality gate portion of the release checklist."""
+
+    quality_gate = report.metrics.get("quality_gate", {})
+    passed = bool(quality_gate.get("passed", report.status == "pass")) and report.status == "pass"
+    return {
+        "check_id": "quality_gate_passed",
+        "status": "pass" if passed else "fail",
+        "blocking": True,
+        "message": "Quality gate passed." if passed else "Quality gate did not pass.",
+        "details": {
+            "gate_id": report.gate_id,
+            "report_status": report.status,
+            "quality_gate_passed": quality_gate.get("passed"),
+        },
+    }
+
+
+def build_performance_gate_check(report: EvalRunReport) -> dict[str, object]:
+    """Validate the performance gate portion of the release checklist."""
+
+    performance_gate = report.metrics.get("performance_gate", {})
+    passed = bool(performance_gate.get("passed", report.status == "pass")) and report.status == "pass"
+    return {
+        "check_id": "performance_gate_passed",
+        "status": "pass" if passed else "fail",
+        "blocking": True,
+        "message": "Performance gate passed." if passed else "Performance gate did not pass.",
+        "details": {
+            "gate_id": report.gate_id,
+            "report_status": report.status,
+            "performance_gate_passed": performance_gate.get("passed"),
+        },
+    }
+
+
+def build_stability_gate_check(report: EvalRunReport) -> dict[str, object]:
+    """Validate the stability gate portion of the release checklist."""
+
+    stability_gate = report.metrics.get("stability_gate", {})
+    gate_passed = bool(stability_gate.get("passed", report.status in {"pass", "partial_ready"}))
+    release_window = stability_gate.get("release_window", {})
+    release_window_passed = bool(release_window.get("passed", report.status == "pass"))
+    if gate_passed and release_window_passed and report.status == "pass":
+        status = "pass"
+        message = "Stability gate passed, including the release soak window."
+    elif gate_passed:
+        status = "partial_ready"
+        message = "Stability probes passed, but the release soak window is not complete."
+    else:
+        status = "fail"
+        message = "Stability gate did not pass."
+    return {
+        "check_id": "stability_gate_passed",
+        "status": status,
+        "blocking": True,
+        "message": message,
+        "details": {
+            "gate_id": report.gate_id,
+            "report_status": report.status,
+            "stability_gate_passed": stability_gate.get("passed"),
+            "release_window": release_window,
+        },
+    }
+
+
+def build_tracked_local_release_check(local_dir: Path, *, cwd: Path) -> dict[str, object]:
+    """Ensure machine-local artifacts are not tracked for release."""
+
+    warning = inspect_tracked_local_files(local_dir, cwd=cwd)
+    if warning is None:
+        return {
+            "check_id": "local_artifacts_excluded",
+            "status": "pass",
+            "blocking": True,
+            "message": "No unexpected .active-kb/local files are tracked by git.",
+            "details": {"local_dir": str(local_dir)},
+        }
+    return {
+        "check_id": "local_artifacts_excluded",
+        "status": "fail",
+        "blocking": True,
+        "message": ".active-kb/local contains tracked files that would leak machine-local artifacts into release.",
+        "details": {
+            "local_dir": str(local_dir),
+            "tracked_files": list(warning.details or ()),
+        },
+    }
+
+
+def build_remote_config_release_check(config_path: Path) -> dict[str, object]:
+    """Validate the remote_shared example config with a placeholder auth token."""
+
+    if not config_path.exists():
+        return {
+            "check_id": "remote_shared_config_valid",
+            "status": "fail",
+            "blocking": True,
+            "message": "remote_shared example config is missing.",
+            "details": {"config": str(config_path)},
+        }
+    env = {"ACTIVE_KB_AUTH_TOKEN": "release-checklist-placeholder-token"}
+    try:
+        resolved = resolve_config(
+            config_path=config_path,
+            local_config_path=config_path.parent / ".release-checklist.local.yaml",
+            env=env,
+            cwd=Path.cwd(),
+        )
+    except (ConfigError, ValueError) as exc:
+        return {
+            "check_id": "remote_shared_config_valid",
+            "status": "fail",
+            "blocking": True,
+            "message": "remote_shared example config could not be resolved.",
+            "details": {"config": str(config_path), "error": str(exc)},
+        }
+    security_result = validate_startup_security(resolved.model, env=env)
+    passed = security_result.ok
+    return {
+        "check_id": "remote_shared_config_valid",
+        "status": "pass" if passed else "fail",
+        "blocking": True,
+        "message": (
+            "remote_shared example config satisfies fail-safe security checks."
+            if passed
+            else "remote_shared example config fails fail-safe security validation."
+        ),
+        "details": {
+            "config": str(config_path),
+            "warnings": [warning.to_dict() for warning in security_result.warnings],
+        },
+    }
+
+
+def build_readme_command_check(readme_path: Path) -> dict[str, object]:
+    """Validate that README documents the minimum release command surface."""
+
+    required_commands = (
+        "active-kb init",
+        "active-kb index",
+        "active-kb serve",
+        "active-kb validate",
+        "active-kb clean",
+        "active-kb migrate",
+    )
+    if not readme_path.exists():
+        return {
+            "check_id": "readme_release_commands",
+            "status": "fail",
+            "blocking": True,
+            "message": "README is missing.",
+            "details": {"readme": str(readme_path)},
+        }
+    content = readme_path.read_text(encoding="utf-8")
+    missing = [command for command in required_commands if command not in content]
+    status = "pass" if not missing else "fail"
+    return {
+        "check_id": "readme_release_commands",
+        "status": status,
+        "blocking": True,
+        "message": (
+            "README documents init/index/serve/validate/clean/migrate."
+            if status == "pass"
+            else "README is missing one or more required release commands."
+        ),
+        "details": {"readme": str(readme_path), "missing_commands": missing},
+    }
+
+
+def summarize_release_checklist_status(checks: Sequence[dict[str, object]]) -> str:
+    """Collapse individual checklist checks into one overall status."""
+
+    if any(check.get("status") == "fail" for check in checks):
+        return "fail"
+    if any(check.get("status") == "partial_ready" for check in checks):
+        return "partial_ready"
+    return "pass"
 
 
 def resolve_from_args(

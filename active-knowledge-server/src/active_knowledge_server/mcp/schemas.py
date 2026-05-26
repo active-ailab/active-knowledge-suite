@@ -18,6 +18,7 @@ from active_knowledge_server.models.responses import Warning
 from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.security.audit import AuditLogger
 
+MCP_INTERFACE_SCHEMA_VERSION: Final = "mcp_interface.v1"
 BOOTSTRAP_TOOL_NAMES: Final[tuple[str, ...]] = ("ping", "server_info")
 QUERY_TOOL_NAMES: Final[tuple[str, ...]] = (
 	"kb_search",

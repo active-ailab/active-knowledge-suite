@@ -1460,24 +1460,30 @@ TODO：
 
 ### E7-07 Release checklist
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`OPS`、`DOC`
 - 依赖：`E7-01` 至 `E7-06`
+- 输出：已新增 `active-kb release checklist` 聚合 release 前机器检查，覆盖 baseline manifest 完整性、source docs hash 与 schema/parser/extractor/embedding/MCP schema version 记录、quality/performance/stability gate 报告通过、`remote_shared` 示例配置 fail-safe 校验、README 命令集检查，以及 `.active-kb/local` 被 git 追踪时的阻断；`baseline publish` 现在写入完整 baseline manifest，`.active-kb/local` 下误纳入版本控制的 stability probe artifacts 已移出 release 路径并由根 `.gitignore` 统一拦截。
 
 TODO：
 
-- [ ] baseline manifest 完整。
-- [ ] source docs hash 已记录。
-- [ ] schema/parser/extractor/embedding/MCP schema version 已记录。
-- [ ] eval quality/performance/stability gate 通过。
-- [ ] `.active-kb/local` 未打包进 release。
-- [ ] remote_shared 配置示例通过安全校验。
-- [ ] README 包含 init/index/serve/validate/clean/migrate。
+- [x] baseline manifest 完整。
+- [x] source docs hash 已记录。
+- [x] schema/parser/extractor/embedding/MCP schema version 已记录。
+- [x] eval quality/performance/stability gate 通过。
+- [x] `.active-kb/local` 未打包进 release。
+- [x] remote_shared 配置示例通过安全校验。
+- [x] README 包含 init/index/serve/validate/clean/migrate。
 
 验收标准：
 
-- release 前 checklist 可机器检查的项尽量机器检查。
+- [x] release 前 checklist 可机器检查的项尽量机器检查。
+
+验收命令：
+
+- `cd active-knowledge-server && uv run --group dev python -m pytest tests/unit/test_cli.py -k 'release_checklist or baseline_publish_json_writes_manifest'`
+- `cd active-knowledge-server && uv run active-kb release checklist --quality-report ../.active-kb/baseline/artifacts/eval/quality.json --performance-report ../.active-kb/baseline/artifacts/perf/performance.json --stability-report ../.active-kb/baseline/artifacts/stability/release-gate.json --report ../.active-kb/baseline/artifacts/release/checklist.json --format json`
 
 ---
 

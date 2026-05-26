@@ -303,6 +303,7 @@ active-kb validate   # 校验索引完整性（CI 可消费 --format json）
 active-kb eval run   # 运行评测集（--gate v1 触发 release gate）
 active-kb baseline   # 管理只读基线快照
 active-kb rebuild    # 清空并重建本地 overlay
+active-kb release checklist  # 聚合发布前 checklist
 active-kb migrate    # 索引格式版本迁移
 active-kb clean      # 清理缓存与临时文件
 ```

@@ -174,3 +174,20 @@ core report hash while ignoring time-like fields.
 uv run active-kb eval run --gate reproducibility \
   --report .active-kb/local/artifacts/eval/reproducibility.json
 ```
+
+## Release Checklist
+
+`active-kb release checklist` implements the E7-07 release gate. It validates
+baseline manifest completeness, checks that quality/performance/stability gate
+artifacts passed, blocks tracked `.active-kb/local` runtime files from leaking
+into release, re-validates `examples/remote-shared.yaml` against fail-safe
+security rules, and verifies that the top-level README still documents the
+required init/index/serve/validate/clean/migrate workflow.
+
+```bash
+uv run active-kb release checklist \
+  --quality-report .active-kb/local/artifacts/eval/quality.json \
+  --performance-report .active-kb/local/artifacts/perf/performance.json \
+  --stability-report .active-kb/baseline/artifacts/stability/release-gate.json \
+  --report .active-kb/baseline/artifacts/release/checklist.json
+```
