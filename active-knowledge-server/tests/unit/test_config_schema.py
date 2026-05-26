@@ -12,6 +12,7 @@ from active_knowledge_server.config.schema import (
     shorten_path,
     validate_config_dict,
 )
+from active_knowledge_server.security.path_guard import PathGuard
 
 
 def test_example_configs_validate() -> None:
@@ -24,6 +25,29 @@ def test_example_configs_validate() -> None:
         assert config.config_schema_version == "0.1"
         assert config.project.workspace_root
         assert config.storage.overlay.path
+
+
+def test_example_configs_allowlist_tracks_runtime_roots() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    server_root = repo_root / "active-knowledge-server"
+
+    for example in ("local-single-user.yaml", "remote-shared.yaml"):
+        resolved = resolve_config(
+            config_path=repo_root / "examples" / example,
+            env={},
+            cwd=server_root,
+        )
+        guard = PathGuard.from_config(resolved.model, cwd=server_root)
+
+        for label, path_value in (
+            ("workspace", resolved.model.project.workspace_root),
+            ("source_docs", resolved.model.runtime.source_docs_root),
+            ("workdir", resolved.model.runtime.workdir),
+        ):
+            guarded = guard.guard(path_value)
+
+            assert guarded.root.label == label
+            assert guarded.display_path == f"{label}:."
 
 
 def test_variable_expansion_uses_merged_values(tmp_path: Path) -> None:
@@ -71,6 +95,59 @@ def test_missing_required_field_error_names_dotted_path() -> None:
     del project["workspace_root"]
 
     with pytest.raises(ValueError, match="project.workspace_root"):
+        validate_config_dict(bad, source="unit test config")
+
+
+def test_index_writer_config_requires_positive_values() -> None:
+    good = default_config()
+    config = validate_config_dict(good, source="unit test config")
+
+    assert config.indexing.writer.batch_size == 64
+    assert config.indexing.writer.commit_interval_ms == 1000
+    assert config.storage.sqlite.journal_mode == "delete"
+    assert config.storage.sqlite.synchronous == "full"
+    assert config.storage.sqlite.wal_autocheckpoint_pages is None
+
+    bad = default_config()
+    indexing = bad["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["writer"] = {"batch_size": 0, "commit_interval_ms": 1000}
+
+    with pytest.raises(ValueError, match="indexing.writer.batch_size"):
+        validate_config_dict(bad, source="unit test config")
+
+    bad_interval = default_config()
+    indexing = bad_interval["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["writer"] = {"batch_size": 1, "commit_interval_ms": 0}
+
+    with pytest.raises(ValueError, match="indexing.writer.commit_interval_ms"):
+        validate_config_dict(bad_interval, source="unit test config")
+
+
+def test_sqlite_wal_requires_explicit_local_filesystem_acknowledgement() -> None:
+    bad = default_config()
+    storage = bad["storage"]
+    assert isinstance(storage, dict)
+    storage["sqlite"] = {
+        "journal_mode": "wal",
+        "synchronous": "normal",
+    }
+
+    with pytest.raises(ValueError, match="storage.sqlite.assume_local_filesystem"):
+        validate_config_dict(bad, source="unit test config")
+
+
+def test_sqlite_autocheckpoint_requires_wal_mode() -> None:
+    bad = default_config()
+    storage = bad["storage"]
+    assert isinstance(storage, dict)
+    storage["sqlite"] = {
+        "journal_mode": "delete",
+        "wal_autocheckpoint_pages": 64,
+    }
+
+    with pytest.raises(ValueError, match="storage.sqlite.wal_autocheckpoint_pages"):
         validate_config_dict(bad, source="unit test config")
 
 

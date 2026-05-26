@@ -7,7 +7,7 @@ import hashlib
 import json
 import stat
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Final, Literal
@@ -22,6 +22,7 @@ _GIT_TIMEOUT_SECONDS: Final = 5
 _HARD_EXCLUDE_PATTERNS: Final = (".git", ".hg", ".svn")
 
 GitBoundaryKind = Literal["directory", "file", "submodule_status"]
+WorkspaceScanProgressKind = Literal["directory", "file"]
 
 _LANGUAGE_BY_NAME: Final[Mapping[str, str]] = {
     "Kconfig": "kconfig",
@@ -165,6 +166,17 @@ class FileInventoryEntry:
 
 
 @dataclass(frozen=True)
+class WorkspaceScanProgress:
+    """One progress tick emitted while scanning the workspace."""
+
+    kind: WorkspaceScanProgressKind
+    relative_path: str
+    display_path: str
+    files_scanned: int
+    directories_scanned: int
+
+
+@dataclass(frozen=True)
 class WorkspaceInventory:
     """Stable source manifest for one workspace scan."""
 
@@ -231,6 +243,21 @@ class _RepoCandidate:
     boundary_kind: GitBoundaryKind
 
 
+@dataclass
+class _WorkspaceScanProgressState:
+    files_scanned: int = 0
+    directories_scanned: int = 0
+
+
+WorkspaceScanProgressCallback = Callable[[WorkspaceScanProgress], None]
+
+
+def noop_workspace_scan_progress_callback(_: WorkspaceScanProgress) -> None:
+    """Default callback used when callers do not observe workspace scan progress."""
+
+    return None
+
+
 class WorkspaceConnector:
     """Discover workspace areas, git boundaries, and guarded file inventory."""
 
@@ -265,9 +292,14 @@ class WorkspaceConnector:
             ),
         )
 
-    def scan(self) -> WorkspaceInventory:
+    def scan(
+        self,
+        *,
+        progress_callback: WorkspaceScanProgressCallback | None = None,
+    ) -> WorkspaceInventory:
         """Scan the workspace into a stable inventory manifest."""
 
+        callback = progress_callback or noop_workspace_scan_progress_callback
         warnings: list[WorkspaceWarning] = []
         root = self.guard.guard(self.workspace_root, must_exist=True)
         if not root.normalized_path.is_dir():
@@ -276,6 +308,16 @@ class WorkspaceConnector:
         scanned_files: list[_ScannedFile] = []
         repo_candidates: dict[str, _RepoCandidate] = {}
         area_stats: dict[str, _AreaStats] = {}
+        progress_state = _WorkspaceScanProgressState()
+        callback(
+            WorkspaceScanProgress(
+                kind="directory",
+                relative_path=".",
+                display_path=root.display_path,
+                files_scanned=0,
+                directories_scanned=0,
+            )
+        )
         self._scan_directory(
             root=root,
             current=root,
@@ -284,6 +326,8 @@ class WorkspaceConnector:
             repo_candidates=repo_candidates,
             area_stats=area_stats,
             warnings=warnings,
+            progress_callback=callback,
+            progress_state=progress_state,
         )
 
         repositories = discover_repositories(root, repo_candidates.values(), self.guard, warnings)
@@ -340,6 +384,8 @@ class WorkspaceConnector:
         repo_candidates: dict[str, _RepoCandidate],
         area_stats: dict[str, _AreaStats],
         warnings: list[WorkspaceWarning],
+        progress_callback: WorkspaceScanProgressCallback,
+        progress_state: _WorkspaceScanProgressState,
     ) -> None:
         marker_kind = git_marker_kind(current, self.guard, warnings)
         if marker_kind is not None:
@@ -411,6 +457,16 @@ class WorkspaceConnector:
                     )
                     continue
                 register_area(area_stats, root.display_path, relative_path, is_file=False)
+                progress_state.directories_scanned += 1
+                progress_callback(
+                    WorkspaceScanProgress(
+                        kind="directory",
+                        relative_path=relative_path,
+                        display_path=display_for_relative(root.display_path, relative_path),
+                        files_scanned=progress_state.files_scanned,
+                        directories_scanned=progress_state.directories_scanned,
+                    )
+                )
                 self._scan_directory(
                     root=root,
                     current=guarded,
@@ -419,6 +475,8 @@ class WorkspaceConnector:
                     repo_candidates=repo_candidates,
                     area_stats=area_stats,
                     warnings=warnings,
+                    progress_callback=progress_callback,
+                    progress_state=progress_state,
                 )
                 continue
 
@@ -443,6 +501,16 @@ class WorkspaceConnector:
                     area=area_for_relative_path(relative_path),
                     language=detect_language(Path(relative_path)),
                     is_symlink=is_symlink,
+                )
+            )
+            progress_state.files_scanned += 1
+            progress_callback(
+                WorkspaceScanProgress(
+                    kind="file",
+                    relative_path=relative_path,
+                    display_path=display_for_relative(root.display_path, relative_path),
+                    files_scanned=progress_state.files_scanned,
+                    directories_scanned=progress_state.directories_scanned,
                 )
             )
 
@@ -474,6 +542,7 @@ def scan_workspace(
     include: Iterable[str] = (),
     exclude: Iterable[str] = (),
     hash_files: bool = True,
+    progress_callback: WorkspaceScanProgressCallback | None = None,
 ) -> WorkspaceInventory:
     """Convenience wrapper for one-off workspace scans."""
 
@@ -485,7 +554,7 @@ def scan_workspace(
             exclude=normalize_patterns(exclude),
             hash_files=hash_files,
         ),
-    ).scan()
+    ).scan(progress_callback=progress_callback)
 
 
 def discover_repositories(

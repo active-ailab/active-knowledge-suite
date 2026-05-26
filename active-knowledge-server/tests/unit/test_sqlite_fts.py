@@ -17,6 +17,7 @@ from active_knowledge_server.storage import (
     VectorRefRecord,
 )
 from active_knowledge_server.storage.sqlite_store import (
+    SQLitePragmaProfile,
     SQLiteStorageAdapter,
     migrate_sqlite_store,
 )
@@ -158,6 +159,92 @@ def test_chunk_and_entity_upserts_sync_fts_and_support_filters(tmp_path: Path) -
         )
     )
     assert [match.logical_object_id for match in entity_matches] == ["entity-sensor-register"]
+
+
+def test_writer_transaction_rolls_back_metadata_and_fts(tmp_path: Path) -> None:
+    adapter, baseline_path, _overlay_path = build_adapter(tmp_path)
+    writer = adapter.writer(StorageWriteRequest(target="baseline"))
+
+    try:
+        with writer.transaction():
+            writer.upsert_file(
+                FileRecord(
+                    file_id="file-rollback",
+                    snapshot_id="current",
+                    source_id="knowledge-api",
+                    relative_path="knowledge-sources/api/rollback.md",
+                    content_hash="hash:file-rollback",
+                    profile_id="watch",
+                    language="md",
+                )
+            )
+            writer.upsert_chunk(
+                ChunkRecord(
+                    chunk_id="chunk-rollback",
+                    snapshot_id="current",
+                    file_id="file-rollback",
+                    content_hash="hash:chunk-rollback",
+                    chunk_type="doc_section",
+                    ordinal=0,
+                    text="Rollback should remove this FTS row.",
+                    profile_id="watch",
+                    metadata={"doc_type": "api", "domain": "engineering"},
+                )
+            )
+            raise RuntimeError("force rollback")
+    except RuntimeError:
+        pass
+
+    assert table_count(baseline_path, "file") == 0
+    assert table_count(baseline_path, "chunk") == 0
+    assert table_count(baseline_path, "chunk_fts") == 0
+    assert table_count(baseline_path, "doc_fts") == 0
+
+
+def test_writer_applies_configured_sqlite_pragmas(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.db"
+    overlay_path = tmp_path / "overlay.db"
+    migrate_sqlite_store(baseline_path, target="baseline_metadata")
+    migrate_sqlite_store(overlay_path, target="overlay_metadata")
+    adapter = SQLiteStorageAdapter(
+        baseline_metadata_path=baseline_path,
+        overlay_metadata_path=overlay_path,
+        pragma_profile=SQLitePragmaProfile(
+            journal_mode="wal",
+            synchronous="normal",
+            wal_autocheckpoint_pages=32,
+        ),
+    )
+
+    writer = adapter.writer(StorageWriteRequest(target="overlay"))
+    with writer.transaction():
+        writer.upsert_file(
+            FileRecord(
+                file_id="file-wal",
+                snapshot_id="current",
+                source_id="knowledge-api",
+                relative_path="knowledge-sources/api/wal.md",
+                content_hash="hash:file-wal",
+                profile_id="watch",
+                language="md",
+            )
+        )
+        transaction_connection = writer._transaction_connection
+        assert transaction_connection is not None
+        synchronous = transaction_connection.execute("PRAGMA synchronous").fetchone()
+        wal_autocheckpoint = transaction_connection.execute(
+            "PRAGMA wal_autocheckpoint"
+        ).fetchone()
+        assert synchronous is not None
+        assert int(synchronous[0]) == 1
+        assert wal_autocheckpoint is not None
+        assert int(wal_autocheckpoint[0]) == 32
+
+    with sqlite3.connect(overlay_path) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+
+    assert journal_mode is not None
+    assert str(journal_mode[0]).lower() == "wal"
 
 
 def test_overlay_candidate_overrides_baseline_for_same_logical_id(tmp_path: Path) -> None:

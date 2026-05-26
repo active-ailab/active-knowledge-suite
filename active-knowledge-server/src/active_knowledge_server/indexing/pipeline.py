@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, cast
 
 from active_knowledge_server.config.loader import resolve_runtime_path
@@ -14,8 +14,13 @@ from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.connectors.source_docs import (
     SourceDocsConnector,
     SourceDocsManifest,
+    SourceDocsScanProgress,
 )
-from active_knowledge_server.connectors.workspace import WorkspaceConnector, WorkspaceInventory
+from active_knowledge_server.connectors.workspace import (
+    WorkspaceConnector,
+    WorkspaceInventory,
+    WorkspaceScanProgress,
+)
 from active_knowledge_server.indexing.code_indexer import (
     CODE_INDEXER_SCHEMA_VERSION,
     CodeIndexer,
@@ -62,7 +67,11 @@ from active_knowledge_server.storage import (
     make_tombstone_id,
 )
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
-from active_knowledge_server.storage.sqlite_store import SQLiteStorageAdapter, utc_now
+from active_knowledge_server.storage.sqlite_store import (
+    SQLiteStorageAdapter,
+    migrate_local_sqlite_stores,
+    utc_now,
+)
 
 INCREMENTAL_INDEX_STATE_SCHEMA_VERSION: Final = "incremental_index_state.v1"
 INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION: Final = "incremental_index_result.v1"
@@ -260,6 +269,7 @@ class IncrementalIndexPipeline:
     ) -> None:
         self._config = config
         self._cwd = (cwd or Path.cwd()).expanduser()
+        self._manage_local_sqlite_stores = metadata_adapter is None
         self._metadata_adapter = metadata_adapter or SQLiteStorageAdapter.from_config(
             config,
             cwd=self._cwd,
@@ -327,12 +337,52 @@ class IncrementalIndexPipeline:
         self,
         *,
         snapshot_id: str = CURRENT_SNAPSHOT_ID,
+        progress_callback: IndexProgressCallback | None = None,
+        started_at: str | None = None,
     ) -> tuple[IncrementalIndexState, WorkspaceInventory, SourceDocsManifest, CollectedProfiles]:
         """Scan current manifests and return the derived incremental state."""
 
-        workspace_inventory = self._workspace_connector.scan()
-        source_docs_manifest = self._source_docs_connector.scan()
+        callback = progress_callback or noop_progress_callback
+        discover_started_at = started_at or utc_timestamp()
+
+        def emit_discover(stage_done: int, message: str) -> None:
+            callback(
+                IndexProgressEvent(
+                    phase="discover",
+                    stage_total=3,
+                    stage_done=stage_done,
+                    message=message,
+                    started_at=discover_started_at,
+                    updated_at=utc_timestamp(),
+                )
+            )
+
+        def handle_workspace_scan_progress(progress: WorkspaceScanProgress) -> None:
+            emit_discover(0, _format_workspace_discover_message(progress))
+
+        def handle_source_docs_scan_progress(progress: SourceDocsScanProgress) -> None:
+            emit_discover(1, _format_source_docs_discover_message(progress))
+
+        callback(
+            IndexProgressEvent(
+                phase="discover",
+                stage_total=3,
+                stage_done=0,
+                message="Scanning workspace inventory",
+                started_at=discover_started_at,
+                updated_at=discover_started_at,
+            )
+        )
+        workspace_inventory = self._workspace_connector.scan(
+            progress_callback=handle_workspace_scan_progress,
+        )
+        emit_discover(1, "Scanning source documents")
+        source_docs_manifest = self._source_docs_connector.scan(
+            progress_callback=handle_source_docs_scan_progress,
+        )
+        emit_discover(2, "Collecting build profiles")
         collected_profiles = self._profile_collector.collect(snapshot_id=snapshot_id)
+        emit_discover(3, "Discovery complete")
         state = IncrementalIndexState(
             schema_version=INCREMENTAL_INDEX_STATE_SCHEMA_VERSION,
             snapshot_id=snapshot_id,
@@ -365,12 +415,18 @@ class IncrementalIndexPipeline:
         *,
         snapshot_id: str = CURRENT_SNAPSHOT_ID,
         source: Literal["all", "code", "docs"] = "all",
+        progress_callback: IndexProgressCallback | None = None,
+        started_at: str | None = None,
     ) -> IncrementalIndexPlan:
         """Plan one incremental update from persisted state and current manifests."""
 
         previous = self.load_state()
-        current, workspace_inventory, source_docs_manifest, collected_profiles = self.capture_state(
-            snapshot_id=snapshot_id
+        current, workspace_inventory, source_docs_manifest, collected_profiles = (
+            self.capture_state(
+                snapshot_id=snapshot_id,
+                progress_callback=progress_callback,
+                started_at=started_at,
+            )
         )
 
         code_schema_changed = (
@@ -497,9 +553,17 @@ class IncrementalIndexPipeline:
     ) -> IncrementalIndexResult:
         """Execute one incremental overlay update and persist the next incremental state."""
 
-        plan = self.plan(snapshot_id=snapshot_id, source=source)
+        if self._manage_local_sqlite_stores:
+            migrate_local_sqlite_stores(self._config, cwd=self._cwd)
+
         callback = progress_callback or noop_progress_callback
         started_at = utc_timestamp()
+        plan = self.plan(
+            snapshot_id=snapshot_id,
+            source=source,
+            progress_callback=callback,
+            started_at=started_at,
+        )
         doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
         code_paths_to_collect = _incremental_code_paths_to_collect(plan)
         progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)
@@ -547,7 +611,12 @@ class IncrementalIndexPipeline:
 
         warnings = list(plan.warnings)
         failed = False
-        result_metadata: dict[str, object] = {}
+        result_metadata: dict[str, object] = {
+            "writer": {
+                "batch_size": self._config.indexing.writer.batch_size,
+                "commit_interval_ms": self._config.indexing.writer.commit_interval_ms,
+            },
+        }
 
         code_indexed: IndexedCode | None = None
         if source in {"all", "code"} and (
@@ -637,6 +706,13 @@ class IncrementalIndexPipeline:
                         stage_done=code_apply_done,
                         current_path=relative_path,
                         message="Applying code changes",
+                    )
+                if progress_totals["code_apply"] > 0:
+                    emit(
+                        phase="code_apply",
+                        stage_total=progress_totals["code_apply"],
+                        stage_done=code_apply_done,
+                        message="Flushing code changes to overlay metadata",
                     )
                 writer.flush()
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
@@ -815,11 +891,31 @@ class IncrementalIndexPipeline:
                                 details={"path": relative_path, "error": str(exc)},
                             )
                         )
+            if progress_totals["doc_apply"] > 0:
+                emit(
+                    phase="doc_apply",
+                    stage_total=progress_totals["doc_apply"],
+                    stage_done=doc_apply_done,
+                    message="Flushing document changes to overlay metadata",
+                )
             writer.flush()
+            if progress_totals["vectors_apply"] > 0:
+                emit(
+                    phase="vectors_apply",
+                    stage_total=progress_totals["vectors_apply"],
+                    stage_done=vector_apply_done,
+                    message="Flushing document vectors to overlay store",
+                )
             vector_writer.flush()
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
             try:
+                emit(
+                    phase="profile_relations",
+                    stage_total=1,
+                    stage_done=0,
+                    message="Refreshing profile-conditioned relations",
+                )
                 self._rebuild_profile_conditioned_relations(
                     reader=reader,
                     writer=writer,
@@ -827,6 +923,12 @@ class IncrementalIndexPipeline:
                     collected_profiles=plan.collected_profiles,
                     changed_profile_ids=set(plan.changed_profile_ids),
                     removed_profile_ids=set(plan.removed_profile_ids),
+                )
+                emit(
+                    phase="profile_relations",
+                    stage_total=1,
+                    stage_done=0,
+                    message="Flushing profile-conditioned relation updates",
                 )
                 writer.flush()
                 global_done += 1
@@ -851,6 +953,12 @@ class IncrementalIndexPipeline:
 
         if _workspace_map_refresh_required(plan):
             try:
+                emit(
+                    phase="workspace_map",
+                    stage_total=1,
+                    stage_done=0,
+                    message="Refreshing workspace map",
+                )
                 self._workspace_map_builder.collect_and_write(
                     snapshot_id=snapshot_id,
                     workspace_inventory=plan.workspace_inventory,
@@ -909,23 +1017,20 @@ class IncrementalIndexPipeline:
         snapshot_id: str,
     ) -> None:
         old_bundle = _load_live_bundle(reader, relative_path=relative_path, snapshot_id=snapshot_id)
-        if old_bundle is not None:
-            self._diff_and_mark_stale(
-                writer,
-                old_bundle=old_bundle,
-                new_bundle=new_bundle,
-                snapshot_id=snapshot_id,
-                reason="incremental_replace",
-            )
-        writer.upsert_file(new_bundle.file_record)
-        for record in new_bundle.chunks:
-            writer.upsert_chunk(record)
-        for record in new_bundle.entities:
-            writer.upsert_entity(record)
-        for record in new_bundle.relations:
-            writer.upsert_relation(record)
-        for record in new_bundle.evidence:
-            writer.upsert_evidence(record)
+        with writer.transaction():
+            if old_bundle is not None:
+                self._diff_and_mark_stale(
+                    writer,
+                    old_bundle=old_bundle,
+                    new_bundle=new_bundle,
+                    snapshot_id=snapshot_id,
+                    reason="incremental_replace",
+                )
+            writer.upsert_file(new_bundle.file_record)
+            writer.upsert_chunks(new_bundle.chunks)
+            writer.upsert_entities(new_bundle.entities)
+            writer.upsert_relations(new_bundle.relations)
+            writer.upsert_evidence_records(new_bundle.evidence)
 
     def _apply_doc_bundle(
         self,
@@ -937,21 +1042,19 @@ class IncrementalIndexPipeline:
         snapshot_id: str,
     ) -> None:
         old_bundle = _load_live_bundle(reader, relative_path=relative_path, snapshot_id=snapshot_id)
-        if old_bundle is not None:
-            self._diff_and_mark_stale(
-                writer,
-                old_bundle=old_bundle,
-                new_bundle=new_bundle,
-                snapshot_id=snapshot_id,
-                reason="incremental_replace",
-            )
-        writer.upsert_file(new_bundle.file_record)
-        for record in new_bundle.chunks:
-            writer.upsert_chunk(record)
-        for record in new_bundle.entities:
-            writer.upsert_entity(record)
-        for record in new_bundle.evidence:
-            writer.upsert_evidence(record)
+        with writer.transaction():
+            if old_bundle is not None:
+                self._diff_and_mark_stale(
+                    writer,
+                    old_bundle=old_bundle,
+                    new_bundle=new_bundle,
+                    snapshot_id=snapshot_id,
+                    reason="incremental_replace",
+                )
+            writer.upsert_file(new_bundle.file_record)
+            writer.upsert_chunks(new_bundle.chunks)
+            writer.upsert_entities(new_bundle.entities)
+            writer.upsert_evidence_records(new_bundle.evidence)
 
     def _upsert_doc_vectors(
         self,
@@ -960,19 +1063,14 @@ class IncrementalIndexPipeline:
         *,
         relative_path: str,
     ) -> None:
-        for write in indexed.vector_writes:
-            chunk = next(
-                (
-                    record
-                    for record in indexed.chunk_records
-                    if record.chunk_id == write.record.object_id
-                    and _chunk_relative_path(record) == relative_path
-                ),
-                None,
-            )
-            if chunk is None:
-                continue
-            vector_writer.upsert_vector(write.record, write.embedding)
+        chunk_paths = {
+            record.chunk_id: _chunk_relative_path(record) for record in indexed.chunk_records
+        }
+        vector_writer.upsert_vectors(
+            (write.record, write.embedding)
+            for write in indexed.vector_writes
+            if chunk_paths.get(write.record.object_id) == relative_path
+        )
 
     def _tombstone_deleted_path(
         self,
@@ -986,12 +1084,13 @@ class IncrementalIndexPipeline:
         bundle = _load_live_bundle(reader, relative_path=relative_path, snapshot_id=snapshot_id)
         if bundle is None:
             return
-        writer.tombstone_file(
-            bundle.file_record.file_id,
-            scope=QueryScope(snapshot_id=snapshot_id),
-            reason=reason,
-            created_by_job="job:incremental_index",
-        )
+        with writer.transaction():
+            writer.tombstone_file(
+                bundle.file_record.file_id,
+                scope=QueryScope(snapshot_id=snapshot_id),
+                reason=reason,
+                created_by_job="job:incremental_index",
+            )
 
     def _rebuild_profile_conditioned_relations(
         self,
@@ -1313,6 +1412,50 @@ def _workspace_map_refresh_required(plan: IncrementalIndexPlan) -> bool:
             or plan.removed_profile_ids
         )
     )
+
+
+def _format_discover_counts(files_scanned: int, directories_scanned: int) -> str:
+    file_label = "file" if files_scanned == 1 else "files"
+    directory_label = "directory" if directories_scanned == 1 else "directories"
+    return f"{files_scanned} {file_label}, {directories_scanned} {directory_label}"
+
+
+def _format_discover_target(
+    relative_path: str,
+    *,
+    root_label: str,
+    kind: Literal["directory", "file"],
+) -> str:
+    if relative_path in {"", "."}:
+        return root_label
+    parts = PurePosixPath(relative_path).parts
+    if kind == "directory":
+        summary_parts = parts[-2:]
+    elif len(parts) <= 3:
+        summary_parts = parts
+    else:
+        summary_parts = parts[-3:]
+    return "/".join(summary_parts) or root_label
+
+
+def _format_workspace_discover_message(progress: WorkspaceScanProgress) -> str:
+    target = _format_discover_target(
+        progress.relative_path,
+        root_label="workspace root",
+        kind=progress.kind,
+    )
+    counts = _format_discover_counts(progress.files_scanned, progress.directories_scanned)
+    return f"Scanning workspace inventory: {target} ({counts})"
+
+
+def _format_source_docs_discover_message(progress: SourceDocsScanProgress) -> str:
+    target = _format_discover_target(
+        progress.relative_path,
+        root_label="source docs root",
+        kind=progress.kind,
+    )
+    counts = _format_discover_counts(progress.files_scanned, progress.directories_scanned)
+    return f"Scanning source documents: {target} ({counts})"
 
 
 def _filter_source_docs_manifest(

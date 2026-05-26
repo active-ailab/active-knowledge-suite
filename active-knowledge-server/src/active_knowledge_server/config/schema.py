@@ -12,6 +12,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from pydantic import (
     ConfigDict as PydanticConfigDict,
@@ -166,6 +167,31 @@ class StoreConfig(ConfigModel):
     mode: StoreMode = "readwrite"
 
 
+class SQLiteTuningConfig(ConfigModel):
+    """SQLite journal and checkpoint tuning for metadata-side writers."""
+
+    journal_mode: Literal["delete", "wal"] = "delete"
+    synchronous: Literal["full", "normal"] = "full"
+    wal_autocheckpoint_pages: int | None = Field(default=None, ge=1)
+    assume_local_filesystem: bool = False
+
+    @model_validator(mode="after")
+    def validate_wal_guards(self) -> SQLiteTuningConfig:
+        """Gate WAL behind an explicit local-filesystem acknowledgement."""
+
+        if self.journal_mode == "wal" and not self.assume_local_filesystem:
+            raise ValueError(
+                "storage.sqlite.assume_local_filesystem must be true when "
+                "storage.sqlite.journal_mode=wal"
+            )
+        if self.journal_mode != "wal" and self.wal_autocheckpoint_pages is not None:
+            raise ValueError(
+                "storage.sqlite.wal_autocheckpoint_pages requires "
+                "storage.sqlite.journal_mode=wal"
+            )
+        return self
+
+
 class StorageConfig(ConfigModel):
     """Metadata, vector, artifact, and cache storage config."""
 
@@ -175,6 +201,7 @@ class StorageConfig(ConfigModel):
     jobs: StoreConfig
     vector: StoreConfig
     vector_delta: StoreConfig
+    sqlite: SQLiteTuningConfig = Field(default_factory=SQLiteTuningConfig)
     artifacts_root: str
     local_artifacts_root: str
     cache_root: str
@@ -207,6 +234,13 @@ class EmbeddingsConfig(ConfigModel):
     batch_size: int = Field(default=32, ge=1)
 
 
+class IndexWriterConfig(ConfigModel):
+    """Single-writer batching policy for index apply phases."""
+
+    batch_size: int = Field(default=64, ge=1)
+    commit_interval_ms: int = Field(default=1000, ge=1)
+
+
 class LearnedCardsConfig(ConfigModel):
     """Learned card ingestion switches."""
 
@@ -225,6 +259,7 @@ class IndexingConfig(ConfigModel):
     code: CodeIndexingConfig = Field(default_factory=CodeIndexingConfig)
     docs: DocsIndexingConfig = Field(default_factory=DocsIndexingConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
+    writer: IndexWriterConfig = Field(default_factory=IndexWriterConfig)
     learned_cards: LearnedCardsConfig = Field(default_factory=LearnedCardsConfig)
 
     @field_validator("workers")

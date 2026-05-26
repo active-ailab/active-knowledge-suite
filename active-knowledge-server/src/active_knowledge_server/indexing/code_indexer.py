@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.connectors.workspace import (
@@ -58,6 +60,7 @@ _WORKSPACE_LANGUAGE_SET: Final[frozenset[str]] = frozenset(
     {"c", "cpp", "c-header", "cpp-header", "makefile"}
 )
 _C_FAMILY_LANGUAGE_SET: Final[frozenset[str]] = frozenset({"c", "cpp", "c-header", "cpp-header"})
+_T = TypeVar("_T")
 _SYMBOL_ENTITY_TYPE: Final[dict[str, str]] = {
     "function": "Function",
     "macro": "Macro",
@@ -211,6 +214,37 @@ class CodeIndexer:
             task_count=stage_total,
             phase="code",
         )
+        collect_message = (
+            f"Collecting code files with {workers.workers} "
+            f"worker{'s' if workers.workers != 1 else ''}"
+        )
+        if stage_total:
+            callback(
+                IndexProgressEvent(
+                    phase="code_collect",
+                    stage_total=stage_total,
+                    stage_done=0,
+                    message=collect_message,
+                    warnings_count=len(warnings),
+                    started_at=started_at,
+                    updated_at=started_at,
+                )
+            )
+
+        def report_finalize(message: str) -> None:
+            if not stage_total:
+                return
+            callback(
+                IndexProgressEvent(
+                    phase="code_finalize",
+                    stage_total=stage_total,
+                    stage_done=stage_total,
+                    message=message,
+                    warnings_count=len(warnings),
+                    started_at=started_at,
+                    updated_at=utc_timestamp(),
+                )
+            )
 
         def report_progress(path: str, done: int) -> None:
             callback(
@@ -219,7 +253,7 @@ class CodeIndexer:
                     stage_total=stage_total,
                     stage_done=done,
                     current_path=path,
-                    message="Collecting code files",
+                    message=collect_message,
                     warnings_count=len(warnings),
                     started_at=started_at,
                     updated_at=utc_timestamp(),
@@ -259,6 +293,9 @@ class CodeIndexer:
             warnings.extend(result.value.warnings)
         collected_entries = tuple(
             entry for entry in indexed_entries if entry.relative_path in physical_file_records
+        )
+        report_finalize(
+            f"Collected {len(collected_entries)}/{stage_total} code files; assembling file and symbol records"
         )
 
         directory_anchor_records: dict[str, FileRecord] = {}
@@ -494,6 +531,9 @@ class CodeIndexer:
                 )
                 ordinal += 1
 
+        report_finalize(
+            f"Collected {len(collected_entries)}/{stage_total} code files; building module and macro relations"
+        )
         for makefile_path, parsed_makefile in makefile_parses.items():
             makefile_file_record = physical_file_records[makefile_path]
             makefile_entity_id = file_entity_ids[makefile_path]
@@ -687,6 +727,9 @@ class CodeIndexer:
                         )
                     )
 
+        report_finalize(
+            "Finalizing code index bundle for overlay apply"
+        )
         return IndexedCode(
             schema_version=CODE_INDEXER_SCHEMA_VERSION,
             snapshot_id=snapshot_id,
@@ -785,20 +828,91 @@ class CodeIndexer:
             workspace_inventory=workspace_inventory,
             progress_callback=progress_callback,
         )
-        for record in indexed.source_records:
-            writer.upsert_source(record)
-        for record in indexed.file_records:
-            writer.upsert_file(record)
-        for record in indexed.chunk_records:
-            writer.upsert_chunk(record)
-        for record in indexed.entity_records:
-            writer.upsert_entity(record)
-        for record in indexed.relation_records:
-            writer.upsert_relation(record)
-        for record in indexed.evidence_records:
-            writer.upsert_evidence(record)
+        batch_size = self._config.indexing.writer.batch_size
+        commit_interval_ms = self._config.indexing.writer.commit_interval_ms
+        _write_in_batches(
+            indexed.source_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_source,
+        )
+        _write_in_batches(
+            indexed.file_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_file,
+        )
+        _write_in_batches(
+            indexed.chunk_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_chunk,
+        )
+        _write_in_batches(
+            indexed.entity_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_entity,
+        )
+        _write_in_batches(
+            indexed.relation_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_relation,
+        )
+        _write_in_batches(
+            indexed.evidence_records,
+            batch_size=batch_size,
+            commit_interval_ms=commit_interval_ms,
+            transaction=writer.transaction,
+            write_one=writer.upsert_evidence,
+        )
         writer.flush()
         return indexed
+
+
+def _write_in_batches(
+    records: Sequence[_T],
+    *,
+    batch_size: int,
+    commit_interval_ms: int,
+    transaction: Callable[[], AbstractContextManager[object]],
+    write_one: Callable[[_T], None],
+) -> None:
+    size = max(batch_size, 1)
+    interval_seconds = max(commit_interval_ms, 1) / 1000.0
+    active_transaction: AbstractContextManager[object] | None = None
+    records_in_transaction = 0
+    transaction_started_at = 0.0
+    try:
+        for record in records:
+            if active_transaction is None:
+                active_transaction = transaction()
+                active_transaction.__enter__()
+                records_in_transaction = 0
+                transaction_started_at = time.monotonic()
+            write_one(record)
+            records_in_transaction += 1
+            if (
+                records_in_transaction >= size
+                or time.monotonic() - transaction_started_at >= interval_seconds
+            ):
+                completed_transaction = active_transaction
+                active_transaction = None
+                completed_transaction.__exit__(None, None, None)
+        if active_transaction is not None:
+            completed_transaction = active_transaction
+            active_transaction = None
+            completed_transaction.__exit__(None, None, None)
+    except BaseException as exc:
+        if active_transaction is not None:
+            active_transaction.__exit__(type(exc), exc, exc.__traceback__)
+        raise
 
 
 def count_indexable_workspace_files(

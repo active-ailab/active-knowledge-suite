@@ -1724,6 +1724,12 @@ def run_full_index(
         "relation_schema_version": None
         if relation_records is None
         else relation_records.schema_version,
+        "metadata": {
+            "writer": {
+                "batch_size": model.indexing.writer.batch_size,
+                "commit_interval_ms": model.indexing.writer.commit_interval_ms,
+            },
+        },
     }
 
 

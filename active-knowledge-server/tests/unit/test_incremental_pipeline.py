@@ -8,6 +8,8 @@ from typing import Any
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
+from active_knowledge_server.connectors.source_docs import SourceDocsScanProgress
+from active_knowledge_server.connectors.workspace import WorkspaceScanProgress
 from active_knowledge_server.indexing import (
     CURRENT_SNAPSHOT_ID,
     CodeIndexer,
@@ -19,6 +21,11 @@ from active_knowledge_server.indexing import (
     ProfileCollector,
     ProfileConditionedRelationExtractor,
     summarize_entity_profile_states_from_reader,
+)
+from active_knowledge_server.indexing.pipeline import (
+    _format_discover_target,
+    _format_source_docs_discover_message,
+    _format_workspace_discover_message,
 )
 from active_knowledge_server.indexing.progress import IndexProgressEvent
 from active_knowledge_server.storage import QueryScope, StorageWriteRequest
@@ -265,6 +272,43 @@ def test_incremental_pipeline_plans_rebuilds_for_schema_and_embedding_changes(
     }
 
 
+def test_incremental_pipeline_migrates_local_sqlite_stores_before_run(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+
+    overlay_path = Path(config.storage.overlay.path)
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(overlay_path).close()
+
+    pipeline = IncrementalIndexPipeline(config, cwd=tmp_path)
+
+    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+
+    assert result.result_status == "ready"
+    with sqlite3.connect(overlay_path) as connection:
+        overlay_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "chunk" in overlay_tables
+    assert "schema_version" in overlay_tables
+
+    jobs_path = Path(config.storage.jobs.path)
+    with sqlite3.connect(jobs_path) as connection:
+        jobs_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    assert "job" in jobs_tables
+
+
 def test_incremental_pipeline_replaces_changed_baseline_code_without_rebuilding_docs(
     tmp_path: Path,
 ) -> None:
@@ -399,11 +443,24 @@ def test_incremental_pipeline_rebuilds_profile_relations_when_dotconfig_changes(
         encoding="utf-8",
     )
 
-    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    events: list[IndexProgressEvent] = []
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        progress_callback=events.append,
+    )
 
     assert result.result_status == "ready"
     assert result.plan.rebuild_profile_conditioned_relations is True
     assert result.plan.changed_profile_ids == ("mhs003_watch",)
+    profile_relation_events = [event for event in events if event.phase == "profile_relations"]
+    assert profile_relation_events
+    assert profile_relation_events[0].stage_done == 0
+    assert any(
+        event.message == "Flushing profile-conditioned relation updates"
+        for event in profile_relation_events
+    )
+    assert profile_relation_events[-1].stage_done == 1
 
     states = summarize_entity_profile_states_from_reader(
         metadata_adapter.reader(),
@@ -456,11 +513,21 @@ def test_incremental_pipeline_rebuilds_doc_vectors_on_embedding_model_change(
         vector_adapter=vector_adapter,
     )
 
-    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    events: list[IndexProgressEvent] = []
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        progress_callback=events.append,
+    )
 
     assert result.result_status == "ready"
     assert result.plan.changed_doc_paths == ()
     assert result.plan.rebuild_vectors is True
+    assert any(
+        event.phase == "vectors_apply"
+        and event.message == "Flushing document vectors to overlay store"
+        for event in events
+    )
 
     stored_vectors = read_vector_collection(delta_vectors)
     assert stored_vectors
@@ -567,11 +634,83 @@ int health_progress_probe(void)
 
     assert result.result_status == "ready"
     assert events
-    assert events[0].phase == "plan"
+    assert events[0].phase == "discover"
+    discover_events = [event for event in events if event.phase == "discover"]
+    assert discover_events[0].stage_done == 0
+    assert discover_events[-1].stage_done == 3
+    assert [event.stage_done for event in discover_events] == sorted(
+        event.stage_done for event in discover_events
+    )
+    assert any(
+        event.message is not None and "workspace inventory:" in event.message
+        for event in discover_events
+    )
+    code_collect_events = [event for event in events if event.phase == "code_collect"]
+    assert code_collect_events
+    assert code_collect_events[0].stage_done == 0
+    assert "worker" in (code_collect_events[0].message or "")
+    code_finalize_events = [event for event in events if event.phase == "code_finalize"]
+    assert code_finalize_events
+    assert any("assembling" in (event.message or "").lower() for event in code_finalize_events)
+    assert any(
+        event.phase == "code_apply"
+        and event.message == "Flushing code changes to overlay metadata"
+        for event in events
+    )
+    workspace_map_events = [event for event in events if event.phase == "workspace_map"]
+    assert workspace_map_events
+    assert workspace_map_events[0].stage_done == 0
+    assert workspace_map_events[-1].stage_done == 1
     assert events[-1].phase == "done"
     assert events[-1].global_done == events[-1].global_total
     assert [event.global_done for event in events if event.global_done is not None] == sorted(
         event.global_done for event in events if event.global_done is not None
+    )
+
+
+def test_format_discover_target_summarizes_directory_and_file_tails() -> None:
+    assert (
+        _format_discover_target(
+            ".repo/project-objects/1f/pack",
+            root_label="workspace root",
+            kind="directory",
+        )
+        == "1f/pack"
+    )
+    assert (
+        _format_discover_target(
+            "knowledge-sources/engineering/platform/sensor.md",
+            root_label="source docs root",
+            kind="file",
+        )
+        == "engineering/platform/sensor.md"
+    )
+
+
+def test_format_discover_messages_prefer_directory_summary() -> None:
+    workspace_message = _format_workspace_discover_message(
+        WorkspaceScanProgress(
+            kind="directory",
+            relative_path=".repo/project-objects/1f/pack",
+            display_path=".repo/project-objects/1f/pack",
+            files_scanned=0,
+            directories_scanned=716,
+        )
+    )
+    source_docs_message = _format_source_docs_discover_message(
+        SourceDocsScanProgress(
+            kind="directory",
+            relative_path="engineering/platform/widgets",
+            display_path="engineering/platform/widgets",
+            category="engineering",
+            files_scanned=12,
+            directories_scanned=8,
+        )
+    )
+
+    assert workspace_message == "Scanning workspace inventory: 1f/pack (0 files, 716 directories)"
+    assert source_docs_message == (
+        "Scanning source documents: platform/widgets (12 files, 8 directories)"
     )
 
 

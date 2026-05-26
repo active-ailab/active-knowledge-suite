@@ -31,7 +31,7 @@ runtime:
 project:
   id: active
   display_name: Active
-  workspace_root: .
+  workspace_root: /home/gangan/ZeppOS
   branch_strategy: baseline-first
   baseline_branch: main
   default_snapshot: current
@@ -98,6 +98,9 @@ indexing:
   # Phase 0 boundary: workers only affects collect/parse work.
   # Set workers: 1 to force serial collect; SQLite and LanceDB writes remain single-writer.
   workers: auto
+  writer:
+    batch_size: 64
+    commit_interval_ms: 1000
   code:
     enable_full_code_scan: true
     enable_ctags: true
@@ -132,9 +135,9 @@ query:
 
 security:
   path_allowlist:
-    - .
-    - ../knowledge-sources
-    - ../.active-kb
+    - ${project.workspace_root}
+    - ${runtime.source_docs_root}
+    - ${runtime.workdir}
   secret_scan:
     enabled: true
     deny_patterns:

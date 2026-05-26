@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +51,9 @@ from active_knowledge_server.storage.base import (
 )
 
 SQLiteTarget = Literal["baseline_metadata", "overlay_metadata", "jobs"]
+SQLiteJournalMode = Literal["delete", "wal"]
+SQLiteSynchronousMode = Literal["full", "normal"]
+SQLiteCheckpointMode = Literal["passive", "full", "restart", "truncate"]
 
 LATEST_SQLITE_SCHEMA_VERSION: Final = "1.0.1"
 _SCHEMA_VERSION_V1: Final = "1.0.0"
@@ -107,6 +111,25 @@ class SQLiteMigrationResult:
     backup_ref: Path | None
     dry_run: bool
     created: bool
+
+
+@dataclass(frozen=True)
+class SQLitePragmaProfile:
+    """One validated SQLite pragma policy for writer-side connections."""
+
+    journal_mode: SQLiteJournalMode = "delete"
+    synchronous: SQLiteSynchronousMode = "full"
+    wal_autocheckpoint_pages: int | None = None
+
+
+@dataclass(frozen=True)
+class SQLiteCheckpointResult:
+    """One explicit WAL checkpoint observation for benchmark/reporting flows."""
+
+    mode: SQLiteCheckpointMode
+    busy: int
+    log_frames: int
+    checkpointed_frames: int
 
 
 @dataclass(frozen=True)
@@ -664,6 +687,16 @@ def configured_sqlite_paths(
     }
 
 
+def sqlite_pragma_profile_from_config(config: ActiveKnowledgeConfig) -> SQLitePragmaProfile:
+    """Return the validated SQLite pragma profile for metadata writers."""
+
+    return SQLitePragmaProfile(
+        journal_mode=config.storage.sqlite.journal_mode,
+        synchronous=config.storage.sqlite.synchronous,
+        wal_autocheckpoint_pages=config.storage.sqlite.wal_autocheckpoint_pages,
+    )
+
+
 def plan_sqlite_migration(path: Path, *, target: SQLiteTarget) -> SQLiteMigrationPlan:
     """Return the migration plan for one SQLite store."""
 
@@ -971,6 +1004,15 @@ def table_exists(connection: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def is_missing_table_error(exc: sqlite3.OperationalError) -> bool:
+    """Return whether one SQLite read failed because the physical table is absent."""
+
+    message = str(exc).lower()
+    return message.startswith("no such table:") or message.startswith(
+        "no such virtual table:"
+    )
+
+
 def is_major_version_change(current: str | None, target: str) -> bool:
     """Return whether moving to target crosses a semantic major version boundary."""
 
@@ -1004,11 +1046,13 @@ class SQLiteStorageAdapter:
         overlay_metadata_path: Path,
         jobs_path: Path | None = None,
         config: ActiveKnowledgeConfig | None = None,
+        pragma_profile: SQLitePragmaProfile | None = None,
     ) -> None:
         self._baseline_metadata_path = baseline_metadata_path
         self._overlay_metadata_path = overlay_metadata_path
         self._jobs_path = jobs_path
         self._config = config
+        self._pragma_profile = pragma_profile
 
     @classmethod
     def from_config(cls, config: ActiveKnowledgeConfig, *, cwd: Path) -> SQLiteStorageAdapter:
@@ -1020,6 +1064,7 @@ class SQLiteStorageAdapter:
             overlay_metadata_path=paths["overlay_metadata"],
             jobs_path=paths["jobs"],
             config=config,
+            pragma_profile=sqlite_pragma_profile_from_config(config),
         )
 
     def reader(self) -> SQLiteStorageReader:
@@ -1041,6 +1086,7 @@ class SQLiteStorageAdapter:
             overlay_metadata_path=self._overlay_metadata_path,
             jobs_path=self._jobs_path,
             request=request,
+            pragma_profile=self._pragma_profile,
         )
 
     def close(self) -> None:
@@ -2073,14 +2119,24 @@ class SQLiteStorageReader:
         if not path.exists():
             return ()
         with sqlite_connection(path) as connection:
-            rows = connection.execute(query, params).fetchall()
+            try:
+                rows = connection.execute(query, params).fetchall()
+            except sqlite3.OperationalError as exc:
+                if is_missing_table_error(exc):
+                    return ()
+                raise
         return cast(tuple[sqlite3.Row, ...], tuple(rows))
 
     def _query_one(self, path: Path, query: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
         if not path.exists():
             return None
         with sqlite_connection(path) as connection:
-            row = connection.execute(query, params).fetchone()
+            try:
+                row = connection.execute(query, params).fetchone()
+            except sqlite3.OperationalError as exc:
+                if is_missing_table_error(exc):
+                    return None
+                raise
         return cast(sqlite3.Row | None, row)
 
     def _query_records(
@@ -2103,11 +2159,15 @@ class SQLiteStorageWriter:
         overlay_metadata_path: Path,
         jobs_path: Path | None,
         request: StorageWriteRequest,
+        pragma_profile: SQLitePragmaProfile | None = None,
     ) -> None:
         self._baseline_metadata_path = baseline_metadata_path
         self._overlay_metadata_path = overlay_metadata_path
         self._jobs_path = jobs_path
         self._request = request
+        self._pragma_profile = pragma_profile
+        self._transaction_connection: sqlite3.Connection | None = None
+        self._transaction_path: Path | None = None
 
     @property
     def request(self) -> StorageWriteRequest:
@@ -2126,20 +2186,10 @@ class SQLiteStorageWriter:
         self._upsert_metadata("file", file_record_values(record))
 
     def upsert_chunk(self, record: ChunkRecord) -> None:
-        path = self._metadata_path
-        with sqlite_connection(path) as connection:
-            upsert_row(connection, "chunk", chunk_record_values(record))
-            file_record = fetch_file_record(connection, record.file_id)
-            sync_chunk_fts(connection, record, file_record)
-            connection.commit()
+        self.upsert_chunks((record,))
 
     def upsert_entity(self, record: EntityRecord) -> None:
-        path = self._metadata_path
-        with sqlite_connection(path) as connection:
-            upsert_row(connection, "entity", entity_record_values(record))
-            file_record = fetch_file_record(connection, record.file_id)
-            sync_entity_fts(connection, record, file_record)
-            connection.commit()
+        self.upsert_entities((record,))
 
     def upsert_relation(self, record: RelationRecord) -> None:
         self._upsert_metadata("relation", relation_record_values(record))
@@ -2148,11 +2198,7 @@ class SQLiteStorageWriter:
         self._upsert_metadata("evidence", evidence_record_values(record))
 
     def upsert_vector_ref(self, record: VectorRefRecord) -> None:
-        path = self._metadata_path
-        with sqlite_connection(path) as connection:
-            upsert_row(connection, "vector_ref", vector_ref_record_values(record))
-            sync_chunk_embedding_ref(connection, record)
-            connection.commit()
+        self.upsert_vector_refs((record,))
 
     def upsert_job(self, record: JobRecord) -> None:
         if self._jobs_path is None:
@@ -2166,6 +2212,71 @@ class SQLiteStorageWriter:
     def upsert_replacement(self, record: ReplacementRecord) -> None:
         self._require_overlay_control_write("replacement")
         self._upsert_metadata("replacement", replacement_record_values(record))
+
+    @contextmanager
+    def transaction(self) -> Iterable[SQLiteStorageWriter]:
+        """Commit multiple metadata writes through one SQLite connection."""
+
+        if self._transaction_connection is not None:
+            yield self
+            return
+
+        path = self._metadata_path
+        connection = sqlite_connection(path, pragma_profile=self._pragma_profile)
+        try:
+            connection.execute("BEGIN")
+            self._transaction_connection = connection
+            self._transaction_path = path
+            yield self
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._transaction_connection = None
+            self._transaction_path = None
+            connection.close()
+
+    def upsert_files(self, records: Iterable[FileRecord]) -> None:
+        self._upsert_metadata_records("file", (file_record_values(record) for record in records))
+
+    def upsert_chunks(self, records: Iterable[ChunkRecord]) -> None:
+        def apply(connection: sqlite3.Connection) -> None:
+            for record in records:
+                upsert_row(connection, "chunk", chunk_record_values(record))
+                file_record = fetch_file_record(connection, record.file_id)
+                sync_chunk_fts(connection, record, file_record)
+
+        self._write_metadata(apply)
+
+    def upsert_entities(self, records: Iterable[EntityRecord]) -> None:
+        def apply(connection: sqlite3.Connection) -> None:
+            for record in records:
+                upsert_row(connection, "entity", entity_record_values(record))
+                file_record = fetch_file_record(connection, record.file_id)
+                sync_entity_fts(connection, record, file_record)
+
+        self._write_metadata(apply)
+
+    def upsert_relations(self, records: Iterable[RelationRecord]) -> None:
+        self._upsert_metadata_records(
+            "relation",
+            (relation_record_values(record) for record in records),
+        )
+
+    def upsert_evidence_records(self, records: Iterable[EvidenceRecord]) -> None:
+        self._upsert_metadata_records(
+            "evidence",
+            (evidence_record_values(record) for record in records),
+        )
+
+    def upsert_vector_refs(self, records: Iterable[VectorRefRecord]) -> None:
+        def apply(connection: sqlite3.Connection) -> None:
+            for record in records:
+                upsert_row(connection, "vector_ref", vector_ref_record_values(record))
+                sync_chunk_embedding_ref(connection, record)
+
+        self._write_metadata(apply)
 
     def tombstone_file(
         self,
@@ -2255,17 +2366,52 @@ class SQLiteStorageWriter:
     def _upsert_metadata(self, table: str, values: dict[str, Any]) -> None:
         self._upsert_path(self._metadata_path, table, values)
 
+    def _upsert_metadata_records(self, table: str, records: Iterable[dict[str, Any]]) -> None:
+        def apply(connection: sqlite3.Connection) -> None:
+            for values in records:
+                upsert_row(connection, table, values)
+
+        self._write_metadata(apply)
+
     def _upsert_path(self, path: Path, table: str, values: dict[str, Any]) -> None:
-        with sqlite_connection(path) as connection:
+        if self._transaction_connection is not None and self._transaction_path == path:
+            upsert_row(self._transaction_connection, table, values)
+            return
+        with sqlite_connection(path, pragma_profile=self._pragma_profile) as connection:
             upsert_row(connection, table, values)
             connection.commit()
 
     def _upsert_tombstones(self, records: tuple[TombstoneRecord, ...]) -> None:
         if not records:
             return
-        with sqlite_connection(self._overlay_metadata_path) as connection:
+        if (
+            self._transaction_connection is not None
+            and self._transaction_path == self._overlay_metadata_path
+        ):
+            for record in records:
+                upsert_row(
+                    self._transaction_connection,
+                    "tombstone",
+                    tombstone_record_values(record),
+                )
+            return
+        with sqlite_connection(
+            self._overlay_metadata_path,
+            pragma_profile=self._pragma_profile,
+        ) as connection:
             for record in records:
                 upsert_row(connection, "tombstone", tombstone_record_values(record))
+            connection.commit()
+
+    def _write_metadata(self, apply: Callable[[sqlite3.Connection], None]) -> None:
+        if (
+            self._transaction_connection is not None
+            and self._transaction_path == self._metadata_path
+        ):
+            apply(self._transaction_connection)
+            return
+        with sqlite_connection(self._metadata_path, pragma_profile=self._pragma_profile) as connection:
+            apply(connection)
             connection.commit()
 
     def _require_overlay_control_write(self, table: str) -> None:
@@ -2273,14 +2419,89 @@ class SQLiteStorageWriter:
             raise StorageAccessError(f"{table} records must be written to the overlay store.")
 
 
-def sqlite_connection(path: Path) -> sqlite3.Connection:
-    """Open one SQLite connection with row access by column name."""
+def sqlite_connection(
+    path: Path,
+    *,
+    pragma_profile: SQLitePragmaProfile | None = None,
+) -> sqlite3.Connection:
+    """Open one SQLite connection and apply the configured writer-side pragmas."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    if pragma_profile is not None:
+        apply_sqlite_pragma_profile(connection, pragma_profile)
     return connection
+
+
+def apply_sqlite_pragma_profile(
+    connection: sqlite3.Connection,
+    pragma_profile: SQLitePragmaProfile,
+) -> None:
+    """Apply one validated SQLite pragma profile to an open connection."""
+
+    journal_mode = pragma_profile.journal_mode.upper()
+    row = connection.execute(f"PRAGMA journal_mode = {journal_mode}").fetchone()
+    if row is None or str(row[0]).lower() != pragma_profile.journal_mode:
+        raise SQLiteMigrationError(
+            "failed to apply configured SQLite journal mode "
+            f"{pragma_profile.journal_mode!r}"
+        )
+    connection.execute(f"PRAGMA synchronous = {pragma_profile.synchronous.upper()}")
+    if pragma_profile.wal_autocheckpoint_pages is not None:
+        connection.execute(
+            "PRAGMA wal_autocheckpoint = "
+            f"{int(pragma_profile.wal_autocheckpoint_pages)}"
+        )
+
+
+def checkpoint_sqlite_database(
+    path: Path,
+    *,
+    mode: SQLiteCheckpointMode = "passive",
+) -> SQLiteCheckpointResult | None:
+    """Run one explicit WAL checkpoint for benchmark or diagnostics flows."""
+
+    if not path.exists():
+        return None
+    with sqlite_connection(path) as connection:
+        row = connection.execute(f"PRAGMA wal_checkpoint({mode.upper()})").fetchone()
+    if row is None:
+        return SQLiteCheckpointResult(mode=mode, busy=0, log_frames=0, checkpointed_frames=0)
+    return SQLiteCheckpointResult(
+        mode=mode,
+        busy=int(row[0]),
+        log_frames=int(row[1]),
+        checkpointed_frames=int(row[2]),
+    )
+
+
+def read_sqlite_runtime_settings(
+    path: Path,
+    *,
+    pragma_profile: SQLitePragmaProfile | None = None,
+) -> dict[str, int | str | None] | None:
+    """Return the observable journal and checkpoint settings for one SQLite file."""
+
+    if not path.exists():
+        return None
+    with sqlite_connection(path, pragma_profile=pragma_profile) as connection:
+        journal_mode_row = connection.execute("PRAGMA journal_mode").fetchone()
+        synchronous_row = connection.execute("PRAGMA synchronous").fetchone()
+        wal_autocheckpoint_row = connection.execute("PRAGMA wal_autocheckpoint").fetchone()
+    synchronous_map = {0: "off", 1: "normal", 2: "full", 3: "extra"}
+    synchronous_value = None if synchronous_row is None else int(synchronous_row[0])
+    return {
+        "journal_mode": None if journal_mode_row is None else str(journal_mode_row[0]).lower(),
+        "synchronous": None if synchronous_value is None else synchronous_map.get(
+            synchronous_value,
+            str(synchronous_value),
+        ),
+        "wal_autocheckpoint_pages": (
+            None if wal_autocheckpoint_row is None else int(wal_autocheckpoint_row[0])
+        ),
+    }
 
 
 def collect_file_tombstones(

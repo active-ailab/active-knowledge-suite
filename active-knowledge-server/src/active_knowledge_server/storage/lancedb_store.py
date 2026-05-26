@@ -350,32 +350,50 @@ class LanceDBVectorWriter:
         return self._request
 
     def upsert_vector(self, record: VectorRefRecord, embedding: Iterable[float]) -> VectorRefRecord:
-        normalized_record = normalize_vector_ref(record)
-        row = _VectorRow(
-            vector_ref_id=normalized_record.vector_ref_id,
-            object_type=normalized_record.object_type,
-            object_id=normalized_record.object_id,
-            chunk_id=normalized_record.chunk_id,
-            embedding_model_version=normalized_record.embedding_model_version,
-            content_hash=normalized_record.content_hash,
-            source_scope=normalized_record.source_scope,
-            profile_id=normalized_record.profile_id,
-            embedding=tuple(float(value) for value in embedding),
-            metadata=dict(normalized_record.metadata),
-        )
+        return self.upsert_vectors(((record, embedding),))[0]
+
+    def upsert_vectors(
+        self,
+        records: Iterable[tuple[VectorRefRecord, Iterable[float]]],
+    ) -> tuple[VectorRefRecord, ...]:
+        rows_by_type: dict[VectorObjectType, list[_VectorRow]] = {}
+        normalized_records: list[VectorRefRecord] = []
+        for record, embedding in records:
+            normalized_record = normalize_vector_ref(record)
+            normalized_records.append(normalized_record)
+            rows_by_type.setdefault(normalized_record.object_type, []).append(
+                _VectorRow(
+                    vector_ref_id=normalized_record.vector_ref_id,
+                    object_type=normalized_record.object_type,
+                    object_id=normalized_record.object_id,
+                    chunk_id=normalized_record.chunk_id,
+                    embedding_model_version=normalized_record.embedding_model_version,
+                    content_hash=normalized_record.content_hash,
+                    source_scope=normalized_record.source_scope,
+                    profile_id=normalized_record.profile_id,
+                    embedding=tuple(float(value) for value in embedding),
+                    metadata=dict(normalized_record.metadata),
+                )
+            )
+        if not normalized_records:
+            return ()
+
         root = self._target_root
-        rows = list(load_collection_rows(root, row.object_type))
-        updated = False
-        for index, existing in enumerate(rows):
-            if existing.vector_ref_id == row.vector_ref_id:
-                rows[index] = row
-                updated = True
-                break
-        if not updated:
-            rows.append(row)
-        write_collection_rows(root, row.object_type, rows)
-        self._metadata_writer.upsert_vector_ref(normalized_record)
-        return normalized_record
+        for object_type, new_rows in rows_by_type.items():
+            rows = list(load_collection_rows(root, object_type))
+            row_index = {row.vector_ref_id: index for index, row in enumerate(rows)}
+            for row in new_rows:
+                existing_index = row_index.get(row.vector_ref_id)
+                if existing_index is None:
+                    row_index[row.vector_ref_id] = len(rows)
+                    rows.append(row)
+                else:
+                    rows[existing_index] = row
+            write_collection_rows(root, object_type, rows)
+
+        with self._metadata_writer.transaction():
+            self._metadata_writer.upsert_vector_refs(normalized_records)
+        return tuple(normalized_records)
 
     def delete_object_vectors(
         self,

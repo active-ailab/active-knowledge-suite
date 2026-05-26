@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import sys
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TextIO
 
 from active_knowledge_server.indexing.progress import IndexProgressEvent
+
+try:
+    from rich.cells import cell_len as _rich_cell_len
+except ImportError:
+    _rich_cell_len = None
+
+_TRUNCATION_MARKER = "..."
 
 
 @dataclass
@@ -41,6 +49,22 @@ class IndexProgressRenderer:
         if event.current_path:
             lines.append(f"Last path: {event.current_path}")
         return tuple(lines)
+
+    def recent_lines(self) -> tuple[str, ...]:
+        """Return the recent section rows for the current renderer state."""
+
+        if (
+            self.last_event is not None
+            and self.last_event.current_path is None
+            and self.last_event.message
+        ):
+            recent_paths = tuple(f"  -> {path}" for path in self.recent_paths)
+            return (f"  -> {self.last_event.message}", *recent_paths)
+        if self.recent_paths:
+            return tuple(f"  -> {path}" for path in self.recent_paths)
+        if self.last_event is not None and self.last_event.message:
+            return (f"  -> {self.last_event.message}",)
+        return ("  waiting for file progress...",)
 
 
 class PlainIndexProgressReporter:
@@ -110,7 +134,7 @@ class RichIndexProgressReporter:
             TimeElapsedColumn,
             TimeRemainingColumn,
         )
-        from rich.table import Table
+        from rich.table import Column, Table
         from rich.text import Text
 
         self._stream = stream or sys.stdout
@@ -119,29 +143,25 @@ class RichIndexProgressReporter:
         self._group = Group
         self._table = Table
         self._text = Text
-        self._overall_progress = Progress(
-            TextColumn("[bold]Overall[/bold] {task.description}"),
+        self._progress = Progress(
+            TextColumn(
+                "[bold]{task.fields[label]}[/bold] {task.description}",
+                table_column=Column(ratio=1, no_wrap=True, overflow="ellipsis"),
+            ),
             BarColumn(),
             TaskProgressColumn(),
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             console=self._console,
+            expand=True,
         )
-        self._stage_progress = Progress(
-            TextColumn("[bold]Stage[/bold] {task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            console=self._console,
-        )
-        self._overall_task = self._overall_progress.add_task("waiting", total=None)
-        self._stage_task = self._stage_progress.add_task("waiting", total=None)
+        self._overall_task = self._progress.add_task("waiting", total=None, label="Overall")
+        self._stage_task = self._progress.add_task("waiting", total=None, label="Stage")
         self._live = Live(
             self._build_renderable(),
             console=self._console,
             refresh_per_second=refresh_per_second,
-            auto_refresh=False,
+            auto_refresh=True,
             transient=False,
         )
         self._started = False
@@ -153,6 +173,7 @@ class RichIndexProgressReporter:
     def __enter__(self) -> RichIndexProgressReporter:
         self._live.start()
         self._started = True
+        self._live.update(self._build_renderable(), refresh=True)
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
@@ -167,17 +188,25 @@ class RichIndexProgressReporter:
 
     def handle(self, event: IndexProgressEvent) -> None:
         self._state.handle(event)
-        self._overall_progress.update(
+        stage_total = event.stage_total
+        stage_done = event.stage_done or 0
+        if event.phase in {"discover", "code_finalize", "doc_finalize"}:
+            stage_total = None
+            stage_done = 0
+        self._progress.update(
             self._overall_task,
             description=event.phase.replace("_", " "),
             total=event.global_total,
             completed=event.global_done or 0,
         )
-        self._stage_progress.update(
+        self._progress.update(
             self._stage_task,
-            description=event.message or event.phase.replace("_", " "),
-            total=event.stage_total,
-            completed=event.stage_done or 0,
+            description=_truncate_middle(
+                _stage_description(event),
+                self._progress_description_budget(),
+            ),
+            total=stage_total,
+            completed=stage_done,
         )
         self._live.update(self._build_renderable(), refresh=True)
 
@@ -190,17 +219,27 @@ class RichIndexProgressReporter:
             self._console.print(line)
 
     def _build_renderable(self):
-        recent_table = self._table.grid(padding=(0, 1))
-        recent_table.add_row(self._text("Recent", style="bold"))
-        if not self._state.recent_paths:
-            recent_table.add_row("  waiting for file progress...")
-        else:
-            for path in self._state.recent_paths:
-                recent_table.add_row(f"  -> {path}")
+        recent_table = self._table.grid(padding=(0, 1), expand=True)
+        recent_table.add_column(no_wrap=True, overflow="ellipsis")
+        recent_table.add_row(self._text("Recent", style="bold", no_wrap=True))
+        for line in self._state.recent_lines():
+            recent_table.add_row(self._render_recent_line(line))
         return self._group(
-            self._overall_progress,
-            self._stage_progress,
+            self._progress,
             recent_table,
+        )
+
+    def _progress_description_budget(self) -> int:
+        return max(32, self._console.size.width - 40)
+
+    def _recent_line_budget(self) -> int:
+        return max(32, self._console.size.width - 6)
+
+    def _render_recent_line(self, line: str):
+        return self._text(
+            _truncate_middle(line, self._recent_line_budget()),
+            no_wrap=True,
+            overflow="ellipsis",
         )
 
 
@@ -231,3 +270,71 @@ def _format_counter(done: int | None, total: int | None) -> str:
     if total is None:
         return str(done)
     return f"{done}/{total}"
+
+
+def _stage_description(event: IndexProgressEvent) -> str:
+    if event.phase == "discover" and event.message:
+        if event.message.startswith("Scanning workspace inventory:"):
+            return "Scanning workspace inventory"
+        if event.message.startswith("Scanning source documents:"):
+            return "Scanning source documents"
+    return event.message or event.phase.replace("_", " ")
+
+
+def _truncate_middle(value: str, max_length: int) -> str:
+    if max_length <= 0:
+        return ""
+    if _cell_width(value) <= max_length:
+        return value
+    marker_width = _cell_width(_TRUNCATION_MARKER)
+    if max_length <= marker_width:
+        return value[: _prefix_index_for_width(value, max_length)]
+    available_width = max_length - marker_width
+    right_width = (available_width + 1) // 2
+    left_width = available_width - right_width
+    left_end = _prefix_index_for_width(value, left_width)
+    right_start = _suffix_index_for_width(value, right_width, stop=left_end)
+    return f"{value[:left_end]}{_TRUNCATION_MARKER}{value[right_start:]}"
+
+
+def _cell_width(value: str) -> int:
+    if _rich_cell_len is not None:
+        return _rich_cell_len(value)
+    return sum(_char_cell_width(char) for char in value)
+
+
+def _prefix_index_for_width(value: str, max_width: int) -> int:
+    if max_width <= 0:
+        return 0
+    current_width = 0
+    for index, char in enumerate(value):
+        char_width = _char_cell_width(char)
+        if current_width + char_width > max_width:
+            return index
+        current_width += char_width
+    return len(value)
+
+
+def _suffix_index_for_width(value: str, max_width: int, *, stop: int = 0) -> int:
+    if max_width <= 0:
+        return len(value)
+    current_width = 0
+    index = len(value)
+    while index > stop:
+        char_width = _char_cell_width(value[index - 1])
+        if current_width + char_width > max_width:
+            break
+        current_width += char_width
+        index -= 1
+    return index
+
+
+def _char_cell_width(char: str) -> int:
+    if unicodedata.combining(char):
+        return 0
+    category = unicodedata.category(char)
+    if category in {"Cc", "Cf"}:
+        return 0
+    if unicodedata.east_asian_width(char) in {"F", "W"}:
+        return 2
+    return 1

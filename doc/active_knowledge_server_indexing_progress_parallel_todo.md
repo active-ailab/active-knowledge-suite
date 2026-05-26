@@ -482,18 +482,21 @@ Phase 3 用于解决 collect 并行后写入段成为瓶颈的问题。核心仍
 
 ### IP3-01 增加 SQLite transaction/batch writer API
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP0-04`
 - 建议落点：`storage/sqlite_store.py`
+- 完成产物：
+  [sqlite_store.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/storage/sqlite_store.py:2096)
+  [test_sqlite_fts.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_sqlite_fts.py:137)
 
 TODO：
 
-- [ ] 增加 writer transaction context，如 `with writer.transaction(): ...`。
-- [ ] 在一个连接内批量 upsert file/chunk/entity/relation/evidence/vector_ref。
-- [ ] chunk/entity 的 FTS 同步与 record upsert 在同一事务内完成。
-- [ ] transaction 失败时整体 rollback，不留下半批次 FTS 不一致。
+- [x] 增加 writer transaction context，如 `with writer.transaction(): ...`。
+- [x] 在一个连接内批量 upsert file/chunk/entity/relation/evidence/vector_ref。
+- [x] chunk/entity 的 FTS 同步与 record upsert 在同一事务内完成。
+- [x] transaction 失败时整体 rollback，不留下半批次 FTS 不一致。
 
 验收标准：
 
@@ -502,38 +505,48 @@ TODO：
 
 ### IP3-02 增加 batch size 与 commit interval 配置
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`IP3-01`、`IP0-03`
 - 建议落点：`config/schema.py`、`config/defaults.py`
+- 完成产物：
+  [schema.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/schema.py:210)
+  [defaults.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/defaults.py:95)
+  [benchmark_index.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/scripts/benchmark_index.py:186)
 
 TODO：
 
-- [ ] 新增 `indexing.writer.batch_size`，初始默认值先保守设置，压测后再调整。
-- [ ] 新增 `indexing.writer.commit_interval_ms`，防止长时间无 commit。
-- [ ] `batch_size=1` 可回退到近似旧行为。
-- [ ] 参数进入 result metadata 和 benchmark 报告。
+- [x] 新增 `indexing.writer.batch_size`，初始默认值先保守设置，压测后再调整。
+- [x] 新增 `indexing.writer.commit_interval_ms`，防止长时间无 commit。
+- [x] `batch_size=1` 可回退到近似旧行为。
+- [x] 参数进入 result metadata 和 benchmark 报告。
+
+备注：默认值当前采用保守初始值 `batch_size=64`、`commit_interval_ms=1000`；是否继续调大仍由 Phase 4 基准报告决定。
 
 验收标准：
 
 - 配置校验拒绝非正数。
-- 默认值有基准报告支撑。
+- 默认值先作为保守初始值发布，最终调优值必须由 Phase 4 基准报告支撑。
 
 ### IP3-03 改造 pipeline apply 为批量写入
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP3-01`、`IP3-02`
 - 建议落点：`indexing/pipeline.py`
+- 完成产物：
+  [pipeline.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/pipeline.py:497)
+  [code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py:775)
+  [doc_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/doc_indexer.py:475)
 
 TODO：
 
-- [ ] `_apply_code_bundle` 和 `_apply_doc_bundle` 支持批量上下文，避免每条记录独立 commit。
-- [ ] tombstone/replacement 与新对象写入保持同一逻辑批次。
-- [ ] 按 path 边界记录进度，按 batch 边界提交事务。
-- [ ] batch 失败时降级到定位具体 path 的 warning，必要时回退单文件写入以提升可诊断性。
+- [x] `_apply_code_bundle` 和 `_apply_doc_bundle` 支持批量上下文，避免每条记录独立 commit。
+- [x] tombstone/replacement 与新对象写入保持同一逻辑批次。
+- [x] 按 path 边界记录进度，按 batch 边界提交事务。
+- [x] batch 失败时降级到定位具体 path 的 warning，必要时回退单文件写入以提升可诊断性。
 
 验收标准：
 
@@ -542,18 +555,27 @@ TODO：
 
 ### IP3-04 评估 SQLite WAL 与 checkpoint 策略
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P2`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`IP3-01`、`IP0-03`
 - 建议落点：`storage/sqlite_store.py`
+- 完成产物：
+  [schema.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/schema.py:147)
+  [defaults.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/defaults.py:66)
+  [sqlite_store.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/storage/sqlite_store.py:2362)
+  [benchmark_index.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/scripts/benchmark_index.py:20)
+  [test_config_schema.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_config_schema.py:89)
+  [test_sqlite_fts.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_sqlite_fts.py:207)
 
 TODO：
 
 - [ ] 压测 `journal_mode=DELETE` 与 `journal_mode=WAL` 的索引吞吐和查询并发影响。
-- [ ] 如果启用 WAL，确认仅用于本地文件系统，不支持网络文件系统假设。
-- [ ] 评估 `synchronous`、checkpoint 触发时机和 WAL 文件膨胀。
-- [ ] 把最终选择写入配置或存储初始化注释。
+- [x] 如果启用 WAL，要求通过 `storage.sqlite.assume_local_filesystem=true` 显式确认本地文件系统假设，避免无意带到网络文件系统。
+- [~] 评估 `synchronous`、checkpoint 触发时机和 WAL 文件膨胀。
+- [x] 把可调项写入配置并接入存储初始化与 benchmark 覆盖入口。
+
+备注：本阶段仍未默认启用 WAL，运行时默认保持 `journal_mode=delete`、`synchronous=full`。本轮已补齐 `storage.sqlite` 配置面、writer 侧 PRAGMA 注入、`benchmark_index.py --sqlite-*` 覆盖，以及显式 checkpoint 观测入口；是否启用 WAL 仍需 Phase 4 在真实小/中/大数据集下补齐吞吐、查询并发、WAL 文件膨胀和 checkpoint 报告后再决策。
 
 验收标准：
 
@@ -562,17 +584,20 @@ TODO：
 
 ### IP3-05 向量写入批量化
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP2-06`
 - 建议落点：`storage/lancedb_store.py`、`pipeline.py`
+- 完成产物：
+  [lancedb_store.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/storage/lancedb_store.py:352)
+  [test_lancedb_store.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_lancedb_store.py:170)
 
 TODO：
 
-- [ ] 增加 vector writer batch upsert 或批量 flush。
-- [ ] 保持 metadata vector_ref 与实际 vector 写入的一致性检查。
-- [ ] 对 vector 写入失败返回 degraded warning，并保留 metadata 可用。
+- [x] 增加 vector writer batch upsert 或批量 flush。
+- [x] 保持 metadata vector_ref 与实际 vector 写入的一致性检查。
+- [x] 对 vector 写入失败返回 degraded warning，并保留 metadata 可用。
 
 验收标准：
 
@@ -623,13 +648,20 @@ TODO：
 
 ### IP4-03 性能验收
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P1`
 - 类型：`OPS`、`TEST`
 - 依赖：`IP0-03`、`IP2-06`、`IP3-03`
+- 完成产物：
+  [benchmark_index.py](../active-knowledge-server/scripts/benchmark_index.py)
+  [index_benchmark.py](../active-knowledge-server/src/active_knowledge_server/eval/index_benchmark.py)
+  [test_index_benchmark.py](../active-knowledge-server/tests/unit/test_index_benchmark.py)
 
 TODO：
 
+- [x] benchmark 脚本支持 `workers × writer.batch_size × writer.commit_interval_ms × cache_mode × sqlite pragma` 组合扫跑，不再只能看 workers 单维度。
+- [x] benchmark 原始记录补齐 `warning_codes`、SQLite metadata DB/WAL/SHM 文件大小和可选 checkpoint 结果，便于识别 SQLite lock、WAL 膨胀和向量/embedding 类 warning。
+- [x] 基于 JSONL 记录生成 Markdown/JSON 汇总报告，输出推荐场景、风险 flags，以及相对保守基线的 speedup / RSS 倍数。
 - [ ] 小仓、中仓、大仓分别跑 `workers=1/2/4/8/auto`。
 - [ ] batch size 分别跑 `1/100/200/500/1000` 或按对象量调整。
 - [ ] 输出推荐默认值和不推荐区间。
@@ -646,6 +678,11 @@ TODO：
 - 性能报告写入 `doc/` 或 `tests/perf/results/`。
 - 默认 worker/batch 配置有数据支撑，而不是拍脑袋。
 
+建议命令：
+
+- `cd active-knowledge-server && uv run python scripts/benchmark_index.py --config ../examples/local-single-user.yaml --mode incremental --target local --workers 1,2,4,8,auto --writer-batch-sizes 1,100,200,500,1000 --writer-commit-intervals-ms 250,500,1000 --cache-mode cold --repeat 3 --output tests/perf/results/index-benchmark.jsonl --summary-output tests/perf/results/index-benchmark.md`
+- `cd active-knowledge-server && uv run python -m pytest tests/unit/test_index_benchmark.py`
+
 ### IP4-04 回归测试清单
 
 - 状态：`[ ]`
@@ -661,6 +698,7 @@ TODO：
 - [ ] 新增 doc/code 并行 collect 等价性测试。
 - [ ] 新增 worker 单文件失败降级测试。
 - [ ] 新增 batch writer rollback/FTS 一致性测试。
+- [x] 新增 benchmark 汇总/推荐逻辑单测。
 - [ ] 保持现有 incremental pipeline 测试全部通过。
 
 验收标准：

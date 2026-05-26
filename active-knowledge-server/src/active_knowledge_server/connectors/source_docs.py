@@ -5,10 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from active_knowledge_server.config.loader import resolve_runtime_path
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
@@ -43,6 +43,7 @@ _SOURCE_DOC_FORMATS: Final[Mapping[str, str]] = {
 	".json": "json",
 	".toml": "toml",
 }
+SourceDocsScanProgressKind = Literal["directory", "file"]
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,18 @@ class SourceDocEntry:
 
 
 @dataclass(frozen=True)
+class SourceDocsScanProgress:
+	"""One progress tick emitted while scanning source documents."""
+
+	kind: SourceDocsScanProgressKind
+	relative_path: str
+	display_path: str
+	category: str | None
+	files_scanned: int
+	directories_scanned: int
+
+
+@dataclass(frozen=True)
 class SourceDocsManifest:
 	"""Stable manifest for one knowledge-sources scan."""
 
@@ -175,6 +188,21 @@ class _CategoryStats:
 	directory_count: int = 0
 
 
+@dataclass
+class _SourceDocsScanProgressState:
+	files_scanned: int = 0
+	directories_scanned: int = 0
+
+
+SourceDocsScanProgressCallback = Callable[[SourceDocsScanProgress], None]
+
+
+def noop_source_docs_scan_progress_callback(_: SourceDocsScanProgress) -> None:
+	"""Default callback used when callers do not observe source docs scan progress."""
+
+	return None
+
+
 class SourceDocsConnector:
 	"""Discover source documents under configured knowledge-sources root."""
 
@@ -207,9 +235,15 @@ class SourceDocsConnector:
 			guard or PathGuard.from_config(config, cwd=root),
 		)
 
-	def scan(self, *, create_if_missing: bool = True) -> SourceDocsManifest:
+	def scan(
+		self,
+		*,
+		create_if_missing: bool = True,
+		progress_callback: SourceDocsScanProgressCallback | None = None,
+	) -> SourceDocsManifest:
 		"""Scan the source docs root into a deterministic manifest."""
 
+		callback = progress_callback or noop_source_docs_scan_progress_callback
 		warnings: list[SourceDocsWarning] = []
 		root = self.guard.guard(self.source_docs_root, must_exist=False)
 		if not root.normalized_path.exists():
@@ -236,6 +270,17 @@ class SourceDocsConnector:
 			for name in self.supported_categories
 		}
 		scanned_files: list[SourceDocEntry] = []
+		progress_state = _SourceDocsScanProgressState()
+		callback(
+			SourceDocsScanProgress(
+				kind="directory",
+				relative_path=".",
+				display_path=root.display_path,
+				category=None,
+				files_scanned=0,
+				directories_scanned=0,
+			)
+		)
 
 		try:
 			children = sorted(root.normalized_path.iterdir(), key=lambda child: child.name)
@@ -280,6 +325,8 @@ class SourceDocsConnector:
 				stats=stats,
 				scanned_files=scanned_files,
 				warnings=warnings,
+				progress_callback=callback,
+				progress_state=progress_state,
 			)
 
 		files = tuple(sorted(scanned_files, key=lambda entry: entry.relative_path))
@@ -320,6 +367,8 @@ class SourceDocsConnector:
 		stats: _CategoryStats,
 		scanned_files: list[SourceDocEntry],
 		warnings: list[SourceDocsWarning],
+		progress_callback: SourceDocsScanProgressCallback,
+		progress_state: _SourceDocsScanProgressState,
 	) -> None:
 		try:
 			lstat_result = current.normalized_path.lstat()
@@ -363,6 +412,17 @@ class SourceDocsConnector:
 
 			if relative_path != category_name:
 				stats.directory_count += 1
+				progress_state.directories_scanned += 1
+			progress_callback(
+				SourceDocsScanProgress(
+					kind="directory",
+					relative_path=relative_path,
+					display_path=display_for_relative(root.display_path, relative_path),
+					category=category_name,
+					files_scanned=progress_state.files_scanned,
+					directories_scanned=progress_state.directories_scanned,
+				)
+			)
 			try:
 				children = sorted(current.normalized_path.iterdir(), key=lambda child: child.name)
 			except OSError as exc:
@@ -388,6 +448,8 @@ class SourceDocsConnector:
 					stats=stats,
 					scanned_files=scanned_files,
 					warnings=warnings,
+					progress_callback=progress_callback,
+					progress_state=progress_state,
 				)
 			return
 
@@ -399,6 +461,7 @@ class SourceDocsConnector:
 		if content_hash is None:
 			return
 		stats.file_count += 1
+		progress_state.files_scanned += 1
 		scanned_files.append(
 			SourceDocEntry(
 				relative_path=relative_path,
@@ -408,6 +471,16 @@ class SourceDocsConnector:
 				content_hash=content_hash,
 				format=detect_source_doc_format(Path(relative_path)),
 				is_symlink=is_symlink,
+			)
+		)
+		progress_callback(
+			SourceDocsScanProgress(
+				kind="file",
+				relative_path=relative_path,
+				display_path=display_for_relative(root.display_path, relative_path),
+				category=category_name,
+				files_scanned=progress_state.files_scanned,
+				directories_scanned=progress_state.directories_scanned,
 			)
 		)
 
@@ -438,6 +511,7 @@ def scan_source_docs(
 	*,
 	supported_categories: Iterable[str] = SUPPORTED_SOURCE_DOC_CATEGORIES,
 	create_if_missing: bool = True,
+	progress_callback: SourceDocsScanProgressCallback | None = None,
 ) -> SourceDocsManifest:
 	"""Convenience wrapper for one-off source docs scans."""
 
@@ -445,7 +519,10 @@ def scan_source_docs(
 		source_docs_root,
 		guard,
 		supported_categories=supported_categories,
-	).scan(create_if_missing=create_if_missing)
+	).scan(
+		create_if_missing=create_if_missing,
+		progress_callback=progress_callback,
+	)
 
 
 def detect_source_doc_format(path: Path) -> str | None:

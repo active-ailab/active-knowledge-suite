@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
@@ -657,6 +658,27 @@ class StorageWriter(Protocol):
     def upsert_replacement(self, record: ReplacementRecord) -> None:
         """Insert or update one replacement record."""
 
+    def transaction(self) -> AbstractContextManager[StorageWriter]:
+        """Group multiple writes into one atomic storage transaction."""
+
+    def upsert_files(self, records: Iterable[FileRecord]) -> None:
+        """Insert or update multiple file records."""
+
+    def upsert_chunks(self, records: Iterable[ChunkRecord]) -> None:
+        """Insert or update multiple chunk records and FTS rows."""
+
+    def upsert_entities(self, records: Iterable[EntityRecord]) -> None:
+        """Insert or update multiple entity records and FTS rows."""
+
+    def upsert_relations(self, records: Iterable[RelationRecord]) -> None:
+        """Insert or update multiple relation records."""
+
+    def upsert_evidence_records(self, records: Iterable[EvidenceRecord]) -> None:
+        """Insert or update multiple evidence records."""
+
+    def upsert_vector_refs(self, records: Iterable[VectorRefRecord]) -> None:
+        """Insert or update multiple vector reference records."""
+
     def tombstone_file(
         self,
         file_id: str,
@@ -727,6 +749,12 @@ class VectorStoreWriter(Protocol):
 
     def upsert_vector(self, record: VectorRefRecord, embedding: Iterable[float]) -> VectorRefRecord:
         """Insert or update one vector payload and synchronized metadata ref."""
+
+    def upsert_vectors(
+        self,
+        records: Iterable[tuple[VectorRefRecord, Iterable[float]]],
+    ) -> tuple[VectorRefRecord, ...]:
+        """Insert or update vector payloads and synchronized metadata refs in batches."""
 
     def delete_object_vectors(
         self,

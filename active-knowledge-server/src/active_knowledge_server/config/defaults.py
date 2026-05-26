@@ -78,6 +78,12 @@ DEFAULT_CONFIG: Final[dict[str, object]] = {
             "backend": "sqlite",
             "path": "${runtime.local_dir}/db/jobs.db",
         },
+        "sqlite": {
+            "journal_mode": "delete",
+            "synchronous": "full",
+            "wal_autocheckpoint_pages": None,
+            "assume_local_filesystem": False,
+        },
         "vector": {
             "backend": "lancedb",
             "path": "${runtime.baseline_dir}/vectors/lancedb",
@@ -117,6 +123,10 @@ DEFAULT_CONFIG: Final[dict[str, object]] = {
             "provider": "local",
             "model": "bge-m3",
             "batch_size": 32,
+        },
+        "writer": {
+            "batch_size": 64,
+            "commit_interval_ms": 1000,
         },
         "learned_cards": {
             "enabled": False,

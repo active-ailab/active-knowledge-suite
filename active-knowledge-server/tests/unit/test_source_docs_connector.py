@@ -127,3 +127,19 @@ def test_source_docs_scan_blocks_symlink_escape(tmp_path: Path) -> None:
         and warning.details["reason"] == "symlink_outside_allowlist"
         for warning in manifest.warnings
     )
+
+
+def test_source_docs_scan_emits_file_level_progress(tmp_path: Path) -> None:
+    connector, source_docs = build_connector(tmp_path)
+    write_file(source_docs / "api" / "sensor.md", "# Sensor API\n")
+    write_file(source_docs / "engineering" / "runtime.html", "<h1>Runtime</h1>\n")
+
+    events = []
+    manifest = connector.scan(progress_callback=events.append)
+
+    assert manifest.files
+    assert events
+    assert events[0].relative_path == "."
+    assert any(event.kind == "directory" and event.relative_path == "api" for event in events)
+    assert any(event.kind == "file" and event.relative_path == "api/sensor.md" for event in events)
+    assert events[-1].files_scanned == len(manifest.files)

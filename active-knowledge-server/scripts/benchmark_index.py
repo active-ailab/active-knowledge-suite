@@ -21,8 +21,18 @@ from active_knowledge_server.cli import run_full_index
 from active_knowledge_server.config.loader import ConfigDict, resolve_config, set_nested
 from active_knowledge_server.connectors.source_docs import SourceDocsConnector
 from active_knowledge_server.connectors.workspace import WorkspaceConnector
+from active_knowledge_server.eval.index_benchmark import (
+    parse_positive_int_csv,
+    render_index_benchmark_markdown,
+    summarize_index_benchmark_records,
+)
 from active_knowledge_server.indexing import CURRENT_SNAPSHOT_ID, IncrementalIndexPipeline
 from active_knowledge_server.storage.sqlite_store import configured_sqlite_paths
+from active_knowledge_server.storage.sqlite_store import (
+    checkpoint_sqlite_database,
+    read_sqlite_runtime_settings,
+    sqlite_pragma_profile_from_config,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -57,6 +67,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Comma-separated worker list, for example 1,2,4,8,auto.",
     )
     parser.add_argument(
+        "--writer-batch-sizes",
+        help="Optional comma-separated writer batch sizes to sweep.",
+    )
+    parser.add_argument(
+        "--writer-commit-intervals-ms",
+        help="Optional comma-separated writer commit interval values to sweep.",
+    )
+    parser.add_argument(
         "--cache-mode",
         choices=("cold", "hot", "both"),
         default="cold",
@@ -73,12 +91,59 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Optional root directory for generated benchmark workdirs.",
     )
+    parser.add_argument(
+        "--sqlite-journal-mode",
+        choices=("delete", "wal"),
+        help="Optional SQLite metadata journal mode override for benchmark samples.",
+    )
+    parser.add_argument(
+        "--sqlite-synchronous",
+        choices=("full", "normal"),
+        help="Optional SQLite synchronous pragma override for benchmark samples.",
+    )
+    parser.add_argument(
+        "--sqlite-wal-autocheckpoint-pages",
+        type=int,
+        help="Optional WAL autocheckpoint pages override for benchmark samples.",
+    )
+    parser.add_argument(
+        "--sqlite-checkpoint-mode",
+        choices=("none", "passive", "full", "restart", "truncate"),
+        default="none",
+        help="Optional explicit WAL checkpoint to run after each sample.",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        help="Optional Markdown or JSON summary output derived from the raw records.",
+    )
+    parser.add_argument(
+        "--summary-format",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="Summary output format when --summary-output is set.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     workers = parse_workers(args.workers)
+    probe_resolved = resolve_benchmark_config(
+        args=args,
+        worker="auto",
+        workdir=Path(".active-kb-benchmark-probe").resolve(),
+        writer_batch_size=None,
+        writer_commit_interval_ms=None,
+    )
+    writer_batch_sizes = parse_positive_int_csv(
+        args.writer_batch_sizes,
+        default=(probe_resolved.model.indexing.writer.batch_size,),
+    )
+    writer_commit_intervals_ms = parse_positive_int_csv(
+        args.writer_commit_intervals_ms,
+        default=(probe_resolved.model.indexing.writer.commit_interval_ms,),
+    )
     cache_modes = ("cold", "hot") if args.cache_mode == "both" else (args.cache_mode,)
     dataset = collect_dataset_summary(args)
     git_commit = current_git_commit()
@@ -87,27 +152,56 @@ def main(argv: list[str] | None = None) -> int:
     with benchmark_root(args.bench_root) as bench_root_value:
         bench_root = Path(bench_root_value)
         for cache_mode in cache_modes:
-            for worker in workers:
-                scenario_workdir = bench_root / f"{args.mode}-{args.target}-{cache_mode}-{worker}"
-                hot_workdir = scenario_workdir / "hot"
-                for sample_index in range(max(args.repeat, 1)):
-                    if cache_mode == "cold":
-                        workdir = scenario_workdir / f"sample-{sample_index}"
-                    else:
-                        workdir = hot_workdir
-                    record = run_sample(
-                        args=args,
-                        worker=worker,
-                        cache_mode=cache_mode,
-                        sample_index=sample_index,
-                        workdir=workdir,
-                        dataset=dataset,
-                        git_commit=git_commit,
-                    )
-                    records.append(record)
-                    emit_record(record, output_path=args.output)
+            for writer_batch_size in writer_batch_sizes:
+                for writer_commit_interval_ms in writer_commit_intervals_ms:
+                    for worker in workers:
+                        scenario_workdir = bench_root / (
+                            f"{args.mode}-{args.target}-{cache_mode}"
+                            f"-w{worker}-b{writer_batch_size}-c{writer_commit_interval_ms}"
+                        )
+                        hot_workdir = scenario_workdir / "hot"
+                        for sample_index in range(max(args.repeat, 1)):
+                            if cache_mode == "cold":
+                                workdir = scenario_workdir / f"sample-{sample_index}"
+                            else:
+                                workdir = hot_workdir
+                            record = run_sample(
+                                args=args,
+                                worker=worker,
+                                writer_batch_size=writer_batch_size,
+                                writer_commit_interval_ms=writer_commit_interval_ms,
+                                cache_mode=cache_mode,
+                                sample_index=sample_index,
+                                workdir=workdir,
+                                dataset=dataset,
+                                git_commit=git_commit,
+                            )
+                            records.append(record)
+                            emit_record(record, output_path=args.output)
+
+    if args.summary_output is not None:
+        report = summarize_index_benchmark_records(records)
+        summary_text = (
+            json.dumps(report.to_dict(), indent=2, sort_keys=True)
+            if args.summary_format == "json"
+            else render_index_benchmark_markdown(report)
+        )
+        args.summary_output.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_output.write_text(summary_text, encoding="utf-8")
 
     if args.output is None:
+        if args.summary_output is not None:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": "index_benchmark_summary.v2",
+                        "record_count": len(records),
+                        "summary_output": str(args.summary_output),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+            )
         return 0
 
     print(
@@ -116,6 +210,7 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": "index_benchmark_summary.v1",
                 "record_count": len(records),
                 "output": str(args.output),
+                "summary_output": None if args.summary_output is None else str(args.summary_output),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -164,6 +259,8 @@ def run_sample(
     *,
     args: argparse.Namespace,
     worker: int | str,
+    writer_batch_size: int,
+    writer_commit_interval_ms: int,
     cache_mode: str,
     sample_index: int,
     workdir: Path,
@@ -174,7 +271,13 @@ def run_sample(
         remove_tree(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    resolved = resolve_benchmark_config(args=args, worker=worker, workdir=workdir)
+    resolved = resolve_benchmark_config(
+        args=args,
+        worker=worker,
+        workdir=workdir,
+        writer_batch_size=writer_batch_size,
+        writer_commit_interval_ms=writer_commit_interval_ms,
+    )
     notes: list[str] = []
     if cache_mode == "hot" and args.mode == "incremental":
         notes.append(
@@ -189,7 +292,13 @@ def run_sample(
     wall_seconds = time.perf_counter() - wall_before
     cpu_seconds = time.process_time() - cpu_before
     rss_after = current_rss_bytes()
+    metadata_path = metadata_path_for_target(resolved, args.target)
+    checkpoint = maybe_checkpoint_sqlite_database(
+        metadata_path,
+        checkpoint_mode=args.sqlite_checkpoint_mode,
+    )
     counts = collect_storage_counts(resolved, args.target)
+    warning_code_counts = collect_warning_code_counts(result_payload)
 
     return {
         "schema_version": "index_benchmark_record.v1",
@@ -201,6 +310,25 @@ def run_sample(
         "cache_mode": cache_mode,
         "sample_index": sample_index,
         "workers_requested": worker,
+        "writer": {
+            "batch_size": resolved.model.indexing.writer.batch_size,
+            "commit_interval_ms": resolved.model.indexing.writer.commit_interval_ms,
+        },
+        "sqlite": {
+            "configured": {
+                "journal_mode": resolved.model.storage.sqlite.journal_mode,
+                "synchronous": resolved.model.storage.sqlite.synchronous,
+                "wal_autocheckpoint_pages": (
+                    resolved.model.storage.sqlite.wal_autocheckpoint_pages
+                ),
+                "assume_local_filesystem": resolved.model.storage.sqlite.assume_local_filesystem,
+            },
+            "actual": read_sqlite_runtime_settings(
+                metadata_path,
+                pragma_profile=sqlite_pragma_profile_from_config(resolved.model),
+            ),
+            "checkpoint": checkpoint,
+        },
         "workdir": str(workdir),
         "result_status": str(result_payload.get("result_status", "unknown")),
         "wall_seconds": round(wall_seconds, 6),
@@ -209,8 +337,11 @@ def run_sample(
         "rss_after_bytes": rss_after,
         "rss_delta_bytes": max(rss_after - rss_before, 0),
         "warning_count": len(result_payload.get("warnings", [])),
+        "warning_codes": sorted(warning_code_counts),
+        "warning_code_counts": warning_code_counts,
         "plan_summary": result_payload.get("plan"),
         "object_counts": counts,
+        "storage_files": collect_storage_file_sizes(metadata_path),
         "dataset": dataset,
         "machine": {
             "platform": platform.platform(),
@@ -227,6 +358,8 @@ def resolve_benchmark_config(
     args: argparse.Namespace,
     worker: int | str,
     workdir: Path,
+    writer_batch_size: int | None,
+    writer_commit_interval_ms: int | None,
 ):
     overrides: ConfigDict = {}
     set_nested(overrides, ("runtime", "workdir"), str(workdir))
@@ -243,6 +376,26 @@ def resolve_benchmark_config(
         ("indexing", "write_target"),
         "baseline" if args.target == "baseline" else "local_overlay",
     )
+    if writer_batch_size is not None:
+        set_nested(overrides, ("indexing", "writer", "batch_size"), writer_batch_size)
+    if writer_commit_interval_ms is not None:
+        set_nested(
+            overrides,
+            ("indexing", "writer", "commit_interval_ms"),
+            writer_commit_interval_ms,
+        )
+    if args.sqlite_journal_mode is not None:
+        set_nested(overrides, ("storage", "sqlite", "journal_mode"), args.sqlite_journal_mode)
+        if args.sqlite_journal_mode == "wal":
+            set_nested(overrides, ("storage", "sqlite", "assume_local_filesystem"), True)
+    if args.sqlite_synchronous is not None:
+        set_nested(overrides, ("storage", "sqlite", "synchronous"), args.sqlite_synchronous)
+    if args.sqlite_wal_autocheckpoint_pages is not None:
+        set_nested(
+            overrides,
+            ("storage", "sqlite", "wal_autocheckpoint_pages"),
+            args.sqlite_wal_autocheckpoint_pages,
+        )
     return resolve_config(config_path=args.config, cli_overrides=overrides, cwd=Path.cwd())
 
 
@@ -264,6 +417,8 @@ def collect_dataset_summary(args: argparse.Namespace) -> dict[str, object]:
         args=args,
         worker="auto",
         workdir=Path(".active-kb-benchmark-probe").resolve(),
+        writer_batch_size=None,
+        writer_commit_interval_ms=None,
     )
     workspace_inventory = WorkspaceConnector.from_config(resolved.model, cwd=Path.cwd()).scan()
     source_docs_manifest = SourceDocsConnector.from_config(resolved.model, cwd=Path.cwd()).scan()
@@ -278,16 +433,61 @@ def collect_dataset_summary(args: argparse.Namespace) -> dict[str, object]:
 
 def collect_storage_counts(resolved: Any, target: str) -> dict[str, int]:
     counts: dict[str, int] = {}
+    metadata_path = metadata_path_for_target(resolved, target)
     paths = configured_sqlite_paths(resolved.model, cwd=Path.cwd())
-    if target == "baseline":
-        metadata_path = paths["baseline_metadata"]
-    else:
-        metadata_path = paths["overlay_metadata"]
     jobs_path = paths["jobs"]
     counts.update(query_table_counts(metadata_path))
     if jobs_path.exists():
         counts["job"] = query_table_count(jobs_path, "job")
     return counts
+
+
+def metadata_path_for_target(resolved: Any, target: str) -> Path:
+    paths = configured_sqlite_paths(resolved.model, cwd=Path.cwd())
+    return paths["baseline_metadata"] if target == "baseline" else paths["overlay_metadata"]
+
+
+def maybe_checkpoint_sqlite_database(
+    path: Path,
+    *,
+    checkpoint_mode: str,
+) -> dict[str, object] | None:
+    if checkpoint_mode == "none":
+        return None
+    result = checkpoint_sqlite_database(path, mode=checkpoint_mode)
+    if result is None:
+        return None
+    return {
+        "mode": result.mode,
+        "busy": result.busy,
+        "log_frames": result.log_frames,
+        "checkpointed_frames": result.checkpointed_frames,
+    }
+
+
+def collect_warning_code_counts(result_payload: dict[str, object]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    warnings = result_payload.get("warnings", [])
+    if not isinstance(warnings, list):
+        return counts
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            continue
+        code = warning.get("code")
+        if not isinstance(code, str) or not code:
+            continue
+        counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def collect_storage_file_sizes(metadata_path: Path) -> dict[str, int]:
+    wal_path = Path(f"{metadata_path}-wal")
+    shm_path = Path(f"{metadata_path}-shm")
+    return {
+        "metadata_db_bytes": metadata_path.stat().st_size if metadata_path.exists() else 0,
+        "metadata_wal_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
+        "metadata_shm_bytes": shm_path.stat().st_size if shm_path.exists() else 0,
+    }
 
 
 def query_table_counts(path: Path) -> dict[str, int]:

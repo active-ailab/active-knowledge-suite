@@ -145,3 +145,19 @@ def test_workspace_scan_ignores_git_internals_even_without_config_exclude(tmp_pa
 
     assert "main.c" in {entry.relative_path for entry in inventory.files}
     assert all(not entry.relative_path.startswith(".git/") for entry in inventory.files)
+
+
+def test_workspace_scan_emits_file_level_progress(tmp_path: Path) -> None:
+    connector, workspace = build_connector(tmp_path)
+    write_file(workspace / "drivers" / "input" / "button.c", "int button(void) { return 1; }\n")
+    write_file(workspace / "drivers" / "sensor" / "gyro.c", "int gyro(void) { return 0; }\n")
+
+    events = []
+    inventory = connector.scan(progress_callback=events.append)
+
+    assert inventory.files
+    assert events
+    assert events[0].relative_path == "."
+    assert any(event.kind == "directory" and event.relative_path == "drivers" for event in events)
+    assert any(event.kind == "file" and event.relative_path == "drivers/input/button.c" for event in events)
+    assert events[-1].files_scanned == len(inventory.files)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from active_knowledge_server.cli import main
@@ -120,6 +121,26 @@ def test_validate_reports_missing_fts_row(tmp_path: Path) -> None:
         "storage.fts_metadata_mismatch"
     ]
     assert report.checks[0].affected_objects == ("chunk:chunk-doc",)
+
+
+def test_validate_reports_schema_mismatch_for_empty_overlay_sqlite(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    baseline_path = Path(config.storage.metadata.path)
+    jobs_path = Path(config.storage.jobs.path)
+    overlay_path = Path(config.storage.overlay.path)
+    migrate_sqlite_store(baseline_path, target="baseline_metadata")
+    migrate_sqlite_store(jobs_path, target="jobs")
+    overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(overlay_path).close()
+
+    report = validate_storage_consistency(config, cwd=tmp_path)
+
+    assert report.status == "blocked"
+    assert any(
+        check.check_code == "storage.schema_mismatch"
+        and check.affected_objects == (str(overlay_path),)
+        for check in report.checks
+    )
 
 
 def test_validate_reports_missing_vector_payload(tmp_path: Path) -> None:

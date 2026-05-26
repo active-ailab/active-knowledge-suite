@@ -179,6 +179,69 @@ def test_vector_upsert_syncs_chunk_metadata_and_searches_across_baseline_and_del
     assert result.warnings == ()
 
 
+def test_vector_batch_upsert_writes_collection_and_metadata_refs(tmp_path: Path) -> None:
+    metadata_adapter, vector_adapter, _baseline_vectors, delta_vectors = build_adapters(tmp_path)
+    seed_file(
+        metadata_adapter,
+        target="overlay",
+        file_id="file-overlay",
+        relative_path="knowledge-sources/api/batch.md",
+    )
+    seed_chunk(
+        metadata_adapter,
+        target="overlay",
+        chunk_id="chunk-a",
+        file_id="file-overlay",
+        content_hash="hash:a",
+    )
+    seed_chunk(
+        metadata_adapter,
+        target="overlay",
+        chunk_id="chunk-b",
+        file_id="file-overlay",
+        content_hash="hash:b",
+    )
+
+    writer = vector_adapter.writer(StorageWriteRequest(target="overlay"))
+    written = writer.upsert_vectors(
+        (
+            (
+                VectorRefRecord(
+                    vector_ref_id="vec-a",
+                    object_type="chunk",
+                    object_id="chunk-a",
+                    chunk_id="chunk-a",
+                    embedding_model_version="bge-m3",
+                    content_hash="hash:a",
+                    profile_id="watch",
+                ),
+                (1.0, 0.0),
+            ),
+            (
+                VectorRefRecord(
+                    vector_ref_id="vec-b",
+                    object_type="chunk",
+                    object_id="chunk-b",
+                    chunk_id="chunk-b",
+                    embedding_model_version="bge-m3",
+                    content_hash="hash:b",
+                    profile_id="watch",
+                ),
+                (0.0, 1.0),
+            ),
+        )
+    )
+
+    assert [record.vector_ref_id for record in written] == ["vec-a", "vec-b"]
+    assert [row["vector_ref_id"] for row in read_collection(delta_vectors)] == ["vec-a", "vec-b"]
+    chunk_a = metadata_adapter.reader().get_chunk("chunk-a")
+    chunk_b = metadata_adapter.reader().get_chunk("chunk-b")
+    assert chunk_a is not None
+    assert chunk_b is not None
+    assert chunk_a.metadata["embedding_ref"] == "vec-a"
+    assert chunk_b.metadata["embedding_ref"] == "vec-b"
+
+
 def test_overlay_vector_overrides_baseline_candidate_for_same_logical_chunk(tmp_path: Path) -> None:
     metadata_adapter, vector_adapter, _baseline_vectors, _delta_vectors = build_adapters(tmp_path)
     seed_file(
