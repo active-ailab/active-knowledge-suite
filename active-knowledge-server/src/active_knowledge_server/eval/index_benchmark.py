@@ -7,7 +7,6 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
-from typing import Any
 
 
 def parse_positive_int_csv(raw: str | None, *, default: tuple[int, ...]) -> tuple[int, ...]:
@@ -78,6 +77,7 @@ class IndexBenchmarkScenarioKey:
     source: str
     cache_mode: str
     workers_requested: str
+    parallel_mode: str
     writer_batch_size: int
     writer_commit_interval_ms: int
     sqlite_journal_mode: str
@@ -91,6 +91,7 @@ class IndexBenchmarkScenarioKey:
             "source": self.source,
             "cache_mode": self.cache_mode,
             "workers_requested": self.workers_requested,
+            "parallel_mode": self.parallel_mode,
             "writer_batch_size": self.writer_batch_size,
             "writer_commit_interval_ms": self.writer_commit_interval_ms,
             "sqlite_journal_mode": self.sqlite_journal_mode,
@@ -265,6 +266,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             lines.append(
                 "- "
                 f"workers={scenario.workers_requested}, "
+                f"parallel_mode={scenario.parallel_mode}, "
                 f"batch_size={scenario.writer_batch_size}, "
                 f"commit_interval_ms={scenario.writer_commit_interval_ms}, "
                 f"sqlite={scenario.sqlite_journal_mode}/{scenario.sqlite_synchronous}: "
@@ -295,8 +297,8 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
         risks = ", ".join(summary.risk_flags) if summary.risk_flags else "none"
         lines.append(
             "| "
-            f"w={scenario.workers_requested}, b={scenario.writer_batch_size}, "
-            f"c={scenario.writer_commit_interval_ms}, {scenario.cache_mode}, "
+            f"w={scenario.workers_requested}, m={scenario.parallel_mode}, "
+            f"b={scenario.writer_batch_size}, c={scenario.writer_commit_interval_ms}, {scenario.cache_mode}, "
             f"{scenario.sqlite_journal_mode}/{scenario.sqlite_synchronous}"
             " | "
             f"{summary.wall_seconds.p50:.3f}"
@@ -329,6 +331,7 @@ def _scenario_key_from_record(record: dict[str, object]) -> IndexBenchmarkScenar
         source=str(record.get("source", "unknown")),
         cache_mode=str(record.get("cache_mode", "unknown")),
         workers_requested=str(record.get("workers_requested", "unknown")),
+        parallel_mode=str(_mapping(record.get("parallel")).get("mode", "thread")),
         writer_batch_size=int(writer.get("batch_size", 0)),
         writer_commit_interval_ms=int(writer.get("commit_interval_ms", 0)),
         sqlite_journal_mode=str(configured_sqlite.get("journal_mode", "unknown")),
@@ -345,6 +348,7 @@ def _family_key_for_scenario(key: IndexBenchmarkScenarioKey) -> tuple[object, ..
         key.target,
         key.source,
         key.cache_mode,
+        key.parallel_mode,
     )
 
 
@@ -359,6 +363,7 @@ def _reference_keys_by_family(
             members,
             key=lambda item: (
                 _worker_order(item.workers_requested),
+                item.parallel_mode,
                 item.writer_batch_size,
                 item.writer_commit_interval_ms,
             ),
@@ -499,6 +504,7 @@ def _recommend_family_scenario(
         near_fastest,
         key=lambda item: (
             _worker_order(item.key.workers_requested),
+            item.key.parallel_mode,
             item.key.writer_batch_size,
             item.key.writer_commit_interval_ms,
             item.wall_seconds.p50,
@@ -550,6 +556,7 @@ def _scenario_sort_tuple(key: IndexBenchmarkScenarioKey) -> tuple[object, ...]:
         key.target,
         key.source,
         key.cache_mode,
+        key.parallel_mode,
         _worker_order(key.workers_requested),
         key.writer_batch_size,
         key.writer_commit_interval_ms,

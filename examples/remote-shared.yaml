@@ -102,6 +102,8 @@ indexing:
   # Phase 0 boundary: workers only affects collect/parse work.
   # Set workers: 1 to force serial collect; SQLite and LanceDB writes remain single-writer.
   workers: auto
+  parallel:
+    mode: thread
   writer:
     batch_size: 64
     commit_interval_ms: 1000

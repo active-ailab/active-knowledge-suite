@@ -16,6 +16,7 @@ from active_knowledge_server.eval.index_benchmark import (
 def _record(
     *,
     workers: int | str,
+    parallel_mode: str = "thread",
     batch_size: int,
     commit_interval_ms: int,
     wall_seconds: float,
@@ -32,6 +33,9 @@ def _record(
         "source": "all",
         "cache_mode": "cold",
         "workers_requested": workers,
+        "parallel": {
+            "mode": parallel_mode,
+        },
         "result_status": "ready",
         "wall_seconds": wall_seconds,
         "cpu_seconds": wall_seconds / 2.0,
@@ -120,6 +124,7 @@ def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() 
     assert report.recommendations
     recommendation = report.recommendations[0]
     assert recommendation.key.workers_requested == "4"
+    assert recommendation.key.parallel_mode == "thread"
     assert recommendation.key.writer_batch_size == 100
     assert recommendation.key.writer_commit_interval_ms == 500
 
@@ -165,7 +170,7 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
     markdown = render_index_benchmark_markdown(report)
 
     assert "# Index Benchmark Report" in markdown
-    assert "workers=4, batch_size=100, commit_interval_ms=500" in markdown
+    assert "workers=4, parallel_mode=thread, batch_size=100, commit_interval_ms=500" in markdown
     assert "wal_larger_than_db" in markdown
 
 

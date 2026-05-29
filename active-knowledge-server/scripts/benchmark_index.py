@@ -27,9 +27,9 @@ from active_knowledge_server.eval.index_benchmark import (
     summarize_index_benchmark_records,
 )
 from active_knowledge_server.indexing import CURRENT_SNAPSHOT_ID, IncrementalIndexPipeline
-from active_knowledge_server.storage.sqlite_store import configured_sqlite_paths
 from active_knowledge_server.storage.sqlite_store import (
     checkpoint_sqlite_database,
+    configured_sqlite_paths,
     read_sqlite_runtime_settings,
     sqlite_pragma_profile_from_config,
 )
@@ -65,6 +65,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--workers",
         default="1,2,4,8,auto",
         help="Comma-separated worker list, for example 1,2,4,8,auto.",
+    )
+    parser.add_argument(
+        "--parallel-mode",
+        choices=("thread", "process", "hybrid"),
+        help="Optional collect executor mode override.",
     )
     parser.add_argument(
         "--writer-batch-sizes",
@@ -314,6 +319,9 @@ def run_sample(
             "batch_size": resolved.model.indexing.writer.batch_size,
             "commit_interval_ms": resolved.model.indexing.writer.commit_interval_ms,
         },
+        "parallel": {
+            "mode": resolved.model.indexing.parallel.mode,
+        },
         "sqlite": {
             "configured": {
                 "journal_mode": resolved.model.storage.sqlite.journal_mode,
@@ -340,6 +348,8 @@ def run_sample(
         "warning_codes": sorted(warning_code_counts),
         "warning_code_counts": warning_code_counts,
         "plan_summary": result_payload.get("plan"),
+        "timings": extract_result_metadata_mapping(result_payload, "timings"),
+        "diagnostics": extract_result_metadata_mapping(result_payload, "diagnostics"),
         "object_counts": counts,
         "storage_files": collect_storage_file_sizes(metadata_path),
         "dataset": dataset,
@@ -370,6 +380,8 @@ def resolve_benchmark_config(
     if args.profile is not None:
         set_nested(overrides, ("project", "default_profile"), args.profile)
     set_nested(overrides, ("indexing", "workers"), worker)
+    if args.parallel_mode is not None:
+        set_nested(overrides, ("indexing", "parallel", "mode"), args.parallel_mode)
     set_nested(overrides, ("indexing", "incremental"), args.mode == "incremental")
     set_nested(
         overrides,
@@ -478,6 +490,17 @@ def collect_warning_code_counts(result_payload: dict[str, object]) -> dict[str, 
             continue
         counts[code] = counts.get(code, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def extract_result_metadata_mapping(
+    result_payload: dict[str, object],
+    key: str,
+) -> dict[str, object]:
+    metadata = result_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    value = metadata.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def collect_storage_file_sizes(metadata_path: Path) -> dict[str, int]:

@@ -104,6 +104,7 @@ def test_index_writer_config_requires_positive_values() -> None:
 
     assert config.indexing.writer.batch_size == 64
     assert config.indexing.writer.commit_interval_ms == 1000
+    assert config.indexing.parallel.mode == "thread"
     assert config.storage.sqlite.journal_mode == "delete"
     assert config.storage.sqlite.synchronous == "full"
     assert config.storage.sqlite.wal_autocheckpoint_pages is None
@@ -123,6 +124,25 @@ def test_index_writer_config_requires_positive_values() -> None:
 
     with pytest.raises(ValueError, match="indexing.writer.commit_interval_ms"):
         validate_config_dict(bad_interval, source="unit test config")
+
+
+def test_parallel_mode_accepts_supported_values_only() -> None:
+    good = default_config()
+    indexing = good["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["parallel"] = {"mode": "hybrid"}
+
+    config = validate_config_dict(good, source="unit test config")
+
+    assert config.indexing.parallel.mode == "hybrid"
+
+    bad = default_config()
+    indexing = bad["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["parallel"] = {"mode": "bogus"}
+
+    with pytest.raises(ValueError, match="indexing.parallel.mode"):
+        validate_config_dict(bad, source="unit test config")
 
 
 def test_sqlite_wal_requires_explicit_local_filesystem_acknowledgement() -> None:

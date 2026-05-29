@@ -7,7 +7,7 @@ import json
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Final, TypeVar
 
@@ -25,6 +25,7 @@ from active_knowledge_server.indexing.parallel import (
 from active_knowledge_server.indexing.progress import (
     IndexProgressCallback,
     IndexProgressEvent,
+    SlidingWindowEtaEstimator,
     noop_progress_callback,
     utc_timestamp,
 )
@@ -141,6 +142,21 @@ class _CollectedCodeEntry:
     parsed_code: ParsedCodeFile | None = None
     parsed_makefile: ParsedMakefile | None = None
     warnings: tuple[CodeIndexingWarning, ...] = ()
+    elapsed_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class _CodeCollectTask:
+    """Pickle-safe worker input for one code collect task."""
+
+    snapshot_id: str
+    workspace_root: str
+    relative_path: str
+    content_hash: str | None
+    area: str | None
+    language: str | None
+    is_symlink: bool
+    prefer_ctags: bool
 
 
 class CodeIndexer:
@@ -211,13 +227,16 @@ class CodeIndexer:
         started_at = utc_timestamp()
         workers = resolve_indexing_workers(
             self._config.indexing.workers,
+            configured_mode=self._config.indexing.parallel.mode,
             task_count=stage_total,
             phase="code",
+            allow_process=True,
         )
         collect_message = (
             f"Collecting code files with {workers.workers} "
-            f"worker{'s' if workers.workers != 1 else ''}"
+            f"{workers.executor_kind} worker{'s' if workers.workers != 1 else ''}"
         )
+        eta_estimator = SlidingWindowEtaEstimator()
         if stage_total:
             callback(
                 IndexProgressEvent(
@@ -247,6 +266,7 @@ class CodeIndexer:
             )
 
         def report_progress(path: str, done: int) -> None:
+            eta_seconds = eta_estimator.observe(completed=done, total=stage_total)
             callback(
                 IndexProgressEvent(
                     phase="code_collect",
@@ -257,20 +277,45 @@ class CodeIndexer:
                     warnings_count=len(warnings),
                     started_at=started_at,
                     updated_at=utc_timestamp(),
+                    eta_seconds=eta_seconds,
                 )
             )
 
-        results = parallel_map_ordered(
-            indexed_entries,
-            key=lambda entry: entry.relative_path,
-            mapper=lambda entry: self._collect_code_entry(
-                snapshot_id=snapshot_id,
-                workspace_root=workspace_root,
-                entry=entry,
-            ),
-            workers=workers,
-            callback=report_progress,
-        )
+        if workers.executor_kind == "process":
+            tasks = tuple(
+                _CodeCollectTask(
+                    snapshot_id=snapshot_id,
+                    workspace_root=str(workspace_root),
+                    relative_path=entry.relative_path,
+                    content_hash=entry.content_hash,
+                    area=entry.area,
+                    language=entry.language,
+                    is_symlink=entry.is_symlink,
+                    prefer_ctags=self._config.indexing.code.enable_ctags,
+                )
+                for entry in indexed_entries
+            )
+            results = parallel_map_ordered(
+                tasks,
+                key=lambda task: task.relative_path,
+                mapper=_collect_code_entry_task,
+                workers=workers,
+                callback=report_progress,
+            )
+        else:
+            results = parallel_map_ordered(
+                indexed_entries,
+                key=lambda entry: entry.relative_path,
+                mapper=lambda entry: self._collect_code_entry(
+                    snapshot_id=snapshot_id,
+                    workspace_root=workspace_root,
+                    entry=entry,
+                ),
+                workers=workers,
+                callback=report_progress,
+            )
+        parser_seconds = 0.0
+        slowest_items: list[dict[str, object]] = []
         for result in results:
             if result.error is not None:
                 warnings.append(
@@ -291,11 +336,21 @@ class CodeIndexer:
             if result.value.parsed_makefile is not None:
                 makefile_parses[result.value.relative_path] = result.value.parsed_makefile
             warnings.extend(result.value.warnings)
+            parser_seconds += result.value.elapsed_seconds
+            slowest_items.append(
+                {
+                    "path": result.value.relative_path,
+                    "stage": "code_collect",
+                    "elapsed_seconds": round(result.value.elapsed_seconds, 6),
+                }
+            )
         collected_entries = tuple(
             entry for entry in indexed_entries if entry.relative_path in physical_file_records
         )
         report_finalize(
-            f"Collected {len(collected_entries)}/{stage_total} code files; assembling file and symbol records"
+            "Collected "
+            f"{len(collected_entries)}/{stage_total} code files; "
+            "assembling file and symbol records"
         )
 
         directory_anchor_records: dict[str, FileRecord] = {}
@@ -532,7 +587,9 @@ class CodeIndexer:
                 ordinal += 1
 
         report_finalize(
-            f"Collected {len(collected_entries)}/{stage_total} code files; building module and macro relations"
+            "Collected "
+            f"{len(collected_entries)}/{stage_total} code files; "
+            "building module and macro relations"
         )
         for makefile_path, parsed_makefile in makefile_parses.items():
             makefile_file_record = physical_file_records[makefile_path]
@@ -741,7 +798,15 @@ class CodeIndexer:
             relation_records=tuple(relation_records),
             evidence_records=tuple(evidence_records),
             warnings=tuple(warnings),
-            metadata={"collect_workers": workers.to_dict()},
+            metadata={
+                "collect_workers": workers.to_dict(),
+                "timings": {
+                    "parser_seconds": round(parser_seconds, 6),
+                },
+                "diagnostics": {
+                    "slowest_items": _top_slowest_items(slowest_items),
+                },
+            },
         )
 
     def _collect_code_entry(
@@ -751,66 +816,17 @@ class CodeIndexer:
         workspace_root: Path,
         entry: FileInventoryEntry,
     ) -> _CollectedCodeEntry:
-        absolute_path = workspace_root / entry.relative_path
-        text = absolute_path.read_text(encoding="utf-8", errors="replace")
-        file_record = FileRecord(
-            file_id=_stable_id("file", snapshot_id, entry.relative_path),
-            snapshot_id=snapshot_id,
-            source_id=_WORKSPACE_SOURCE_ID,
-            relative_path=entry.relative_path,
-            content_hash=entry.content_hash or _hash_text(text),
-            source_scope=_source_scope_for_path(entry.relative_path, fallback=entry.area),
-            profile_id=ALL_SCOPE,
-            language=entry.language,
-            metadata={
-                "area": entry.area,
-                "indexed_kind": "physical",
-                "is_symlink": entry.is_symlink,
-            },
-        )
-        warnings: list[CodeIndexingWarning] = []
-        parsed_code = None
-        parsed_makefile = None
-        if entry.language in _C_FAMILY_LANGUAGE_SET:
-            parsed_code = parse_c_family_file(
-                absolute_path,
-                text,
-                compile_db_path=None,
+        return _collect_code_entry_task(
+            _CodeCollectTask(
+                snapshot_id=snapshot_id,
+                workspace_root=str(workspace_root),
+                relative_path=entry.relative_path,
+                content_hash=entry.content_hash,
+                area=entry.area,
+                language=entry.language,
+                is_symlink=entry.is_symlink,
                 prefer_ctags=self._config.indexing.code.enable_ctags,
             )
-            warnings.extend(
-                _warning_from_code_parse_warning(entry.relative_path, warning)
-                for warning in parsed_code.warnings
-            )
-        elif entry.language == "makefile":
-            sibling_paths = ()
-            try:
-                sibling_paths = tuple(child.name for child in absolute_path.parent.iterdir())
-            except OSError as exc:
-                warnings.append(
-                    CodeIndexingWarning(
-                        code="code_indexer.sibling_scan_failed",
-                        message=f"Failed to enumerate makefile siblings: {exc}",
-                        relative_path=entry.relative_path,
-                        details={"path": entry.relative_path},
-                    )
-                )
-            parsed_makefile = parse_makefile(
-                Path(entry.relative_path),
-                text,
-                sibling_paths=sibling_paths,
-            )
-            warnings.extend(
-                _warning_from_makefile_parse_warning(entry.relative_path, warning)
-                for warning in parsed_makefile.warnings
-            )
-        return _CollectedCodeEntry(
-            relative_path=entry.relative_path,
-            file_record=file_record,
-            text=text,
-            parsed_code=parsed_code,
-            parsed_makefile=parsed_makefile,
-            warnings=tuple(warnings),
         )
 
     def collect_and_store(
@@ -830,6 +846,7 @@ class CodeIndexer:
         )
         batch_size = self._config.indexing.writer.batch_size
         commit_interval_ms = self._config.indexing.writer.commit_interval_ms
+        write_started_at = time.perf_counter()
         _write_in_batches(
             indexed.source_records,
             batch_size=batch_size,
@@ -872,8 +889,79 @@ class CodeIndexer:
             transaction=writer.transaction,
             write_one=writer.upsert_evidence,
         )
+        metadata_write_seconds = time.perf_counter() - write_started_at
         writer.flush()
-        return indexed
+        metadata = _merge_indexer_metadata(
+            indexed.metadata,
+            extra_timings={"metadata_write_seconds": round(metadata_write_seconds, 6)},
+        )
+        return replace(indexed, metadata=metadata)
+
+
+def _collect_code_entry_task(task: _CodeCollectTask) -> _CollectedCodeEntry:
+    started_at = time.perf_counter()
+    absolute_path = Path(task.workspace_root) / task.relative_path
+    text = absolute_path.read_text(encoding="utf-8", errors="replace")
+    file_record = FileRecord(
+        file_id=_stable_id("file", task.snapshot_id, task.relative_path),
+        snapshot_id=task.snapshot_id,
+        source_id=_WORKSPACE_SOURCE_ID,
+        relative_path=task.relative_path,
+        content_hash=task.content_hash or _hash_text(text),
+        source_scope=_source_scope_for_path(task.relative_path, fallback=task.area),
+        profile_id=ALL_SCOPE,
+        language=task.language,
+        metadata={
+            "area": task.area,
+            "indexed_kind": "physical",
+            "is_symlink": task.is_symlink,
+        },
+    )
+    warnings: list[CodeIndexingWarning] = []
+    parsed_code = None
+    parsed_makefile = None
+    if task.language in _C_FAMILY_LANGUAGE_SET:
+        parsed_code = parse_c_family_file(
+            absolute_path,
+            text,
+            compile_db_path=None,
+            prefer_ctags=task.prefer_ctags,
+        )
+        warnings.extend(
+            _warning_from_code_parse_warning(task.relative_path, warning)
+            for warning in parsed_code.warnings
+        )
+    elif task.language == "makefile":
+        sibling_paths = ()
+        try:
+            sibling_paths = tuple(child.name for child in absolute_path.parent.iterdir())
+        except OSError as exc:
+            warnings.append(
+                CodeIndexingWarning(
+                    code="code_indexer.sibling_scan_failed",
+                    message=f"Failed to enumerate makefile siblings: {exc}",
+                    relative_path=task.relative_path,
+                    details={"path": task.relative_path},
+                )
+            )
+        parsed_makefile = parse_makefile(
+            Path(task.relative_path),
+            text,
+            sibling_paths=sibling_paths,
+        )
+        warnings.extend(
+            _warning_from_makefile_parse_warning(task.relative_path, warning)
+            for warning in parsed_makefile.warnings
+        )
+    return _CollectedCodeEntry(
+        relative_path=task.relative_path,
+        file_record=file_record,
+        text=text,
+        parsed_code=parsed_code,
+        parsed_makefile=parsed_makefile,
+        warnings=tuple(warnings),
+        elapsed_seconds=time.perf_counter() - started_at,
+    )
 
 
 def _write_in_batches(
@@ -976,6 +1064,36 @@ def _source_scope_for_path(path: str, *, fallback: str | None = None) -> str:
         return fallback or ALL_SCOPE
     head = normalized.split("/", maxsplit=1)[0]
     return head or fallback or ALL_SCOPE
+
+
+def _merge_indexer_metadata(
+    metadata: Mapping[str, object],
+    *,
+    extra_timings: Mapping[str, float],
+) -> dict[str, object]:
+    merged = dict(metadata)
+    timings = dict(metadata.get("timings", {}))
+    for key, value in extra_timings.items():
+        timings[key] = value
+    merged["timings"] = timings
+    return merged
+
+
+def _top_slowest_items(
+    items: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> tuple[dict[str, object], ...]:
+    ranked = sorted(
+        (
+            dict(item)
+            for item in items
+            if isinstance(item.get("elapsed_seconds"), (int, float))
+        ),
+        key=lambda item: float(item["elapsed_seconds"]),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])
 
 
 def _parent_directory(relative_path: str) -> str | None:

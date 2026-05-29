@@ -289,6 +289,71 @@ int health_init(void);
     assert parallel.metadata["collect_workers"]["workers"] == 3
 
 
+def test_code_indexer_process_collect_matches_thread_output(tmp_path: Path) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"workers": 1, "parallel": {"mode": "thread"}}},
+    )
+    process_config = config.model_copy(
+        update={
+            "indexing": config.indexing.model_copy(
+                update={
+                    "workers": 4,
+                    "parallel": config.indexing.parallel.model_copy(update={"mode": "process"}),
+                }
+            )
+        }
+    )
+    workspace_root = Path(config.project.workspace_root)
+    component_dir = workspace_root / "components" / "health"
+    component_dir.mkdir(parents=True)
+    (component_dir / "module.mk").write_text(
+        """NAME = health
+MODULE = health.logic
+HEALTH_SOURCES = main.c health.h
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+#define HEALTH_DEFAULT 1
+
+int health_init(void)
+{
+    return HEALTH_DEFAULT;
+}
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_init(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+
+    serial = CodeIndexer.from_config(config, cwd=tmp_path).collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+    process = CodeIndexer.from_config(process_config, cwd=tmp_path).collect(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        workspace_inventory=serial.workspace_inventory,
+    )
+
+    assert _record_signature(serial.file_records) == _record_signature(process.file_records)
+    assert _record_signature(serial.chunk_records) == _record_signature(process.chunk_records)
+    assert _record_signature(serial.entity_records) == _record_signature(process.entity_records)
+    assert _record_signature(serial.relation_records) == _record_signature(process.relation_records)
+    assert _record_signature(serial.evidence_records) == _record_signature(process.evidence_records)
+    assert process.metadata["collect_workers"]["executor_kind"] == "process"
+    assert process.metadata["timings"]["parser_seconds"] >= 0.0
+    assert process.metadata["diagnostics"]["slowest_items"]
+
+
 def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
     merged = dict(base)
     for key, value in overrides.items():

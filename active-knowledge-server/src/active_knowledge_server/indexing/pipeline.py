@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
@@ -40,6 +41,7 @@ from active_knowledge_server.indexing.profile import (
 from active_knowledge_server.indexing.progress import (
     IndexProgressCallback,
     IndexProgressEvent,
+    SlidingWindowEtaEstimator,
     noop_progress_callback,
     utc_timestamp,
 )
@@ -579,6 +581,7 @@ class IncrementalIndexPipeline:
             message: str | None = None,
             warnings_count: int = 0,
             explicit_global_done: int | None = None,
+            eta_seconds: float | None = None,
         ) -> None:
             callback(
                 IndexProgressEvent(
@@ -594,6 +597,7 @@ class IncrementalIndexPipeline:
                     warnings_count=warnings_count,
                     started_at=started_at,
                     updated_at=utc_timestamp(),
+                    eta_seconds=eta_seconds,
                 )
             )
 
@@ -615,6 +619,15 @@ class IncrementalIndexPipeline:
             "writer": {
                 "batch_size": self._config.indexing.writer.batch_size,
                 "commit_interval_ms": self._config.indexing.writer.commit_interval_ms,
+            },
+            "timings": {
+                "parser_seconds": 0.0,
+                "embedding_seconds": 0.0,
+                "metadata_write_seconds": 0.0,
+                "vector_write_seconds": 0.0,
+            },
+            "diagnostics": {
+                "slowest_items": [],
             },
         }
 
@@ -646,6 +659,11 @@ class IncrementalIndexPipeline:
                     "collect_workers",
                     {},
                 )
+                _merge_result_section(
+                    result_metadata,
+                    section_name="code_collect",
+                    section_metadata=code_indexed.metadata,
+                )
                 if any(
                     warning.code == "code_indexer.collect_failed"
                     for warning in code_indexed.warnings
@@ -670,7 +688,9 @@ class IncrementalIndexPipeline:
                 global_done += progress_totals["code_collect"]
                 new_code_bundles = _code_bundles_by_path(code_indexed)
                 code_apply_done = 0
+                code_apply_eta = SlidingWindowEtaEstimator()
                 for relative_path in plan.deleted_code_paths:
+                    apply_started_at = time.perf_counter()
                     self._tombstone_deleted_path(
                         reader,
                         writer,
@@ -680,17 +700,30 @@ class IncrementalIndexPipeline:
                     )
                     code_apply_done += 1
                     global_done += 1
+                    elapsed_seconds = time.perf_counter() - apply_started_at
+                    _record_elapsed(
+                        result_metadata,
+                        timing_key="metadata_write_seconds",
+                        elapsed_seconds=elapsed_seconds,
+                        path=relative_path,
+                        stage="code_apply",
+                    )
                     emit(
                         phase="code_apply",
                         stage_total=progress_totals["code_apply"],
                         stage_done=code_apply_done,
                         current_path=relative_path,
                         message="Applying code changes",
+                        eta_seconds=code_apply_eta.observe(
+                            completed=code_apply_done,
+                            total=progress_totals["code_apply"],
+                        ),
                     )
                 for relative_path in plan.changed_code_paths:
                     bundle = new_code_bundles.get(relative_path)
                     if bundle is None:
                         continue
+                    apply_started_at = time.perf_counter()
                     self._apply_code_bundle(
                         reader,
                         writer,
@@ -700,12 +733,24 @@ class IncrementalIndexPipeline:
                     )
                     code_apply_done += 1
                     global_done += 1
+                    elapsed_seconds = time.perf_counter() - apply_started_at
+                    _record_elapsed(
+                        result_metadata,
+                        timing_key="metadata_write_seconds",
+                        elapsed_seconds=elapsed_seconds,
+                        path=relative_path,
+                        stage="code_apply",
+                    )
                     emit(
                         phase="code_apply",
                         stage_total=progress_totals["code_apply"],
                         stage_done=code_apply_done,
                         current_path=relative_path,
                         message="Applying code changes",
+                        eta_seconds=code_apply_eta.observe(
+                            completed=code_apply_done,
+                            total=progress_totals["code_apply"],
+                        ),
                     )
                 if progress_totals["code_apply"] > 0:
                     emit(
@@ -799,6 +844,11 @@ class IncrementalIndexPipeline:
                         "collect_workers",
                         {},
                     )
+                    _merge_result_section(
+                        result_metadata,
+                        section_name="doc_collect",
+                        section_metadata=indexed_docs.metadata,
+                    )
                     if any(
                         warning.code == "docs.collect_failed" for warning in indexed_docs.warnings
                     ):
@@ -838,6 +888,8 @@ class IncrementalIndexPipeline:
                     )
                     for record in indexed_docs.file_records
                 }
+                doc_apply_eta = SlidingWindowEtaEstimator()
+                vector_apply_eta = SlidingWindowEtaEstimator()
                 for relative_path in doc_paths_to_collect:
                     storage_relative_path = _doc_storage_relative_path(
                         plan.source_docs_manifest,
@@ -851,6 +903,7 @@ class IncrementalIndexPipeline:
                             plan.reindex_all_docs or relative_path in plan.changed_doc_paths
                         )
                         if metadata_changed:
+                            metadata_started_at = time.perf_counter()
                             self._apply_doc_bundle(
                                 reader,
                                 writer,
@@ -860,14 +913,27 @@ class IncrementalIndexPipeline:
                             )
                             doc_apply_done += 1
                             global_done += 1
+                            elapsed_seconds = time.perf_counter() - metadata_started_at
+                            _record_elapsed(
+                                result_metadata,
+                                timing_key="metadata_write_seconds",
+                                elapsed_seconds=elapsed_seconds,
+                                path=storage_relative_path,
+                                stage="doc_apply",
+                            )
                             emit(
                                 phase="doc_apply",
                                 stage_total=progress_totals["doc_apply"],
                                 stage_done=doc_apply_done,
                                 current_path=storage_relative_path,
                                 message="Applying document changes",
+                                eta_seconds=doc_apply_eta.observe(
+                                    completed=doc_apply_done,
+                                    total=progress_totals["doc_apply"],
+                                ),
                             )
                         if plan.rebuild_vectors or metadata_changed:
+                            vector_started_at = time.perf_counter()
                             self._upsert_doc_vectors(
                                 vector_writer,
                                 indexed_docs,
@@ -875,12 +941,24 @@ class IncrementalIndexPipeline:
                             )
                             vector_apply_done += 1
                             global_done += 1
+                            elapsed_seconds = time.perf_counter() - vector_started_at
+                            _record_elapsed(
+                                result_metadata,
+                                timing_key="vector_write_seconds",
+                                elapsed_seconds=elapsed_seconds,
+                                path=storage_relative_path,
+                                stage="vectors_apply",
+                            )
                             emit(
                                 phase="vectors_apply",
                                 stage_total=progress_totals["vectors_apply"],
                                 stage_done=vector_apply_done,
                                 current_path=storage_relative_path,
                                 message="Applying document vectors",
+                                eta_seconds=vector_apply_eta.observe(
+                                    completed=vector_apply_done,
+                                    total=progress_totals["vectors_apply"],
+                                ),
                             )
                     except Exception as exc:  # noqa: BLE001
                         failed = True
@@ -910,6 +988,7 @@ class IncrementalIndexPipeline:
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
             try:
+                profile_started_at = time.perf_counter()
                 emit(
                     phase="profile_relations",
                     stage_total=1,
@@ -931,6 +1010,11 @@ class IncrementalIndexPipeline:
                     message="Flushing profile-conditioned relation updates",
                 )
                 writer.flush()
+                result_metadata["timings"]["metadata_write_seconds"] = round(
+                    float(result_metadata["timings"]["metadata_write_seconds"])
+                    + (time.perf_counter() - profile_started_at),
+                    6,
+                )
                 global_done += 1
                 emit(
                     phase="profile_relations",
@@ -953,6 +1037,7 @@ class IncrementalIndexPipeline:
 
         if _workspace_map_refresh_required(plan):
             try:
+                workspace_map_started_at = time.perf_counter()
                 emit(
                     phase="workspace_map",
                     stage_total=1,
@@ -965,6 +1050,10 @@ class IncrementalIndexPipeline:
                     reader=self._metadata_adapter.reader(),
                     profiles=plan.collected_profiles.profile_records,
                     profile_resolution=plan.collected_profiles.resolution.to_dict(),
+                )
+                result_metadata["timings"]["workspace_map_seconds"] = round(
+                    time.perf_counter() - workspace_map_started_at,
+                    6,
                 )
                 global_done += 1
                 emit(
@@ -1702,3 +1791,80 @@ def _relation_match_key(
 def _chunk_relative_path(record: ChunkRecord) -> str | None:
     value = record.metadata.get("path")
     return None if value is None else str(value)
+
+
+def _merge_result_section(
+    result_metadata: dict[str, object],
+    *,
+    section_name: str,
+    section_metadata: Mapping[str, object],
+) -> None:
+    timings = result_metadata.get("timings")
+    assert isinstance(timings, dict)
+    diagnostics = result_metadata.get("diagnostics")
+    assert isinstance(diagnostics, dict)
+    result_metadata[f"{section_name}_metadata"] = dict(section_metadata)
+    section_timings = section_metadata.get("timings", {})
+    if isinstance(section_timings, Mapping):
+        timings["parser_seconds"] = round(
+            float(timings.get("parser_seconds", 0.0))
+            + float(section_timings.get("parser_seconds", 0.0)),
+            6,
+        )
+        timings["embedding_seconds"] = round(
+            float(timings.get("embedding_seconds", 0.0))
+            + float(section_timings.get("embedding_seconds", 0.0)),
+            6,
+        )
+    section_diagnostics = section_metadata.get("diagnostics", {})
+    if isinstance(section_diagnostics, Mapping):
+        slowest = section_diagnostics.get("slowest_items", ())
+        if isinstance(slowest, Sequence):
+            existing = diagnostics.get("slowest_items", [])
+            assert isinstance(existing, list)
+            existing.extend(dict(item) for item in slowest if isinstance(item, Mapping))
+            diagnostics["slowest_items"] = list(
+                _top_slowest_items(existing)
+            )
+
+
+def _record_elapsed(
+    result_metadata: dict[str, object],
+    *,
+    timing_key: str,
+    elapsed_seconds: float,
+    path: str,
+    stage: str,
+) -> None:
+    timings = result_metadata.get("timings")
+    assert isinstance(timings, dict)
+    timings[timing_key] = round(float(timings.get(timing_key, 0.0)) + elapsed_seconds, 6)
+    diagnostics = result_metadata.get("diagnostics")
+    assert isinstance(diagnostics, dict)
+    existing = diagnostics.get("slowest_items", [])
+    assert isinstance(existing, list)
+    existing.append(
+        {
+            "path": path,
+            "stage": stage,
+            "elapsed_seconds": round(elapsed_seconds, 6),
+        }
+    )
+    diagnostics["slowest_items"] = list(_top_slowest_items(existing))
+
+
+def _top_slowest_items(
+    items: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> tuple[dict[str, object], ...]:
+    ranked = sorted(
+        (
+            dict(item)
+            for item in items
+            if isinstance(item.get("elapsed_seconds"), (int, float))
+        ),
+        key=lambda item: float(item["elapsed_seconds"]),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])

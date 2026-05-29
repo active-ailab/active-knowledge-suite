@@ -103,6 +103,9 @@ DEFAULT_CONFIG: Final[dict[str, object]] = {
         "reuse_baseline": True,
         "write_target": "local_overlay",
         "workers": "auto",
+        "parallel": {
+            "mode": "thread",
+        },
         "code": {
             "enable_full_code_scan": True,
             "enable_ctags": True,

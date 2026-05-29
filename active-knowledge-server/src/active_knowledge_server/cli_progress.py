@@ -116,8 +116,10 @@ class PlainIndexProgressReporter:
     def _format_event(self, event: IndexProgressEvent) -> str:
         label = event.message or event.phase.replace("_", " ")
         counter = _format_counter(event.stage_done, event.stage_total)
+        eta = _format_eta(event.eta_seconds)
         suffix = "" if event.current_path is None else f"  {event.current_path}"
-        return f"[{label}] {counter}{suffix}"
+        eta_suffix = "" if eta is None else f"  ETA {eta}"
+        return f"[{label}] {counter}{eta_suffix}{suffix}"
 
 
 class RichIndexProgressReporter:
@@ -273,12 +275,27 @@ def _format_counter(done: int | None, total: int | None) -> str:
 
 
 def _stage_description(event: IndexProgressEvent) -> str:
+    base = event.message or event.phase.replace("_", " ")
     if event.phase == "discover" and event.message:
         if event.message.startswith("Scanning workspace inventory:"):
-            return "Scanning workspace inventory"
+            base = "Scanning workspace inventory"
         if event.message.startswith("Scanning source documents:"):
-            return "Scanning source documents"
-    return event.message or event.phase.replace("_", " ")
+            base = "Scanning source documents"
+    eta = _format_eta(event.eta_seconds)
+    if eta is None:
+        return base
+    return f"{base} (ETA {eta})"
+
+
+def _format_eta(value: float | None) -> str | None:
+    if value is None:
+        return None
+    total_seconds = max(int(round(value)), 0)
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def _truncate_middle(value: str, max_length: int) -> str:

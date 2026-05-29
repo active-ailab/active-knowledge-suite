@@ -727,17 +727,28 @@ TODO：
 
 ### IP5-01 引入 code process/hybrid 模式
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P3`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP2-04`、`IP4-03`
+- 完成产物：
+  [schema.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/schema.py:210)
+  [defaults.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/config/defaults.py:95)
+  [parallel.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/parallel.py:1)
+  [code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py:1)
+  [benchmark_index.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/scripts/benchmark_index.py:1)
+  [test_indexing_parallel.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_indexing_parallel.py:1)
+  [test_code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_code_indexer.py:234)
+  [test_config_schema.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_config_schema.py:89)
 
 TODO：
 
 - [ ] 只有当压测证明 code parse 是 CPU 瓶颈时才实现。
-- [ ] 确认 worker 输入输出完全可 pickle。
-- [ ] 避免在 process worker 内调用 executor/future 方法。
-- [ ] 增加 `indexing.parallel.mode: thread | process | hybrid`。
+- [x] 确认 worker 输入输出完全可 pickle。
+- [x] 避免在 process worker 内调用 executor/future 方法。
+- [x] 增加 `indexing.parallel.mode: thread | process | hybrid`。
+
+备注：本轮已把 `process/hybrid` 做成显式 opt-in，并让 `hybrid` 在 code collect 走 process、docs collect 保持 thread fallback；默认值仍保持 `thread`，等待 Phase 4/5 的中大仓 benchmark 再决定是否建议启用。
 
 验收标准：
 
@@ -746,17 +757,28 @@ TODO：
 
 ### IP5-02 高级 ETA 与热点诊断
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P3`
 - 类型：`IMPL`、`OPS`
 - 依赖：`IP1-03`、`IP4-03`
+- 完成产物：
+  [progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/progress.py:1)
+  [cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli_progress.py:1)
+  [code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py:1)
+  [doc_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/doc_indexer.py:1)
+  [pipeline.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/indexing/pipeline.py:575)
+  [cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/cli.py:2173)
+  [benchmark_index.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/scripts/benchmark_index.py:1)
+  [index_benchmark.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/src/active_knowledge_server/eval/index_benchmark.py:1)
+  [test_index_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_index_progress.py:1)
+  [test_index_benchmark.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_index_benchmark.py:1)
 
 TODO：
 
-- [ ] 基于滑动窗口计算阶段 ETA。
-- [ ] 输出最慢 N 个文件或文档的诊断摘要。
-- [ ] 对 parser、embedding、metadata write、vector write 分阶段计时。
-- [ ] 将计时信息写入 benchmark JSONL。
+- [x] 基于滑动窗口计算阶段 ETA。
+- [x] 输出最慢 N 个文件或文档的诊断摘要。
+- [x] 对 parser、embedding、metadata write、vector write 分阶段计时。
+- [x] 将计时信息写入 benchmark JSONL。
 
 验收标准：
 

@@ -241,6 +241,12 @@ class IndexWriterConfig(ConfigModel):
     commit_interval_ms: int = Field(default=1000, ge=1)
 
 
+class IndexParallelConfig(ConfigModel):
+    """Executor selection policy for collect-phase parallel work."""
+
+    mode: Literal["thread", "process", "hybrid"] = "thread"
+
+
 class LearnedCardsConfig(ConfigModel):
     """Learned card ingestion switches."""
 
@@ -256,6 +262,7 @@ class IndexingConfig(ConfigModel):
     reuse_baseline: bool = True
     write_target: Literal["local_overlay", "baseline"] = "local_overlay"
     workers: int | Literal["auto"] = "auto"
+    parallel: IndexParallelConfig = Field(default_factory=IndexParallelConfig)
     code: CodeIndexingConfig = Field(default_factory=CodeIndexingConfig)
     docs: DocsIndexingConfig = Field(default_factory=DocsIndexingConfig)
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)

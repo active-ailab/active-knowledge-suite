@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from dataclasses import dataclass
 from typing import Generic, Literal, TypeVar
 
 IndexingPhaseKind = Literal["code", "docs"]
+IndexingParallelMode = Literal["thread", "process", "hybrid"]
+IndexingExecutorKind = Literal["serial", "thread", "process"]
 
 _InputT = TypeVar("_InputT")
 _OutputT = TypeVar("_OutputT")
@@ -19,25 +27,29 @@ class ResolvedIndexingWorkers:
     """Effective worker decision for one collect phase."""
 
     configured: int | Literal["auto"]
+    configured_mode: IndexingParallelMode
     task_count: int
     phase: IndexingPhaseKind
     workers: int
+    executor_kind: IndexingExecutorKind
     reason: str
 
     @property
     def parallel(self) -> bool:
-        """Return whether the phase should use a thread pool."""
+        """Return whether the phase should use a pool executor."""
 
-        return self.workers > 1
+        return self.executor_kind != "serial"
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-safe worker decision summary."""
 
         return {
             "configured": self.configured,
+            "configured_mode": self.configured_mode,
             "task_count": self.task_count,
             "phase": self.phase,
             "workers": self.workers,
+            "executor_kind": self.executor_kind,
             "parallel": self.parallel,
             "reason": self.reason,
         }
@@ -62,36 +74,50 @@ class ParallelMapItemResult(Generic[_InputT, _OutputT]):
 def resolve_indexing_workers(
     configured: int | Literal["auto"],
     *,
+    configured_mode: IndexingParallelMode = "thread",
     task_count: int,
     phase: IndexingPhaseKind,
     cpu_count: int | None = None,
+    allow_process: bool = False,
 ) -> ResolvedIndexingWorkers:
     """Resolve configured indexing workers to a conservative effective count."""
 
     if task_count <= 0:
         return ResolvedIndexingWorkers(
             configured=configured,
+            configured_mode=configured_mode,
             task_count=task_count,
             phase=phase,
             workers=1,
+            executor_kind="serial",
             reason="empty_task_set",
         )
     if task_count == 1:
         return ResolvedIndexingWorkers(
             configured=configured,
+            configured_mode=configured_mode,
             task_count=task_count,
             phase=phase,
             workers=1,
+            executor_kind="serial",
             reason="single_task",
         )
     if isinstance(configured, int):
         workers = max(1, min(configured, task_count))
+        executor_kind = _resolve_executor_kind(
+            configured_mode=configured_mode,
+            phase=phase,
+            workers=workers,
+            allow_process=allow_process,
+        )
         return ResolvedIndexingWorkers(
             configured=configured,
+            configured_mode=configured_mode,
             task_count=task_count,
             phase=phase,
             workers=workers,
-            reason="configured_worker_count",
+            executor_kind=executor_kind,
+            reason=_configured_reason(configured_mode, executor_kind),
         )
 
     available_cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
@@ -102,11 +128,19 @@ def resolve_indexing_workers(
         reason = "small_task_set"
     else:
         reason = "auto"
+    executor_kind = _resolve_executor_kind(
+        configured_mode=configured_mode,
+        phase=phase,
+        workers=workers,
+        allow_process=allow_process,
+    )
     return ResolvedIndexingWorkers(
         configured=configured,
+        configured_mode=configured_mode,
         task_count=task_count,
         phase=phase,
         workers=workers,
+        executor_kind=executor_kind,
         reason=reason,
     )
 
@@ -147,23 +181,75 @@ def parallel_map_ordered(
     results_by_key: dict[str, ParallelMapItemResult[_InputT, _OutputT]] = {}
     next_index = 0
     done_count = 0
-    futures: dict[Future[ParallelMapItemResult[_InputT, _OutputT]], str] = {}
+    futures: dict[Future[_OutputT], tuple[str, _InputT]] = {}
+    executor_cls = (
+        ProcessPoolExecutor if workers.executor_kind == "process" else ThreadPoolExecutor
+    )
 
-    with ThreadPoolExecutor(max_workers=workers.workers) as executor:
+    with executor_cls(max_workers=workers.workers) as executor:
         while next_index < len(ordered_items) or futures:
             while next_index < len(ordered_items) and len(futures) < in_flight_limit:
                 item = ordered_items[next_index]
                 next_index += 1
-                future = executor.submit(run_one, item)
-                futures[future] = key(item)
+                item_key = key(item)
+                future = executor.submit(mapper, item)
+                futures[future] = (item_key, item)
 
             done, _pending = wait(futures, return_when=FIRST_COMPLETED)
             for future in done:
-                futures.pop(future)
-                result = future.result()
+                item_key, item = futures.pop(future)
+                try:
+                    result = ParallelMapItemResult(
+                        key=item_key,
+                        item=item,
+                        value=future.result(),
+                    )
+                except BaseException as exc:
+                    if isinstance(exc, KeyboardInterrupt):
+                        for pending in futures:
+                            pending.cancel()
+                        raise
+                    result = ParallelMapItemResult(
+                        key=item_key,
+                        item=item,
+                        error=exc,
+                    )
                 results_by_key[result.key] = result
                 done_count += 1
                 if callback is not None:
                     callback(result.key, done_count)
 
     return tuple(results_by_key[key(item)] for item in ordered_items)
+
+
+def _resolve_executor_kind(
+    *,
+    configured_mode: IndexingParallelMode,
+    phase: IndexingPhaseKind,
+    workers: int,
+    allow_process: bool,
+) -> IndexingExecutorKind:
+    if workers <= 1:
+        return "serial"
+    if configured_mode == "thread":
+        return "thread"
+    if configured_mode == "process":
+        return "process" if allow_process else "thread"
+    if phase == "code" and allow_process:
+        return "process"
+    return "thread"
+
+
+def _configured_reason(
+    configured_mode: IndexingParallelMode,
+    executor_kind: IndexingExecutorKind,
+) -> str:
+    if executor_kind == "thread" and configured_mode == "process":
+        return "process_mode_fallback_to_thread"
+    if executor_kind == "thread" and configured_mode == "hybrid":
+        return "hybrid_thread_path"
+    if executor_kind == "process" and configured_mode == "hybrid":
+        return "hybrid_process_path"
+    if executor_kind == "process":
+        return "configured_process_mode"
+    return "configured_worker_count"

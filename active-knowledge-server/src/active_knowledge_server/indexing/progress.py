@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
+from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Final, Literal
 
@@ -90,6 +92,40 @@ class IndexProgressEvent:
 
 
 IndexProgressCallback = Callable[[IndexProgressEvent], None]
+
+
+@dataclass
+class SlidingWindowEtaEstimator:
+    """Estimate remaining stage time from a sliding progress-rate window."""
+
+    window_size: int = 6
+    _observations: deque[tuple[float, int]] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._observations = deque(maxlen=max(2, self.window_size))
+
+    def observe(
+        self,
+        *,
+        completed: int,
+        total: int | None,
+        now: float | None = None,
+    ) -> float | None:
+        """Record one progress sample and return the current ETA in seconds."""
+
+        current_time = time.monotonic() if now is None else now
+        self._observations.append((current_time, completed))
+        if total is None or completed <= 0 or completed >= total or len(self._observations) < 2:
+            return None
+        start_time, start_completed = self._observations[0]
+        delta_completed = completed - start_completed
+        delta_seconds = current_time - start_time
+        if delta_completed <= 0 or delta_seconds <= 0:
+            return None
+        rate = delta_completed / delta_seconds
+        if rate <= 0:
+            return None
+        return max((total - completed) / rate, 0.0)
 
 
 def noop_progress_callback(_: IndexProgressEvent) -> None:

@@ -29,6 +29,32 @@ def test_resolve_indexing_workers_honors_explicit_worker_count() -> None:
     assert resolved.parallel is True
 
 
+def test_resolve_indexing_workers_uses_process_for_code_when_enabled() -> None:
+    resolved = resolve_indexing_workers(
+        "auto",
+        configured_mode="hybrid",
+        task_count=8,
+        phase="code",
+        allow_process=True,
+        cpu_count=8,
+    )
+
+    assert resolved.executor_kind == "process"
+
+
+def test_resolve_indexing_workers_falls_back_to_thread_for_docs_process_mode() -> None:
+    resolved = resolve_indexing_workers(
+        4,
+        configured_mode="process",
+        task_count=8,
+        phase="docs",
+        allow_process=False,
+    )
+
+    assert resolved.executor_kind == "thread"
+    assert resolved.reason == "process_mode_fallback_to_thread"
+
+
 def test_parallel_map_ordered_returns_stable_key_order() -> None:
     workers = resolve_indexing_workers(2, task_count=3, phase="docs")
     events: list[tuple[str, int]] = []

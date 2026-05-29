@@ -8,7 +8,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, TypeVar
@@ -34,6 +34,7 @@ from active_knowledge_server.indexing.parallel import (
 from active_knowledge_server.indexing.progress import (
     IndexProgressCallback,
     IndexProgressEvent,
+    SlidingWindowEtaEstimator,
     noop_progress_callback,
     utc_timestamp,
 )
@@ -179,6 +180,7 @@ class _CollectedDocumentEntry:
     evidence_records: tuple[EvidenceRecord, ...] = ()
     embedding_inputs: tuple[EmbeddingInput, ...] = ()
     warnings: tuple[DocumentIndexingWarning, ...] = ()
+    elapsed_seconds: float = 0.0
 
 
 class DocumentIndexer:
@@ -247,13 +249,15 @@ class DocumentIndexer:
         started_at = utc_timestamp()
         workers = resolve_indexing_workers(
             self._config.indexing.workers,
+            configured_mode=self._config.indexing.parallel.mode,
             task_count=stage_total,
             phase="docs",
         )
         collect_message = (
             f"Collecting source documents with {workers.workers} "
-            f"worker{'s' if workers.workers != 1 else ''}"
+            f"{workers.executor_kind} worker{'s' if workers.workers != 1 else ''}"
         )
+        eta_estimator = SlidingWindowEtaEstimator()
         if stage_total:
             callback(
                 IndexProgressEvent(
@@ -283,6 +287,7 @@ class DocumentIndexer:
             )
 
         def report_progress(path: str, done: int) -> None:
+            eta_seconds = eta_estimator.observe(completed=done, total=stage_total)
             callback(
                 IndexProgressEvent(
                     phase="doc_collect",
@@ -293,6 +298,7 @@ class DocumentIndexer:
                     warnings_count=len(warnings),
                     started_at=started_at,
                     updated_at=utc_timestamp(),
+                    eta_seconds=eta_seconds,
                 )
             )
 
@@ -307,6 +313,8 @@ class DocumentIndexer:
             workers=workers,
             callback=report_progress,
         )
+        parser_seconds = 0.0
+        slowest_items: list[dict[str, object]] = []
         for result in results:
             if result.error is not None:
                 warnings.append(
@@ -326,6 +334,14 @@ class DocumentIndexer:
             evidence_records.extend(result.value.evidence_records)
             embedding_inputs.extend(result.value.embedding_inputs)
             warnings.extend(result.value.warnings)
+            parser_seconds += result.value.elapsed_seconds
+            slowest_items.append(
+                {
+                    "path": result.value.storage_relative_path,
+                    "stage": "doc_collect",
+                    "elapsed_seconds": round(result.value.elapsed_seconds, 6),
+                }
+            )
 
         report_finalize(
             f"Collected {len(file_records)}/{stage_total} source documents; sorting records"
@@ -351,8 +367,11 @@ class DocumentIndexer:
         embedding_inputs.sort(key=lambda item: (item.source_path, item.object_id))
 
         report_finalize(
-            f"Collected {len(file_records)}/{stage_total} source documents; preparing embedding batches"
+            "Collected "
+            f"{len(file_records)}/{stage_total} source documents; "
+            "preparing embedding batches"
         )
+        embedding_started_at = time.perf_counter()
         embedding_preparation = (
             prepare_embedding_inputs(embedding_inputs, secret_scanner=self._secret_scanner)
             if self._embeddings_enabled
@@ -362,6 +381,7 @@ class DocumentIndexer:
                 skipped_reports=(),
             )
         )
+        embedding_seconds = time.perf_counter() - embedding_started_at
         chunk_lookup = {chunk.chunk_id: chunk for chunk in chunk_records}
         vector_writes = tuple(
             self._build_vector_write(chunk_lookup[item.object_id])
@@ -383,7 +403,16 @@ class DocumentIndexer:
             vector_writes=vector_writes,
             embedding_preparation=embedding_preparation,
             warnings=tuple(warnings),
-            metadata={"collect_workers": workers.to_dict()},
+            metadata={
+                "collect_workers": workers.to_dict(),
+                "timings": {
+                    "parser_seconds": round(parser_seconds, 6),
+                    "embedding_seconds": round(embedding_seconds, 6),
+                },
+                "diagnostics": {
+                    "slowest_items": _top_slowest_items(slowest_items),
+                },
+            },
         )
 
     def _collect_document_entry(
@@ -393,6 +422,7 @@ class DocumentIndexer:
         manifest: SourceDocsManifest,
         entry: SourceDocEntry,
     ) -> _CollectedDocumentEntry:
+        started_at = time.perf_counter()
         absolute_path = Path(manifest.source_docs_root) / entry.relative_path
         storage_relative_path = _storage_relative_path(manifest, entry)
         warnings: list[DocumentIndexingWarning] = []
@@ -408,6 +438,7 @@ class DocumentIndexer:
             return _CollectedDocumentEntry(
                 storage_relative_path=storage_relative_path,
                 warnings=tuple(warnings),
+                elapsed_seconds=time.perf_counter() - started_at,
             )
 
         parsed = self._parse_document(absolute_path, entry)
@@ -510,6 +541,7 @@ class DocumentIndexer:
             evidence_records=tuple(evidences),
             embedding_inputs=embedding_inputs,
             warnings=tuple(warnings),
+            elapsed_seconds=time.perf_counter() - started_at,
         )
 
     def collect_and_store(
@@ -530,6 +562,7 @@ class DocumentIndexer:
         )
         batch_size = self._config.indexing.writer.batch_size
         commit_interval_ms = self._config.indexing.writer.commit_interval_ms
+        metadata_write_started_at = time.perf_counter()
         _write_in_batches(
             indexed.source_records,
             batch_size=batch_size,
@@ -565,15 +598,26 @@ class DocumentIndexer:
             transaction=writer.transaction,
             write_one=writer.upsert_evidence,
         )
+        metadata_write_seconds = time.perf_counter() - metadata_write_started_at
         writer.flush()
 
+        vector_write_seconds = 0.0
         if vector_writer is not None:
+            vector_write_started_at = time.perf_counter()
             vector_writer.upsert_vectors(
                 (write.record, write.embedding) for write in indexed.vector_writes
             )
             vector_writer.flush()
+            vector_write_seconds = time.perf_counter() - vector_write_started_at
 
-        return indexed
+        metadata = _merge_indexer_metadata(
+            indexed.metadata,
+            extra_timings={
+                "metadata_write_seconds": round(metadata_write_seconds, 6),
+                "vector_write_seconds": round(vector_write_seconds, 6),
+            },
+        )
+        return replace(indexed, metadata=metadata)
 
     def embed_text(self, text: str) -> tuple[float, ...]:
         """Return a deterministic local embedding for one text payload."""
@@ -1234,3 +1278,33 @@ def _write_in_batches(
         if active_transaction is not None:
             active_transaction.__exit__(type(exc), exc, exc.__traceback__)
         raise
+
+
+def _merge_indexer_metadata(
+    metadata: Mapping[str, object],
+    *,
+    extra_timings: Mapping[str, float],
+) -> dict[str, object]:
+    merged = dict(metadata)
+    timings = dict(metadata.get("timings", {}))
+    for key, value in extra_timings.items():
+        timings[key] = value
+    merged["timings"] = timings
+    return merged
+
+
+def _top_slowest_items(
+    items: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> tuple[dict[str, object], ...]:
+    ranked = sorted(
+        (
+            dict(item)
+            for item in items
+            if isinstance(item.get("elapsed_seconds"), (int, float))
+        ),
+        key=lambda item: float(item["elapsed_seconds"]),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])

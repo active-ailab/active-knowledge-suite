@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TextIO, cast
@@ -2205,6 +2206,21 @@ def run_full_index(
         + workspace_map_total
     )
     global_done = 0
+    result_metadata: dict[str, object] = {
+        "writer": {
+            "batch_size": model.indexing.writer.batch_size,
+            "commit_interval_ms": model.indexing.writer.commit_interval_ms,
+        },
+        "timings": {
+            "parser_seconds": 0.0,
+            "embedding_seconds": 0.0,
+            "metadata_write_seconds": 0.0,
+            "vector_write_seconds": 0.0,
+        },
+        "diagnostics": {
+            "slowest_items": [],
+        },
+    }
 
     def emit(
         *,
@@ -2280,6 +2296,7 @@ def run_full_index(
             workspace_inventory=workspace_inventory,
             progress_callback=handle_code_collect,
         )
+        _merge_index_result_metadata(result_metadata, "code_collect", code_records.metadata)
         global_done += code_collect_total
 
     doc_records = None
@@ -2309,6 +2326,7 @@ def run_full_index(
             source_docs_manifest=source_docs_manifest,
             progress_callback=handle_doc_collect,
         )
+        _merge_index_result_metadata(result_metadata, "doc_collect", doc_records.metadata)
         global_done += doc_collect_total
         global_done += vectors_apply_total
         emit(
@@ -2321,6 +2339,7 @@ def run_full_index(
 
     relation_records = None
     if code_records is not None:
+        relation_started_at = time.perf_counter()
         relation_records = ProfileConditionedRelationExtractor().collect_and_store(
             writer,
             snapshot_id=snapshot.snapshot_record.snapshot_id,
@@ -2335,8 +2354,16 @@ def run_full_index(
             stage_done=1,
             message="Refreshing profile-conditioned relations",
         )
+        timings = result_metadata["timings"]
+        assert isinstance(timings, dict)
+        timings["metadata_write_seconds"] = round(
+            float(timings.get("metadata_write_seconds", 0.0))
+            + (time.perf_counter() - relation_started_at),
+            6,
+        )
 
     if source in {"all", "code"}:
+        workspace_map_started_at = time.perf_counter()
         WorkspaceMapBuilder.from_config(model, cwd=cwd).collect_and_write(
             snapshot_id=snapshot.snapshot_record.snapshot_id,
             workspace_inventory=workspace_inventory,
@@ -2351,6 +2378,9 @@ def run_full_index(
             stage_done=1,
             message="Refreshing workspace map",
         )
+        timings = result_metadata["timings"]
+        assert isinstance(timings, dict)
+        timings["workspace_map_seconds"] = round(time.perf_counter() - workspace_map_started_at, 6)
 
     emit(
         phase="done",
@@ -2382,13 +2412,66 @@ def run_full_index(
         "relation_schema_version": None
         if relation_records is None
         else relation_records.schema_version,
-        "metadata": {
-            "writer": {
-                "batch_size": model.indexing.writer.batch_size,
-                "commit_interval_ms": model.indexing.writer.commit_interval_ms,
-            },
-        },
+        "metadata": result_metadata,
     }
+
+
+def _merge_index_result_metadata(
+    result_metadata: dict[str, object],
+    section_name: str,
+    section_metadata: Mapping[str, object],
+) -> None:
+    result_metadata[f"{section_name}_metadata"] = dict(section_metadata)
+    timings = result_metadata.get("timings")
+    assert isinstance(timings, dict)
+    section_timings = section_metadata.get("timings", {})
+    if isinstance(section_timings, Mapping):
+        timings["parser_seconds"] = round(
+            float(timings.get("parser_seconds", 0.0))
+            + float(section_timings.get("parser_seconds", 0.0)),
+            6,
+        )
+        timings["embedding_seconds"] = round(
+            float(timings.get("embedding_seconds", 0.0))
+            + float(section_timings.get("embedding_seconds", 0.0)),
+            6,
+        )
+        timings["metadata_write_seconds"] = round(
+            float(timings.get("metadata_write_seconds", 0.0))
+            + float(section_timings.get("metadata_write_seconds", 0.0)),
+            6,
+        )
+        timings["vector_write_seconds"] = round(
+            float(timings.get("vector_write_seconds", 0.0))
+            + float(section_timings.get("vector_write_seconds", 0.0)),
+            6,
+        )
+    diagnostics = result_metadata.get("diagnostics")
+    assert isinstance(diagnostics, dict)
+    section_diagnostics = section_metadata.get("diagnostics", {})
+    if isinstance(section_diagnostics, Mapping):
+        slowest = section_diagnostics.get("slowest_items", ())
+        existing = diagnostics.get("slowest_items", [])
+        if isinstance(slowest, Sequence) and isinstance(existing, list):
+            existing.extend(dict(item) for item in slowest if isinstance(item, Mapping))
+            diagnostics["slowest_items"] = list(_top_slowest_items(existing))
+
+
+def _top_slowest_items(
+    items: Sequence[Mapping[str, object]],
+    *,
+    limit: int = 5,
+) -> tuple[dict[str, object], ...]:
+    ranked = sorted(
+        (
+            dict(item)
+            for item in items
+            if isinstance(item.get("elapsed_seconds"), (int, float))
+        ),
+        key=lambda item: float(item["elapsed_seconds"]),
+        reverse=True,
+    )
+    return tuple(ranked[:limit])
 
 
 def rebuild_vectors(

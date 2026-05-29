@@ -5,6 +5,7 @@ import pytest
 from active_knowledge_server.indexing.progress import (
     INDEX_PROGRESS_PHASES,
     IndexProgressEvent,
+    SlidingWindowEtaEstimator,
     noop_progress_callback,
 )
 
@@ -65,3 +66,11 @@ def test_progress_event_phases_match_contract() -> None:
 
 def test_noop_progress_callback_accepts_event() -> None:
     noop_progress_callback(IndexProgressEvent(phase="done", global_done=1, global_total=1))
+
+
+def test_sliding_window_eta_estimator_uses_recent_progress_rate() -> None:
+    estimator = SlidingWindowEtaEstimator(window_size=4)
+
+    assert estimator.observe(completed=0, total=10, now=0.0) is None
+    assert estimator.observe(completed=2, total=10, now=2.0) == pytest.approx(8.0)
+    assert estimator.observe(completed=5, total=10, now=5.0) == pytest.approx(5.0)
