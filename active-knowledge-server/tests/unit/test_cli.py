@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,8 @@ from active_knowledge_server.cli import (
     main,
     parse_performance_exemptions,
     resolve_index_output_mode,
+    resolve_index_progress_output_mode,
+    storage_write_target_for_cli_target,
 )
 from active_knowledge_server.config.loader import ConfigError
 from active_knowledge_server.eval.baseline import create_baseline_snapshot
@@ -80,6 +83,11 @@ def test_rebuild_subcommand_has_help() -> None:
 
     assert "usage: active-kb rebuild" in result.stdout
     assert "--vectors" in result.stdout
+
+
+def test_cli_local_target_maps_to_overlay_storage_target() -> None:
+    assert storage_write_target_for_cli_target("local") == "overlay"
+    assert storage_write_target_for_cli_target("baseline") == "baseline"
 
 
 def test_baseline_validate_subcommand_has_help() -> None:
@@ -386,6 +394,84 @@ def test_validate_json_reports_baseline_profile_index_and_warnings(
         "compile_db.missing",
         "storage.schema_missing",
     }
+
+
+def test_init_uses_quick_storage_validation(monkeypatch, tmp_path: Path, capsys) -> None:
+    from active_knowledge_server import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    captured_modes: list[str] = []
+    original = cli_module.validate_storage_consistency
+
+    def wrapped(*args, **kwargs):
+        captured_modes.append(str(kwargs.get("mode", "full")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "validate_storage_consistency", wrapped)
+
+    exit_code = main(
+        [
+            "init",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert captured_modes == ["quick"]
+
+
+def test_validate_uses_full_storage_validation(monkeypatch, tmp_path: Path, capsys) -> None:
+    from active_knowledge_server import cli as cli_module
+
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    captured_modes: list[str] = []
+    original = cli_module.validate_storage_consistency
+
+    def wrapped(*args, **kwargs):
+        captured_modes.append(str(kwargs.get("mode", "full")))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cli_module, "validate_storage_consistency", wrapped)
+
+    exit_code = main(
+        [
+            "validate",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["status"] == "ok"
+    assert captured_modes == ["full"]
 
 
 def test_validate_strict_reports_missing_workdir(tmp_path: Path, capsys) -> None:
@@ -1141,6 +1227,146 @@ def test_index_incremental_json_is_machine_readable(
     assert payload["result"]["result_status"] == "ready"
 
 
+def test_index_incremental_json_can_render_progress_to_stderr(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+        ) -> IncrementalIndexResult:
+            progress_callback(
+                IndexProgressEvent(
+                    phase="done",
+                    stage_total=1,
+                    stage_done=1,
+                    global_total=1,
+                    global_done=1,
+                    message="Incremental indexing finished",
+                )
+            )
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=IncrementalIndexPlan(
+                    snapshot_id=snapshot_id,
+                    source="all",
+                    previous_state=None,
+                    current_state=object(),
+                    workspace_inventory=object(),
+                    source_docs_manifest=object(),
+                    collected_profiles=object(),
+                ),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.resolve_index_progress_output_mode",
+        lambda *, output_format: "text_plain",
+    )
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["command"] == "index"
+    assert "Incremental indexing finished" in captured.err
+
+
+def test_index_incremental_json_interrupt_keeps_stdout_payload(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+        ) -> IncrementalIndexResult:
+            progress_callback(
+                IndexProgressEvent(
+                    phase="doc_collect",
+                    stage_total=4,
+                    stage_done=2,
+                    global_total=8,
+                    global_done=3,
+                    current_path="knowledge-sources/api/sensor.md",
+                    message="Collecting source documents",
+                )
+            )
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+    monkeypatch.setattr(
+        "active_knowledge_server.cli.resolve_index_progress_output_mode",
+        lambda *, output_format: "text_plain",
+    )
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--format",
+            "json",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 130
+    assert payload["status"] == "interrupted"
+    assert "Index interrupted." in captured.err
+
+
 def test_resolve_index_output_mode_contract() -> None:
     class DummyStream:
         def __init__(self, *, is_tty: bool) -> None:
@@ -1166,6 +1392,96 @@ def test_resolve_index_output_mode_contract() -> None:
         )
         == "text_plain"
     )
+
+
+def test_resolve_index_progress_output_mode_contract() -> None:
+    class DummyStream:
+        def __init__(self, *, is_tty: bool) -> None:
+            self._is_tty = is_tty
+
+        def isatty(self) -> bool:
+            return self._is_tty
+
+    assert (
+        resolve_index_progress_output_mode(
+            output_format="json",
+            progress_stream=DummyStream(is_tty=True),
+        )
+        == "text_dynamic"
+    )
+    assert (
+        resolve_index_progress_output_mode(
+            output_format="json",
+            progress_stream=DummyStream(is_tty=True),
+            rich_available=False,
+        )
+        == "text_plain"
+    )
+    assert (
+        resolve_index_progress_output_mode(
+            output_format="json",
+            progress_stream=DummyStream(is_tty=False),
+        )
+        == "none"
+    )
+    assert (
+        resolve_index_progress_output_mode(
+            output_format="text",
+            output_stream=DummyStream(is_tty=False),
+        )
+        == "text_plain"
+    )
+
+
+def test_full_local_index_writes_overlay_when_empty_baseline_db_exists(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    baseline_db = workdir / "baseline" / "db" / "metadata.db"
+    overlay_db = workdir / "local" / "db" / "overlay.db"
+    workspace.mkdir()
+    source_docs.mkdir()
+    baseline_db.parent.mkdir(parents=True)
+    sqlite3.connect(baseline_db).close()
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = main(
+        [
+            "index",
+            "--full",
+            "--target",
+            "local",
+            "--source",
+            "docs",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    with sqlite3.connect(overlay_db) as connection:
+        overlay_snapshot_count = connection.execute("SELECT COUNT(*) FROM snapshot").fetchone()
+    with sqlite3.connect(baseline_db) as connection:
+        baseline_snapshot_table = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'snapshot'"
+        ).fetchone()
+
+    assert exit_code == 0
+    assert payload["target"] == "local"
+    assert payload["result"]["target"] == "local"
+    assert overlay_snapshot_count is not None
+    assert int(overlay_snapshot_count[0]) > 0
+    assert baseline_snapshot_table is None
 
 
 def test_baseline_publish_json_writes_manifest(
@@ -1264,8 +1580,8 @@ def test_index_interrupt_prints_snapshot_without_traceback(
 
     monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
     monkeypatch.setattr(
-        "active_knowledge_server.cli.resolve_index_output_mode",
-        lambda output_format: "text_plain",
+        "active_knowledge_server.cli.resolve_index_progress_output_mode",
+        lambda *, output_format: "text_plain",
     )
 
     exit_code = main(

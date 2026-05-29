@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from active_knowledge_server.storage.sqlite_store import (
 
 ValidateStatus = Literal["ok", "degraded", "blocked"]
 CheckSeverity = Literal["info", "caution", "degraded", "blocked"]
+ValidationMode = Literal["quick", "full"]
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,8 @@ def validate_storage_consistency(
     *,
     cwd: Path,
     scope: QueryScope | None = None,
+    mode: ValidationMode = "full",
+    emit_progress: bool = False,
 ) -> StorageValidationReport:
     """Validate baseline/overlay metadata, FTS, vectors, evidence, and relations."""
 
@@ -102,7 +106,12 @@ def validate_storage_consistency(
     reader = adapter.reader()
 
     checks: list[StorageValidationCheck] = []
+    progress = _validation_progress_printer(enabled=emit_progress)
+    progress(f"storage validation start (mode={mode})")
+
+    progress("check sqlite schema versions")
     checks.extend(check_sqlite_schema_versions(sqlite_paths))
+    progress("check vector manifests")
     checks.extend(
         check_vector_manifests(
             baseline_vector_path=baseline_vector_path,
@@ -110,13 +119,22 @@ def validate_storage_consistency(
             expected_embedding_model=config.indexing.embeddings.model,
         )
     )
-    checks.extend(check_fts_metadata_consistency(reader, sqlite_paths, query_scope))
-    checks.extend(check_vector_refs(reader, baseline_vector_path, delta_vector_path, query_scope))
-    checks.extend(check_evidence_targets(reader, query_scope))
-    checks.extend(check_relation_targets(reader, query_scope))
-    checks.extend(check_tombstone_leaks(reader, sqlite_paths["overlay_metadata"], query_scope))
+    if mode == "full":
+        progress("check fts metadata consistency")
+        checks.extend(check_fts_metadata_consistency(reader, sqlite_paths, query_scope))
+        progress("check vector refs")
+        checks.extend(check_vector_refs(reader, baseline_vector_path, delta_vector_path, query_scope))
+        progress("check evidence targets")
+        checks.extend(check_evidence_targets(reader, query_scope))
+        progress("check relation targets")
+        checks.extend(check_relation_targets(reader, query_scope))
+        progress("check tombstone leaks")
+        checks.extend(check_tombstone_leaks(reader, sqlite_paths["overlay_metadata"], query_scope))
+    progress("check replacement loops")
     checks.extend(check_replacement_loops(sqlite_paths["overlay_metadata"]))
+    progress("check job locks")
     checks.extend(check_job_locks(sqlite_paths["jobs"]))
+    progress("storage validation done")
 
     return StorageValidationReport(
         schema_version="validate_report.v1",
@@ -518,3 +536,12 @@ def optional_text(value: Any) -> str | None:
 
 def parse_timestamp(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _validation_progress_printer(*, enabled: bool):
+    def emit(message: str) -> None:
+        if not enabled:
+            return
+        print(f"active-kb: {message}", file=sys.stderr, flush=True)
+
+    return emit

@@ -167,7 +167,7 @@
 - 默认 5Hz（200ms）
 - 仅 text + TTY 模式启用
 - text + 非 TTY 模式保留低频纯文本摘要
-- json 模式禁用动态 UI，保留机器可读稳定输出
+- json 模式 stdout 只保留最终机器可读结果；若 stderr 是交互式终端，可在 stderr 渲染同一套动态 UI
 
 ### 5.4 取消与异常
 

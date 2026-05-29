@@ -276,7 +276,7 @@ TODO：
 验收标准：
 
 - text + TTY 下可看到总进度、阶段进度、最近文件。
-- `--format json` 下没有 Rich 输出。
+- `--format json` 下 stdout 保持最终 JSON；交互式 stderr 可显示同一套进度 UI。
 - renderer 单测覆盖最近文件截断、阶段切换、done 事件。
 
 ### IP1-04 补齐依赖声明

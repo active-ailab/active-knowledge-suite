@@ -44,29 +44,29 @@ from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
 from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.eval.stability import StabilityBenchmark
 from active_knowledge_server.indexing import (
-    CURRENT_SNAPSHOT_ID,
     CODE_INDEXER_SCHEMA_VERSION,
-    CodeIndexer,
+    CURRENT_SNAPSHOT_ID,
     DOC_INDEXER_SCHEMA_VERSION,
+    PROFILE_COLLECTOR_SCHEMA_VERSION,
+    PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
+    SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
+    WORKSPACE_MAP_SCHEMA_VERSION,
+    CodeIndexer,
     DocumentIndexer,
     IncrementalIndexPipeline,
     IndexProgressEvent,
-    PROFILE_COLLECTOR_SCHEMA_VERSION,
-    PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
-    SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
     SnapshotCollector,
-    WORKSPACE_MAP_SCHEMA_VERSION,
     WorkspaceMapBuilder,
     count_indexable_workspace_files,
     noop_progress_callback,
     utc_timestamp,
 )
 from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
+from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
 from active_knowledge_server.models import QueryResult, Warning
 from active_knowledge_server.models.responses import QUERY_RESULT_SCHEMA_VERSION
-from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
 from active_knowledge_server.parsers import (
     C_FAMILY_PARSER_SCHEMA_VERSION,
     DOC_PARSER_SCHEMA_VERSION,
@@ -80,7 +80,7 @@ from active_knowledge_server.security.config import (
     validate_startup_security,
 )
 from active_knowledge_server.server import build_server_app, server_name
-from active_knowledge_server.storage import StorageWriteRequest
+from active_knowledge_server.storage import StorageWriteRequest, StorageWriteTarget
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
@@ -94,6 +94,17 @@ from active_knowledge_server.storage.validation import validate_storage_consiste
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
 IndexOutputMode = Literal["json_final", "text_dynamic", "text_plain"]
+IndexProgressOutputMode = Literal["none", "text_dynamic", "text_plain"]
+
+
+def storage_write_target_for_cli_target(target: str) -> StorageWriteTarget:
+    """Translate CLI target names into storage write targets."""
+
+    if target == "baseline":
+        return "baseline"
+    if target == "local":
+        return "overlay"
+    raise ValueError(f"unsupported write target: {target}")
 
 
 def resolve_index_output_mode(
@@ -113,6 +124,31 @@ def resolve_index_output_mode(
     if not is_tty or not rich_available:
         return "text_plain"
     return "text_dynamic"
+
+
+def resolve_index_progress_output_mode(
+    *,
+    output_format: str,
+    output_stream: TextIO | None = None,
+    progress_stream: TextIO | None = None,
+    rich_available: bool = True,
+) -> IndexProgressOutputMode:
+    """Resolve where live indexing progress should be rendered."""
+
+    if output_format == "json":
+        stream = progress_stream or sys.stderr
+        is_tty = bool(getattr(stream, "isatty", lambda: False)())
+        if not is_tty:
+            return "none"
+        return "text_dynamic" if rich_available else "text_plain"
+    mode = resolve_index_output_mode(
+        output_format=output_format,
+        stream=output_stream,
+        rich_available=rich_available,
+    )
+    if mode == "json_final":
+        return "none"
+    return mode
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -767,7 +803,8 @@ def handle_init(args: argparse.Namespace) -> int:
     layout = result.layout
 
     summary = config_summary(resolved)
-    index_status, index_warnings = collect_index_status(resolved)
+    debug_progress("init: collect quick index status")
+    index_status, index_warnings = collect_index_status(resolved, validation_mode="quick")
     baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
         resolved,
         layout=layout,
@@ -850,11 +887,15 @@ def handle_index(args: argparse.Namespace) -> int:
     )
     if blocked is not None:
         return blocked
-    output_mode = resolve_index_output_mode(output_format=args.format)
+    output_mode = resolve_index_progress_output_mode(output_format=args.format)
     progress_callback = noop_progress_callback
     reporter = None
-    if output_mode != "json_final":
-        reporter = create_index_progress_reporter(output_mode=output_mode)
+    if output_mode != "none":
+        progress_stream = sys.stderr if args.format == "json" else sys.stdout
+        reporter = create_index_progress_reporter(
+            output_mode=output_mode,
+            stream=progress_stream,
+        )
         progress_callback = reporter.handle
 
     try:
@@ -880,7 +921,7 @@ def handle_index(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         if reporter is not None:
             reporter.emit_interrupt_summary()
-        elif args.format == "json":
+        if args.format == "json":
             print_json(
                 {
                     "command": "index",
@@ -1079,7 +1120,8 @@ def handle_status(args: argparse.Namespace) -> int:
     resolved = resolve_from_args(args)
     layout = workdir_layout(resolved)
     summary = config_summary(resolved)
-    index_status, index_warnings = collect_index_status(resolved)
+    debug_progress("status: collect quick index status")
+    index_status, index_warnings = collect_index_status(resolved, validation_mode="quick")
     baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
         resolved,
         layout=layout,
@@ -1123,7 +1165,12 @@ def handle_validate(args: argparse.Namespace) -> int:
     resolved = resolve_from_args(args)
     layout = workdir_layout(resolved)
     checks = validation_checks(layout, resolved, strict=bool(args.strict))
-    index_status, index_warnings = collect_index_status(resolved)
+    debug_progress("validate: collect full index status")
+    index_status, index_warnings = collect_index_status(
+        resolved,
+        validation_mode="full",
+        emit_progress=True,
+    )
     baseline_reuse, baseline_warnings = collect_baseline_reuse_status(
         resolved,
         layout=layout,
@@ -2117,8 +2164,9 @@ def run_full_index(
     cwd = Path.cwd()
     callback = progress_callback or noop_progress_callback
     started_at = utc_timestamp()
+    write_target = storage_write_target_for_cli_target(target)
     request = StorageWriteRequest(
-        target=cast(Any, target), operation_mode=cast(Any, operation_mode)
+        target=write_target, operation_mode=cast(Any, operation_mode)
     )
 
     if target == "baseline":
@@ -2354,8 +2402,9 @@ def rebuild_vectors(
 
     model = resolved.model
     cwd = Path.cwd()
+    write_target = storage_write_target_for_cli_target(target)
     request = StorageWriteRequest(
-        target=cast(Any, target), operation_mode=cast(Any, operation_mode)
+        target=write_target, operation_mode=cast(Any, operation_mode)
     )
 
     if target == "baseline":
@@ -2590,12 +2639,20 @@ def collect_profile_status(
 
 def collect_index_status(
     resolved: ResolvedConfig,
+    *,
+    validation_mode: Literal["quick", "full"] = "full",
+    emit_progress: bool = False,
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
     """Summarize storage validation plus recent index job state."""
 
     adapter = SQLiteStorageAdapter.from_config(resolved.model, cwd=Path.cwd())
     reader = adapter.reader()
-    storage_report = validate_storage_consistency(resolved.model, cwd=Path.cwd())
+    storage_report = validate_storage_consistency(
+        resolved.model,
+        cwd=Path.cwd(),
+        mode=validation_mode,
+        emit_progress=emit_progress,
+    )
     recent_jobs_raw = tuple(reader.iter_jobs())[:10]
     recent_jobs = tuple(
         {
@@ -2816,6 +2873,12 @@ def print_json(payload: object) -> None:
     """Print stable JSON output."""
 
     print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def debug_progress(message: str) -> None:
+    """Emit one progress hint to stderr without affecting JSON stdout."""
+
+    print(f"active-kb: {message}", file=sys.stderr, flush=True)
 
 
 def emit_blocked_result(args: argparse.Namespace, result: SecurityValidationResult) -> int:

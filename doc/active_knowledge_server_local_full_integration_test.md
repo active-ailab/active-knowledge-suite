@@ -45,6 +45,10 @@ mkdir -p \
 
 这一阶段只验证当前配置下的真实 workspace、真实 workdir、真实 MCP wiring。
 
+说明：`init` 和 `status` 现在只做 quick storage validation，避免在已有大索引上卡在全量一致性扫描；完整的 deep storage validation 仍然放在 `validate`，并会把当前校验阶段打印到 stderr，方便判断命令是否只是慢而不是卡死。
+
+`index --format json` 的最终 JSON 仍只写 stdout；当 stderr 是交互式终端时，索引期间会把与 text 模式一致的 global progress、stage progress 和最近文件滚动区写到 stderr，不影响 `jq`、重定向或 CI 解析 stdout。
+
 ```bash
 uv sync --group dev
 

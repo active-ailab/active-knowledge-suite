@@ -200,3 +200,17 @@ def test_validate_reports_orphan_relation(tmp_path: Path) -> None:
     report = validate_storage_consistency(config, cwd=tmp_path, scope=QueryScope())
 
     assert "storage.orphan_relation" in {check.check_code for check in report.checks}
+
+
+def test_validate_quick_mode_skips_deep_logical_checks(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    adapter = build_adapter(config)
+    seed_file_and_chunk(adapter)
+    with sqlite_connection(Path(config.storage.metadata.path)) as connection:
+        connection.execute("DELETE FROM chunk_fts WHERE object_id = ?", ("chunk-doc",))
+        connection.commit()
+
+    report = validate_storage_consistency(config, cwd=tmp_path, mode="quick")
+
+    assert report.status == "ok"
+    assert report.checks == ()
