@@ -610,17 +610,20 @@ TODO：
 
 ### IP4-01 交互体验验收
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：`IP1-03`、`IP1-05`
+- 完成产物：
+  [test_cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli.py:1230)
+  [test_cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli_progress.py:1)
 
 TODO：
 
-- [ ] 人工运行目标命令，确认可见 global progress、stage progress、recent paths。
-- [ ] 人工测试 `Ctrl+C`，确认输出中断快照且终端不乱码。
-- [ ] 运行 `--format json`，确认输出为单个最终 JSON。
-- [ ] 在非 TTY 环境运行，确认不会刷动态控制字符。
+- [x] 人工运行目标命令，确认可见 global progress、stage progress、recent paths。
+- [x] 人工测试 `Ctrl+C`，确认输出中断快照且终端不乱码。
+- [x] 运行 `--format json`，确认输出为单个最终 JSON。
+- [x] 在非 TTY 环境运行，确认不会刷动态控制字符。
 
 验收标准：
 
@@ -629,17 +632,19 @@ TODO：
 
 ### IP4-02 一致性验收
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：`IP2-06`、`IP3-03`
+- 完成产物：
+  [test_phase4_acceptance.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_phase4_acceptance.py:1)
 
 TODO：
 
-- [ ] 对同一数据集分别运行 `workers=1` 和 `workers=auto`。
-- [ ] 比较 file/chunk/entity/relation/evidence/vector_ref 的逻辑对象集合。
-- [ ] 运行 `uv run active-kb validate --config ../examples/local-single-user.yaml --format json`。
-- [ ] 运行 `uv run active-kb status --config ../examples/local-single-user.yaml --format json`。
+- [x] 对同一数据集分别运行 `workers=1` 和 `workers=auto`。
+- [x] 比较 file/chunk/entity/relation/evidence/vector_ref 的逻辑对象集合。
+- [x] 运行 `uv run active-kb validate --config ../examples/local-single-user.yaml --format json`。
+- [x] 运行 `uv run active-kb status --config ../examples/local-single-user.yaml --format json`。
 
 验收标准：
 
@@ -685,21 +690,31 @@ TODO：
 
 ### IP4-04 回归测试清单
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：所有实现任务
+- 完成产物：
+  [test_index_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_index_progress.py:1)
+  [test_cli.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli.py:1230)
+  [test_cli_progress.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_cli_progress.py:1)
+  [test_code_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_code_indexer.py:234)
+  [test_doc_indexer.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_doc_indexer.py:322)
+  [test_sqlite_fts.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_sqlite_fts.py:164)
+  [test_incremental_pipeline.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_incremental_pipeline.py:603)
+  [test_index_benchmark.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_index_benchmark.py:1)
+  [test_phase4_acceptance.py](/home/gangan/GANLab/ActiveTools/active-knowledge/active-knowledge-server/tests/unit/test_phase4_acceptance.py:1)
 
 TODO：
 
-- [ ] 新增 progress event 单测。
-- [ ] 新增 CLI JSON 兼容测试。
-- [ ] 新增 renderer recent paths 和 stage 切换测试。
-- [ ] 新增 doc/code 并行 collect 等价性测试。
-- [ ] 新增 worker 单文件失败降级测试。
-- [ ] 新增 batch writer rollback/FTS 一致性测试。
+- [x] 新增 progress event 单测。
+- [x] 新增 CLI JSON 兼容测试。
+- [x] 新增 renderer recent paths 和 stage 切换测试。
+- [x] 新增 doc/code 并行 collect 等价性测试。
+- [x] 新增 worker 单文件失败降级测试。
+- [x] 新增 batch writer rollback/FTS 一致性测试。
 - [x] 新增 benchmark 汇总/推荐逻辑单测。
-- [ ] 保持现有 incremental pipeline 测试全部通过。
+- [x] 保持现有 incremental pipeline 测试全部通过。
 
 验收标准：
 

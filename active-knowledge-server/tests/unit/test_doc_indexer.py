@@ -319,6 +319,81 @@ Heart tile shows bpm.
     assert parallel.metadata["collect_workers"]["workers"] == 2
 
 
+def test_doc_indexer_parallel_collect_skips_single_failed_document(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"workers": 4}},
+    )
+    docs_root = Path(config.runtime.source_docs_root)
+    (docs_root / "api").mkdir()
+    (docs_root / "widgets").mkdir()
+    (docs_root / "api" / "sensor.md").write_text(
+        """---
+title: Sensor Register API
+authority_level: official
+version: 1.2.0
+module: sensor
+code_symbols:
+  - sensor_open
+---
+# Sensor Register API
+
+## sensor_open
+Open the sensor register.
+""",
+        encoding="utf-8",
+    )
+    (docs_root / "widgets" / "heart_tile.md").write_text(
+        """---
+title: Heart Tile Widget
+authority_level: official
+widget: heart_tile
+---
+# Heart Tile Widget
+
+## Properties
+Heart tile shows bpm.
+""",
+        encoding="utf-8",
+    )
+
+    original_collect_entry = DocumentIndexer._collect_document_entry
+
+    def flaky_collect_entry(self, *, snapshot_id: str, manifest, entry):
+        if entry.relative_path == "widgets/heart_tile.md":
+            raise RuntimeError("synthetic worker failure")
+        return original_collect_entry(
+            self,
+            snapshot_id=snapshot_id,
+            manifest=manifest,
+            entry=entry,
+        )
+
+    monkeypatch.setattr(
+        DocumentIndexer,
+        "_collect_document_entry",
+        flaky_collect_entry,
+    )
+
+    indexed = DocumentIndexer.from_config(config, cwd=tmp_path).collect(
+        snapshot_id=CURRENT_SNAPSHOT_ID
+    )
+
+    assert {record.relative_path for record in indexed.file_records} == {
+        "knowledge-sources/api/sensor.md"
+    }
+    failed_warnings = [
+        warning for warning in indexed.warnings if warning.code == "docs.collect_failed"
+    ]
+    assert len(failed_warnings) == 1
+    assert failed_warnings[0].relative_path == "knowledge-sources/widgets/heart_tile.md"
+    assert indexed.chunk_records
+    assert indexed.metadata["collect_workers"]["workers"] == 2
+
+
 def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
     merged = dict(base)
     for key, value in overrides.items():
