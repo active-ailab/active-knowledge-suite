@@ -59,6 +59,13 @@ from active_knowledge_server.indexing.relation_extractor import (
     summarize_entity_profile_states,
     summarize_entity_profile_states_from_reader,
 )
+from active_knowledge_server.indexing.resume import (
+    INDEX_PLAN_SIGNATURE_SCHEMA_VERSION,
+    IndexPlanSignature,
+    diff_plan_signature_payloads,
+    format_plan_signature_mismatch_reason,
+    make_index_plan_signature,
+)
 from active_knowledge_server.indexing.snapshot import (
     CURRENT_SNAPSHOT_ID,
     SNAPSHOT_COLLECTOR_SCHEMA_VERSION,
@@ -69,6 +76,15 @@ from active_knowledge_server.indexing.snapshot import (
     compute_workspace_revision,
     root_git_head,
     snapshot_aliases,
+)
+from active_knowledge_server.indexing.tasks import (
+    INDEX_TASK_LIST_SCHEMA_VERSION,
+    INDEX_TASK_SCHEMA_VERSION,
+    IndexTask,
+    estimate_progress_total_from_tasks,
+    estimate_progress_totals_from_plan,
+    index_task_list_to_dict,
+    make_index_task_list,
 )
 from active_knowledge_server.indexing.workspace_map import (
     WORKSPACE_MAP_SCHEMA_VERSION,
@@ -87,6 +103,9 @@ __all__ = [
     "INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION",
     "INCREMENTAL_INDEX_STATE_SCHEMA_VERSION",
     "INDEX_PROGRESS_PHASES",
+    "INDEX_PLAN_SIGNATURE_SCHEMA_VERSION",
+    "INDEX_TASK_LIST_SCHEMA_VERSION",
+    "INDEX_TASK_SCHEMA_VERSION",
     "PROFILE_COLLECTOR_SCHEMA_VERSION",
     "SNAPSHOT_COLLECTOR_SCHEMA_VERSION",
     "WORKSPACE_MAP_SCHEMA_VERSION",
@@ -101,9 +120,11 @@ __all__ = [
     "IncrementalIndexResult",
     "IncrementalIndexState",
     "IncrementalIndexWarning",
+    "IndexPlanSignature",
     "IndexProgressCallback",
     "IndexProgressEvent",
     "IndexProgressPhase",
+    "IndexTask",
     "IndexedCode",
     "IndexedDocuments",
     "ProfileCandidate",
@@ -129,8 +150,15 @@ __all__ = [
     "compute_repo_manifest_hash",
     "compute_snapshot_id",
     "compute_workspace_revision",
+    "diff_plan_signature_payloads",
+    "estimate_progress_total_from_tasks",
+    "estimate_progress_totals_from_plan",
+    "format_plan_signature_mismatch_reason",
     "IndexedProfileConditionedRelations",
     "PROFILE_CONDITIONED_RELATION_SCHEMA_VERSION",
+    "index_task_list_to_dict",
+    "make_index_plan_signature",
+    "make_index_task_list",
     "plan_profile_conditioned_relation_rebuild",
     "profile_config_hash",
     "profile_macro_assignments",
