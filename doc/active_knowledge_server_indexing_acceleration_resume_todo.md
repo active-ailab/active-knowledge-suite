@@ -225,7 +225,7 @@ Phase R1 让 CLI 和 `IncrementalIndexPipeline.run` 真正使用当前 jobs SQLi
 
 ### AR1-01 扩展 job store 查询能力
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR0-01`
@@ -233,11 +233,26 @@ Phase R1 让 CLI 和 `IncrementalIndexPipeline.run` 真正使用当前 jobs SQLi
 
 TODO：
 
-- [ ] 增加按 metadata 查询最近可恢复 job 的 helper，例如 `find_resumable_index_job(...)`。
-- [ ] 增加 `transition_or_update_running_metadata(...)`，便于更新 `last_phase/last_task_key/tasks_*`。
-- [ ] 增加 lock heartbeat/renew helper，避免长任务超过 TTL。
-- [ ] 增加 `supersede_job(...)`，供 `--restart` 标记旧 job。
-- [ ] 单测覆盖 lock 未过期、lock 过期、signature 匹配/不匹配、retry_count/resume_count。
+- [x] 增加按 metadata 查询最近可恢复 job 的 helper，例如 `find_resumable_index_job(...)`。
+- [x] 增加 `transition_or_update_running_metadata(...)`，便于更新 `last_phase/last_task_key/tasks_*`。
+- [x] 增加 lock heartbeat/renew helper，避免长任务超过 TTL。
+- [x] 增加 `supersede_job(...)`，供 `--restart` 标记旧 job。
+- [x] 单测覆盖 lock 未过期、lock 过期、signature 匹配/不匹配、retry_count/resume_count。
+
+行业实践调研结论：
+
+- Google Cloud Storage resumable upload 把大对象传输拆成可恢复请求，并建议中断后用同一命令继续；本项目对应把 `plan_signature + requested_* metadata` 作为恢复匹配条件，只恢复同一索引计划，不把配置已变化的 job 当作可续建。
+- Kubernetes Lease 用 `holderIdentity`、`leaseDurationSeconds`、`renewTime` 协调心跳和 leader election；本项目对应新增 `renew_lock(...)` / `heartbeat_lock(...)`，未过期 lock 阻断恢复，过期 lock 允许后续重新 acquire。
+- Celery task 文档强调可重放任务应保持幂等，并允许通过 custom state metadata 上报进度；本项目对应用 `transition_or_update_running_metadata(...)` 更新 `execution_state/last_phase/last_task_key/tasks_*`，而 task skip 仍只认 AR0-04 的 applied checkpoint。
+
+完成记录：
+
+- `active_knowledge_server/indexing/jobs.py` 新增 `find_resumable_index_job(...)`，按 `job_type/write_target/snapshot/profile/status` 预筛，再用 decoded metadata 精确匹配 `plan_signature` 和调用方传入的 `metadata_match`；遇到未过期 `INDEX_JOB_LOCK_ID` 会抛 `JobLockConflictError`，与设计中的 blocked 行为一致。
+- `resume_job(..., increment_resume_count=True)` 可原子增加 `resume_count` 并写入 `execution_state=running/resumed_at`；旧调用默认不变。
+- `transition_or_update_running_metadata(...)` 支持 pending -> running transition，也支持运行中只更新 metadata，便于主 pipeline 持续写入 `last_phase/last_task_key/tasks_total/tasks_applied/...`。
+- `renew_lock(...)` 和 `heartbeat_lock(...)` 会保留原 `acquired_at`，刷新 `expires_at`，并在 lock metadata 写入 `heartbeat_at`；非 owner 续租会抛 `JobLockConflictError`。
+- `supersede_job(...)` 会把 pending/running 旧 job 转为 `failed` 并写入 `execution_state=superseded/superseded_by_job_id/superseded_at`；已 failed/partial_ready 的旧 job 只补 superseded metadata，ready job 不允许 supersede。
+- `tests/unit/test_index_jobs.py` 从 8 个扩展到 15 个用例，覆盖未过期 lock blocked、过期 lock 可恢复、signature mismatch、resume_count、running metadata 更新、lock renew、supersede 以及老 `IndexJobRunner` 行为。
 
 验收标准：
 

@@ -37,6 +37,12 @@ RUNNING_JOB_STATUSES: Final[tuple[JobStatus, ...]] = (
     "reporting",
 )
 TERMINAL_JOB_STATUSES: Final[tuple[JobStatus, ...]] = ("ready", "failed", "partial_ready")
+RESUMABLE_INDEX_JOB_STATUSES: Final[tuple[JobStatus, ...]] = (
+    "pending",
+    *RUNNING_JOB_STATUSES,
+    "failed",
+    "partial_ready",
+)
 INDEX_JOB_LOCK_ID: Final = "index:overlay"
 INDEX_TASK_CHECKPOINT_SCHEMA_VERSION: Final = "index_task_checkpoint.v1"
 _JOB_STATUS_TRANSITIONS: Final[dict[JobStatus, tuple[JobStatus, ...]]] = {
@@ -241,10 +247,76 @@ class SQLiteJobStore:
             ).fetchall()
         return {str(row["checkpoint_key"]): str(row["checkpoint_value"]) for row in rows}
 
-    def resume_job(self, job_id: str) -> JobResumeState:
+    def find_resumable_index_job(
+        self,
+        *,
+        plan_signature: str,
+        write_target: StorageWriteTarget = "overlay",
+        snapshot_id: str | None = "current",
+        profile_id: str | None = ALL_SCOPE,
+        metadata_match: Mapping[str, Any] | None = None,
+        lock_id: str = INDEX_JOB_LOCK_ID,
+    ) -> JobRecord | None:
+        """Return the newest compatible unfinished index job, blocking on live locks."""
+
+        lock = self.get_lock(lock_id)
+        now = datetime.now(UTC)
+        with sqlite_connection(self._jobs_path) as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM job
+                WHERE job_type = ?
+                  AND write_target = ?
+                  AND snapshot_id IS ?
+                  AND profile_id IS ?
+                  AND status IN ({statuses})
+                ORDER BY updated_at DESC, created_at DESC, job_id DESC
+                """.format(statuses=", ".join("?" for _status in RESUMABLE_INDEX_JOB_STATUSES)),
+                (
+                    "index",
+                    write_target,
+                    snapshot_id,
+                    profile_id,
+                    *RESUMABLE_INDEX_JOB_STATUSES,
+                ),
+            ).fetchall()
+        for row in rows:
+            job = row_to_job_record(cast(sqlite3.Row, row))
+            if not _metadata_matches(
+                job.metadata,
+                {
+                    **({} if metadata_match is None else dict(metadata_match)),
+                    "plan_signature": plan_signature,
+                },
+            ):
+                continue
+            if _metadata_text(job.metadata.get("execution_state")) == "superseded":
+                continue
+            if bool(job.metadata.get("cancelled")):
+                continue
+            if lock is not None and not lock_expired(lock.expires_at, now):
+                raise JobLockConflictError(
+                    "index lock is still active for job "
+                    f"{lock.owner_job_id!r} until {lock.expires_at or 'never'}"
+                )
+            return job
+        return None
+
+    def resume_job(self, job_id: str, *, increment_resume_count: bool = False) -> JobResumeState:
         job = self.get_job(job_id)
         if job is None:
             raise KeyError(f"job {job_id!r} does not exist")
+        if increment_resume_count:
+            resume_count = int_value(job.metadata.get("resume_count")) + 1
+            job = self._update_job_metadata(
+                job_id,
+                metadata_update={
+                    "resume_count": resume_count,
+                    "execution_state": "running",
+                    "resumed_at": utc_now(),
+                },
+            )
         return JobResumeState(job=job, checkpoints=self.get_checkpoints(job_id))
 
     def retry_job(self, job_id: str) -> JobRecord:
@@ -259,6 +331,122 @@ class SQLiteJobStore:
             "pending",
             metadata_update={"retry_count": retry_count},
         )
+
+    def transition_or_update_running_metadata(
+        self,
+        job_id: str,
+        status: JobStatus | None = None,
+        *,
+        metadata_update: Mapping[str, Any] | None = None,
+        error_summary: str | None = None,
+    ) -> JobRecord:
+        """Transition into a running status, or heartbeat/update metadata in place."""
+
+        if status is not None and status not in RUNNING_JOB_STATUSES:
+            raise JobStateTransitionError(f"{status!r} is not a running index job status")
+        with sqlite_connection(self._jobs_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM job WHERE job_id = ? LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(f"job {job_id!r} does not exist")
+            current = row_to_job_record(cast(sqlite3.Row, row))
+            next_status = status or current.status
+            if current.status not in ("pending", *RUNNING_JOB_STATUSES):
+                connection.rollback()
+                raise JobStateTransitionError(
+                    f"job {job_id!r} is not running or pending from {current.status!r}"
+                )
+            if next_status != current.status and next_status not in _JOB_STATUS_TRANSITIONS[
+                current.status
+            ]:
+                connection.rollback()
+                raise JobStateTransitionError(
+                    f"invalid job transition {current.status!r} -> {next_status!r}"
+                )
+            metadata = dict(current.metadata)
+            if metadata_update:
+                metadata.update(cast(StorageMetadata, dict(metadata_update)))
+            updated = JobRecord(
+                job_id=current.job_id,
+                job_type=current.job_type,
+                status=next_status,
+                write_target=current.write_target,
+                created_at=current.created_at,
+                updated_at=utc_now(),
+                snapshot_id=current.snapshot_id,
+                profile_id=current.profile_id,
+                error_summary=error_summary if error_summary is not None else current.error_summary,
+                metadata=metadata,
+            )
+            upsert_row(connection, "job", job_record_values(updated))
+            connection.commit()
+        return updated
+
+    def supersede_job(
+        self,
+        job_id: str,
+        *,
+        superseded_by_job_id: str | None = None,
+        reason: str = "restart",
+        metadata_update: Mapping[str, Any] | None = None,
+    ) -> JobRecord:
+        """Mark an unfinished/retryable job as superseded by a fresh run."""
+
+        now = utc_now()
+        with sqlite_connection(self._jobs_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM job WHERE job_id = ? LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(f"job {job_id!r} does not exist")
+            current = row_to_job_record(cast(sqlite3.Row, row))
+            if current.status == "ready":
+                connection.rollback()
+                raise JobStateTransitionError(f"ready job {job_id!r} cannot be superseded")
+            metadata = dict(current.metadata)
+            metadata.update(
+                {
+                    "execution_state": "superseded",
+                    "superseded": True,
+                    "superseded_at": now,
+                    "superseded_reason": reason,
+                }
+            )
+            if superseded_by_job_id is not None:
+                metadata["superseded_by_job_id"] = superseded_by_job_id
+            if metadata_update:
+                metadata.update(cast(StorageMetadata, dict(metadata_update)))
+            status = current.status
+            error_summary = current.error_summary
+            if current.status in ("pending", *RUNNING_JOB_STATUSES):
+                status = "failed"
+                error_summary = (
+                    f"superseded by {superseded_by_job_id}"
+                    if superseded_by_job_id is not None
+                    else "superseded"
+                )
+            updated = JobRecord(
+                job_id=current.job_id,
+                job_type=current.job_type,
+                status=status,
+                write_target=current.write_target,
+                created_at=current.created_at,
+                updated_at=now,
+                snapshot_id=current.snapshot_id,
+                profile_id=current.profile_id,
+                error_summary=error_summary,
+                metadata=metadata,
+            )
+            upsert_row(connection, "job", job_record_values(updated))
+            connection.commit()
+        return updated
 
     def acquire_lock(
         self,
@@ -305,6 +493,72 @@ class SQLiteJobStore:
             metadata={} if metadata is None else dict(metadata),
         )
 
+    def renew_lock(
+        self,
+        lock_id: str,
+        *,
+        owner_job_id: str,
+        ttl_seconds: int = 3600,
+        metadata_update: Mapping[str, Any] | None = None,
+    ) -> JobLockLease:
+        """Extend an existing lock lease for the current owner."""
+
+        now = datetime.now(UTC)
+        expires_at = format_timestamp(now + timedelta(seconds=ttl_seconds))
+        heartbeat_at = format_timestamp(now)
+        with sqlite_connection(self._jobs_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM job_lock WHERE lock_id = ? LIMIT 1",
+                (lock_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(f"lock {lock_id!r} does not exist")
+            existing_owner = str(row["owner_job_id"])
+            if existing_owner != owner_job_id:
+                connection.rollback()
+                raise JobLockConflictError(
+                    f"lock {lock_id!r} is owned by job {existing_owner!r}"
+                )
+            metadata = decode_metadata(row["metadata_json"])
+            metadata["heartbeat_at"] = heartbeat_at
+            if metadata_update:
+                metadata.update(cast(StorageMetadata, dict(metadata_update)))
+            values = {
+                "lock_id": lock_id,
+                "owner_job_id": owner_job_id,
+                "acquired_at": str(row["acquired_at"]),
+                "expires_at": expires_at,
+                "metadata_json": encode_metadata(metadata),
+            }
+            upsert_row(connection, "job_lock", values)
+            connection.commit()
+        return JobLockLease(
+            lock_id=lock_id,
+            owner_job_id=owner_job_id,
+            acquired_at=str(row["acquired_at"]),
+            expires_at=expires_at,
+            metadata=metadata,
+        )
+
+    def heartbeat_lock(
+        self,
+        lock_id: str,
+        *,
+        owner_job_id: str,
+        ttl_seconds: int = 3600,
+        metadata_update: Mapping[str, Any] | None = None,
+    ) -> JobLockLease:
+        """Alias for renew_lock used by long-running index phases."""
+
+        return self.renew_lock(
+            lock_id,
+            owner_job_id=owner_job_id,
+            ttl_seconds=ttl_seconds,
+            metadata_update=metadata_update,
+        )
+
     def release_lock(self, lock_id: str, *, owner_job_id: str) -> bool:
         with sqlite_connection(self._jobs_path) as connection:
             cursor = connection.execute(
@@ -329,6 +583,40 @@ class SQLiteJobStore:
             expires_at=optional_text(row["expires_at"]),
             metadata=decode_metadata(row["metadata_json"]),
         )
+
+    def _update_job_metadata(
+        self,
+        job_id: str,
+        *,
+        metadata_update: Mapping[str, Any],
+    ) -> JobRecord:
+        with sqlite_connection(self._jobs_path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM job WHERE job_id = ? LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise KeyError(f"job {job_id!r} does not exist")
+            current = row_to_job_record(cast(sqlite3.Row, row))
+            metadata = dict(current.metadata)
+            metadata.update(cast(StorageMetadata, dict(metadata_update)))
+            updated = JobRecord(
+                job_id=current.job_id,
+                job_type=current.job_type,
+                status=current.status,
+                write_target=current.write_target,
+                created_at=current.created_at,
+                updated_at=utc_now(),
+                snapshot_id=current.snapshot_id,
+                profile_id=current.profile_id,
+                error_summary=current.error_summary,
+                metadata=metadata,
+            )
+            upsert_row(connection, "job", job_record_values(updated))
+            connection.commit()
+        return updated
 
 
 class IndexJobRunner:
@@ -565,6 +853,14 @@ def int_value(value: object) -> int:
     if isinstance(value, str) and value.isdecimal():
         return int(value)
     return 0
+
+
+def _metadata_matches(metadata: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+def _metadata_text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def encode_json_list(values: Sequence[str]) -> str:

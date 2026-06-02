@@ -12,6 +12,7 @@ from active_knowledge_server.indexing.jobs import (
     JobStateTransitionError,
     SQLiteJobStore,
     decode_task_checkpoint,
+    parse_timestamp,
     record_task_applied_checkpoint,
     record_task_collected_checkpoint,
     task_checkpoint_key,
@@ -54,6 +55,66 @@ def test_expired_lock_can_be_reacquired_by_another_job(tmp_path: Path) -> None:
     assert lease.owner_job_id == second.job_id
 
 
+def test_find_resumable_index_job_blocks_on_unexpired_lock(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(
+        job_id="job-index",
+        metadata={
+            "plan_signature": "sig-current",
+            "requested_mode": "incremental",
+            "requested_source": "all",
+        },
+    )
+    store.acquire_lock(INDEX_JOB_LOCK_ID, owner_job_id=job.job_id, ttl_seconds=3600)
+
+    with pytest.raises(JobLockConflictError, match="still active"):
+        store.find_resumable_index_job(
+            plan_signature="sig-current",
+            metadata_match={"requested_mode": "incremental", "requested_source": "all"},
+        )
+
+
+def test_find_resumable_index_job_allows_expired_lock(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(
+        job_id="job-index",
+        metadata={
+            "plan_signature": "sig-current",
+            "requested_mode": "incremental",
+            "requested_source": "all",
+        },
+    )
+    store.acquire_lock(INDEX_JOB_LOCK_ID, owner_job_id=job.job_id, ttl_seconds=-1)
+
+    resumable = store.find_resumable_index_job(
+        plan_signature="sig-current",
+        metadata_match={"requested_mode": "incremental", "requested_source": "all"},
+    )
+
+    assert resumable is not None
+    assert resumable.job_id == job.job_id
+
+
+def test_find_resumable_index_job_requires_matching_signature(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    store.create_job(
+        job_id="job-index",
+        metadata={
+            "plan_signature": "sig-old",
+            "requested_mode": "incremental",
+            "requested_source": "all",
+        },
+    )
+
+    assert (
+        store.find_resumable_index_job(
+            plan_signature="sig-current",
+            metadata_match={"requested_mode": "incremental", "requested_source": "all"},
+        )
+        is None
+    )
+
+
 def test_job_state_machine_rejects_invalid_transition(tmp_path: Path) -> None:
     store = build_store(tmp_path)
     job = store.create_job(job_id="job-index")
@@ -77,6 +138,100 @@ def test_resume_and_retry_preserve_checkpoints(tmp_path: Path) -> None:
     assert retry.status == "pending"
     assert retry.metadata["retry_count"] == 1
     assert store.get_checkpoint(job.job_id, "cursor") == "file-17"
+
+
+def test_resume_job_can_increment_resume_count(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index", metadata={"resume_count": 2})
+    store.set_checkpoint(job.job_id, "cursor", "file-17")
+
+    resume = store.resume_job(job.job_id, increment_resume_count=True)
+
+    assert resume.job.metadata["resume_count"] == 3
+    assert resume.job.metadata["execution_state"] == "running"
+    assert resume.checkpoints["cursor"] == "file-17"
+
+
+def test_transition_or_update_running_metadata_tracks_progress(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+
+    discovering = store.transition_or_update_running_metadata(
+        job.job_id,
+        "discovering",
+        metadata_update={
+            "execution_state": "running",
+            "last_phase": "discovering",
+            "tasks_total": 3,
+            "tasks_applied": 0,
+        },
+    )
+    updated = store.transition_or_update_running_metadata(
+        job.job_id,
+        metadata_update={
+            "last_task_key": "doc:apply:guide.md",
+            "tasks_applied": 1,
+        },
+    )
+
+    assert discovering.status == "discovering"
+    assert updated.status == "discovering"
+    assert updated.metadata["last_phase"] == "discovering"
+    assert updated.metadata["last_task_key"] == "doc:apply:guide.md"
+    assert updated.metadata["tasks_total"] == 3
+    assert updated.metadata["tasks_applied"] == 1
+
+
+def test_renew_lock_extends_ttl_and_records_heartbeat(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    first = store.acquire_lock(
+        INDEX_JOB_LOCK_ID,
+        owner_job_id=job.job_id,
+        ttl_seconds=1,
+        metadata={"last_phase": "parsing"},
+    )
+
+    renewed = store.renew_lock(
+        INDEX_JOB_LOCK_ID,
+        owner_job_id=job.job_id,
+        ttl_seconds=3600,
+        metadata_update={"last_task_key": "doc:apply:guide.md"},
+    )
+
+    assert renewed.expires_at is not None
+    assert first.expires_at is not None
+    assert parse_timestamp(renewed.expires_at) > parse_timestamp(first.expires_at)
+    assert renewed.metadata["last_phase"] == "parsing"
+    assert renewed.metadata["last_task_key"] == "doc:apply:guide.md"
+    assert isinstance(renewed.metadata["heartbeat_at"], str)
+
+
+def test_supersede_job_marks_old_job_and_excludes_resume(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    old = store.create_job(
+        job_id="job-index-old",
+        metadata={
+            "plan_signature": "sig-current",
+            "requested_mode": "incremental",
+            "requested_source": "all",
+        },
+    )
+    new = store.create_job(job_id="job-index-new")
+    store.transition_or_update_running_metadata(old.job_id, "discovering")
+
+    superseded = store.supersede_job(old.job_id, superseded_by_job_id=new.job_id)
+
+    assert superseded.status == "failed"
+    assert superseded.metadata["execution_state"] == "superseded"
+    assert superseded.metadata["superseded_by_job_id"] == new.job_id
+    assert (
+        store.find_resumable_index_job(
+            plan_signature="sig-current",
+            metadata_match={"requested_mode": "incremental", "requested_source": "all"},
+        )
+        is None
+    )
 
 
 def test_single_file_parse_failure_enters_partial_ready(tmp_path: Path) -> None:
