@@ -184,18 +184,33 @@ TODO：
 
 ### AR0-04 定义 checkpoint 安全边界
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
-- 类型：`CONTRACT`、`DOC`
+- 类型：`CONTRACT`、`DOC`、`TEST`
 - 依赖：`AR0-02`
 
 TODO：
 
-- [ ] 明确 checkpoint 只能在 metadata/vector apply 成功后写入 `applied`。
-- [ ] 明确 apply 成功但 checkpoint 失败时，下次允许重复 apply。
-- [ ] 明确 checkpoint 成功后，该 task 可跳过。
-- [ ] 明确 collect artifact 的 `collected` 状态不是查询可见性边界。
-- [ ] 明确 `index_state.json` 仍只代表完整成功状态，不作为中间 checkpoint。
+- [x] 明确 checkpoint 只能在 metadata/vector apply 成功后写入 `applied`。
+- [x] 明确 apply 成功但 checkpoint 失败时，下次允许重复 apply。
+- [x] 明确 checkpoint 成功后，该 task 可跳过。
+- [x] 明确 collect artifact 的 `collected` 状态不是查询可见性边界。
+- [x] 明确 `index_state.json` 仍只代表完整成功状态，不作为中间 checkpoint。
+
+行业实践调研结论：
+
+- Flink checkpoint 把输入位置和 operator state 作为一致快照；失败恢复从快照继续处理。因此本项目把 `applied` checkpoint 定义成“已提交事实”的游标，而不是“开始处理”的意图日志。
+- Spark Structured Streaming 限制同一 checkpoint location 下可变更的 source/sink/schema；本项目已在 AR0-01 用 plan signature 绑定 manifest、schema、embedding model 和影响解析的配置，signature 不匹配不得复用 task checkpoint。
+- Elasticsearch bulk indexing 可延迟 refresh，把“已写入”和“可搜索可见”分开；本项目对应把 collect artifact 的 `collected` 状态排除在查询可见性边界之外，只有 metadata/vector apply 成功后的 `applied` 才能作为跳过依据。
+- SQLite WAL 文档把 write、commit 和 WAL checkpoint 区分为不同操作；本项目也明确区分 SQLite WAL checkpoint 与索引 task checkpoint，继续坚持单 writer，并只在应用事务提交成功之后写 task checkpoint。
+
+完成记录：
+
+- `active_knowledge_server/indexing/jobs.py` 新增 `IndexTaskCheckpoint`、`task_checkpoint_key(...)`、`record_task_collected_checkpoint(...)`、`record_task_applied_checkpoint(...)`、`task_has_applied_checkpoint(...)`。
+- task checkpoint key 分为 `task:collected:<task_key>` 和 `task:applied:<task_key>`；恢复跳过只认 `task:applied:*`，并校验 task key、phase、input hash、task schema version 都匹配。
+- `record_task_applied_checkpoint(...)` 的代码注释明确：只能在 metadata/vector commit 成功后调用；如果 apply 成功但 checkpoint 写入失败，恢复时会再次 apply，要求稳定 ID/upsert/tombstone/replacement 收敛。
+- `IncrementalIndexPipeline.save_state(...)` 注释明确 `index_state.json` 是完整成功后的下一轮 diff baseline，不是 in-flight task checkpoint。
+- `tests/unit/test_index_jobs.py` 覆盖 checkpoint 写入失败后的重复 apply，以及 `collected` checkpoint 不会触发 task skip。
 
 验收标准：
 

@@ -325,7 +325,10 @@ class IncrementalIndexPipeline:
         return IncrementalIndexState.from_dict(payload)
 
     def save_state(self, state: IncrementalIndexState) -> Path:
-        """Persist the latest successful incremental state."""
+        """Persist the latest fully successful incremental state.
+
+        This file is the next-run diff baseline, not an in-flight task checkpoint.
+        """
 
         path = self.state_path
         path.parent.mkdir(parents=True, exist_ok=True)

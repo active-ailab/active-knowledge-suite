@@ -11,7 +11,13 @@ from active_knowledge_server.indexing.jobs import (
     JobLockConflictError,
     JobStateTransitionError,
     SQLiteJobStore,
+    decode_task_checkpoint,
+    record_task_applied_checkpoint,
+    record_task_collected_checkpoint,
+    task_checkpoint_key,
+    task_has_applied_checkpoint,
 )
+from active_knowledge_server.indexing.tasks import IndexTask
 from active_knowledge_server.storage.sqlite_store import migrate_sqlite_store
 
 
@@ -107,3 +113,75 @@ def test_all_files_parsed_job_reaches_ready(tmp_path: Path) -> None:
     assert result.job.status == "ready"
     assert result.failed_files == ()
     assert store.get_lock(INDEX_JOB_LOCK_ID) is None
+
+
+def test_task_checkpoint_failure_after_apply_replays_idempotent_apply(
+    tmp_path: Path,
+) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    task = IndexTask(
+        task_key="doc:apply:guide.md",
+        phase="doc_apply",
+        source_kind="doc",
+        operation="apply",
+        relative_path="guide.md",
+        input_hash="doc-hash",
+        schema_version="doc_indexer.v1",
+    )
+    applies: list[str] = []
+    original_set_checkpoint = store.set_checkpoint
+    failures_remaining = 1
+
+    def flaky_set_checkpoint(job_id: str, key: str, value: str) -> None:
+        nonlocal failures_remaining
+        if key == task_checkpoint_key(task) and failures_remaining:
+            failures_remaining -= 1
+            raise RuntimeError("checkpoint write failed")
+        original_set_checkpoint(job_id, key, value)
+
+    store.set_checkpoint = flaky_set_checkpoint  # type: ignore[method-assign]
+
+    def run_once() -> None:
+        if task_has_applied_checkpoint(store.get_checkpoints(job.job_id), task):
+            return
+        applies.append(task.task_key)
+        record_task_applied_checkpoint(store, job.job_id, task)
+
+    with pytest.raises(RuntimeError, match="checkpoint write failed"):
+        run_once()
+
+    run_once()
+    run_once()
+
+    assert applies == [task.task_key, task.task_key]
+    checkpoint = decode_task_checkpoint(store.get_checkpoint(job.job_id, task_checkpoint_key(task)))
+    assert checkpoint is not None
+    assert checkpoint.status == "applied"
+    assert task_has_applied_checkpoint(store.get_checkpoints(job.job_id), task) is True
+
+
+def test_collected_checkpoint_is_not_an_applied_skip_boundary(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    task = IndexTask(
+        task_key="vector:doc:guide.md",
+        phase="vectors_apply",
+        source_kind="vector",
+        operation="doc",
+        relative_path="guide.md",
+        input_hash="vector-hash",
+        schema_version="embedding_preparation.v1",
+    )
+
+    record_task_collected_checkpoint(store, job.job_id, task)
+
+    assert task_has_applied_checkpoint(store.get_checkpoints(job.job_id), task) is False
+    collected = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(task, status="collected"),
+        )
+    )
+    assert collected is not None
+    assert collected.status == "collected"

@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
+from active_knowledge_server.indexing.tasks import IndexTask
 from active_knowledge_server.storage import (
     ALL_SCOPE,
     JobRecord,
@@ -37,6 +38,7 @@ RUNNING_JOB_STATUSES: Final[tuple[JobStatus, ...]] = (
 )
 TERMINAL_JOB_STATUSES: Final[tuple[JobStatus, ...]] = ("ready", "failed", "partial_ready")
 INDEX_JOB_LOCK_ID: Final = "index:overlay"
+INDEX_TASK_CHECKPOINT_SCHEMA_VERSION: Final = "index_task_checkpoint.v1"
 _JOB_STATUS_TRANSITIONS: Final[dict[JobStatus, tuple[JobStatus, ...]]] = {
     "pending": ("discovering", "failed"),
     "discovering": ("parsing", "failed", "partial_ready"),
@@ -84,6 +86,32 @@ class IndexJobRunResult:
     job: JobRecord
     parsed_files: tuple[str, ...]
     failed_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IndexTaskCheckpoint:
+    """One persisted task checkpoint written only after the corresponding commit."""
+
+    schema_version: str
+    status: Literal["collected", "applied"]
+    task_key: str
+    phase: str
+    input_hash: str
+    task_schema_version: str
+    updated_at: str
+    metadata: StorageMetadata = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "task_key": self.task_key,
+            "phase": self.phase,
+            "input_hash": self.input_hash,
+            "task_schema_version": self.task_schema_version,
+            "updated_at": self.updated_at,
+            "metadata": dict(self.metadata),
+        }
 
 
 class SQLiteJobStore:
@@ -383,6 +411,134 @@ class IndexJobRunner:
 
 def new_job_id(job_type: str) -> str:
     return f"{job_type}:{uuid.uuid4().hex}"
+
+
+def task_checkpoint_key(
+    task: IndexTask | str,
+    *,
+    status: Literal["collected", "applied"] = "applied",
+) -> str:
+    """Return the job_checkpoint key for one task checkpoint status."""
+
+    task_key = task.task_key if isinstance(task, IndexTask) else str(task)
+    return f"task:{status}:{task_key}"
+
+
+def record_task_collected_checkpoint(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Record collect artifact availability; this is not a query visibility boundary."""
+
+    _record_task_checkpoint(
+        store,
+        job_id,
+        task,
+        status="collected",
+        metadata=metadata,
+    )
+
+
+def record_task_applied_checkpoint(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Record that a task can be skipped; call only after metadata/vector commit succeeds."""
+
+    _record_task_checkpoint(
+        store,
+        job_id,
+        task,
+        status="applied",
+        metadata=metadata,
+    )
+
+
+def task_has_applied_checkpoint(
+    checkpoints: Mapping[str, str],
+    task: IndexTask,
+) -> bool:
+    """Return True only when a matching applied checkpoint exists for the task."""
+
+    payload = decode_task_checkpoint(checkpoints.get(task_checkpoint_key(task)))
+    return (
+        payload is not None
+        and payload.status == "applied"
+        and payload.task_key == task.task_key
+        and payload.phase == task.phase
+        and payload.input_hash == task.input_hash
+        and payload.task_schema_version == task.schema_version
+    )
+
+
+def encode_task_checkpoint(checkpoint: IndexTaskCheckpoint) -> str:
+    return json.dumps(checkpoint.to_dict(), ensure_ascii=True, sort_keys=True)
+
+
+def decode_task_checkpoint(value: str | None) -> IndexTaskCheckpoint | None:
+    if value is None:
+        return None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    status = payload.get("status")
+    if status not in {"collected", "applied"}:
+        return None
+    task_key = payload.get("task_key")
+    phase = payload.get("phase")
+    input_hash = payload.get("input_hash")
+    task_schema_version = payload.get("task_schema_version")
+    updated_at = payload.get("updated_at")
+    if not all(
+        isinstance(item, str)
+        for item in (task_key, phase, input_hash, task_schema_version, updated_at)
+    ):
+        return None
+    metadata = payload.get("metadata")
+    return IndexTaskCheckpoint(
+        schema_version=str(payload.get("schema_version", "")),
+        status=cast(Literal["collected", "applied"], status),
+        task_key=cast(str, task_key),
+        phase=cast(str, phase),
+        input_hash=cast(str, input_hash),
+        task_schema_version=cast(str, task_schema_version),
+        updated_at=cast(str, updated_at),
+        metadata=decode_metadata(json.dumps(metadata if isinstance(metadata, Mapping) else {})),
+    )
+
+
+def _record_task_checkpoint(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask,
+    *,
+    status: Literal["collected", "applied"],
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    checkpoint = IndexTaskCheckpoint(
+        schema_version=INDEX_TASK_CHECKPOINT_SCHEMA_VERSION,
+        status=status,
+        task_key=task.task_key,
+        phase=task.phase,
+        input_hash=task.input_hash,
+        task_schema_version=task.schema_version,
+        updated_at=utc_now(),
+        metadata={} if metadata is None else cast(StorageMetadata, dict(metadata)),
+    )
+    store.set_checkpoint(
+        job_id,
+        task_checkpoint_key(task, status=status),
+        encode_task_checkpoint(checkpoint),
+    )
 
 
 def lock_expired(expires_at: str | None, now: datetime) -> bool:
