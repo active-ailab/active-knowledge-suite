@@ -24,6 +24,7 @@ DeploymentMode = Literal["local_single_user", "remote_shared"]
 Transport = Literal["stdio", "streamable-http"]
 StoreMode = Literal["readonly", "readwrite"]
 RerankMode = Literal["none", "lightweight", "cross_encoder"]
+IndexResumeMode = Literal["auto", "job_id", "restart", "disabled"]
 
 _MASK = "***REDACTED***"
 _SENSITIVE_KEYS = {

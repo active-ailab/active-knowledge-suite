@@ -23,7 +23,7 @@ from active_knowledge_server.config.loader import (
     resolve_runtime_path,
     set_nested,
 )
-from active_knowledge_server.config.schema import summarize_config
+from active_knowledge_server.config.schema import IndexResumeMode, summarize_config
 from active_knowledge_server.config.workdir import (
     WorkdirLayout,
     initialize_workdir,
@@ -55,12 +55,15 @@ from active_knowledge_server.indexing import (
     CodeIndexer,
     DocumentIndexer,
     IncrementalIndexPipeline,
+    IncrementalIndexResult,
     IndexProgressEvent,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
     SnapshotCollector,
     WorkspaceMapBuilder,
     count_indexable_workspace_files,
+    make_index_plan_signature,
+    make_index_task_list,
     noop_progress_callback,
     utc_timestamp,
 )
@@ -94,6 +97,8 @@ from active_knowledge_server.storage.validation import validate_storage_consiste
 
 _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
+_INDEX_JOB_CONTRACT_SCHEMA_VERSION = "index_job_contract.v1"
+_INDEX_RESUME_POLICY_SCHEMA_VERSION = "index_resume_policy.v1"
 IndexOutputMode = Literal["json_final", "text_dynamic", "text_plain"]
 IndexProgressOutputMode = Literal["none", "text_dynamic", "text_plain"]
 
@@ -150,6 +155,47 @@ def resolve_index_progress_output_mode(
     if mode == "json_final":
         return "none"
     return mode
+
+
+def resolve_index_resume_policy(args: argparse.Namespace) -> dict[str, object]:
+    """Resolve the CLI resume/restart contract into a JSON-safe policy payload."""
+
+    requested_resume = str(getattr(args, "resume", "auto") or "auto").strip()
+    requested_job_id = getattr(args, "job_id", None)
+    job_id = None if requested_job_id is None else str(requested_job_id).strip()
+    if not requested_resume:
+        raise ConfigError("--resume requires 'auto' or a non-empty job id.")
+    if requested_job_id is not None and not job_id:
+        raise ConfigError("--job-id requires a non-empty job id.")
+
+    mode: IndexResumeMode
+    resume_job_id: str | None = None
+    planned_job_id: str | None = job_id
+    if bool(getattr(args, "restart", False)):
+        mode = "restart"
+    elif bool(getattr(args, "no_resume", False)):
+        mode = "disabled"
+    elif requested_resume == "auto":
+        mode = "auto"
+    else:
+        if job_id is not None:
+            raise ConfigError(
+                "--job-id cannot be combined with --resume JOB_ID; "
+                "the resume value already identifies the job to continue."
+            )
+        mode = "job_id"
+        resume_job_id = requested_resume
+        planned_job_id = requested_resume
+
+    return {
+        "schema_version": _INDEX_RESUME_POLICY_SCHEMA_VERSION,
+        "mode": mode,
+        "resume": requested_resume if mode in {"auto", "job_id"} else None,
+        "resume_job_id": resume_job_id,
+        "restart": mode == "restart",
+        "resume_enabled": mode in {"auto", "job_id"},
+        "planned_job_id": planned_job_id,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -254,6 +300,39 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("all", "code", "docs"),
         default="all",
         help="Source family to index.",
+    )
+    resume_group = index_parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume",
+        metavar="auto|JOB_ID",
+        default="auto",
+        help=(
+            "Resume policy for interrupted index jobs. 'auto' is the default and resumes "
+            "the newest compatible job; any other value is treated as an explicit job id."
+        ),
+    )
+    resume_group.add_argument(
+        "--restart",
+        action="store_true",
+        help=(
+            "Start a fresh index job and supersede compatible unfinished jobs. "
+            "Cannot be combined with --resume or --no-resume."
+        ),
+    )
+    resume_group.add_argument(
+        "--no-resume",
+        action="store_true",
+        help=(
+            "Do not search for resumable jobs; create a fresh job. "
+            "Cannot be combined with --resume or --restart."
+        ),
+    )
+    index_parser.add_argument(
+        "--job-id",
+        help=(
+            "Use a caller-supplied id for the new index job. Intended for CI/debug runs; "
+            "do not combine with --resume JOB_ID."
+        ),
     )
     index_parser.add_argument(
         "--format",
@@ -873,6 +952,7 @@ def handle_serve(args: argparse.Namespace) -> int:
 def handle_index(args: argparse.Namespace) -> int:
     """Execute one index run."""
 
+    resume_policy = resolve_index_resume_policy(args)
     resolved = resolve_from_args(args, command_overrides=index_overrides(args))
     summary = config_summary(resolved)
 
@@ -907,6 +987,7 @@ def handle_index(args: argparse.Namespace) -> int:
                 mode=mode,
                 target=target,
                 source=str(args.source),
+                resume_policy=resume_policy,
                 progress_callback=progress_callback,
             )
         else:
@@ -917,6 +998,7 @@ def handle_index(args: argparse.Namespace) -> int:
                     mode=mode,
                     target=target,
                     source=str(args.source),
+                    resume_policy=resume_policy,
                     progress_callback=progress_callback,
                 )
     except KeyboardInterrupt:
@@ -928,6 +1010,10 @@ def handle_index(args: argparse.Namespace) -> int:
                     "command": "index",
                     "status": "interrupted",
                     "message": "Indexing was interrupted before completion.",
+                    "job": build_index_job_payload(
+                        resume_policy=resume_policy,
+                        status="interrupted",
+                    ),
                 }
             )
         return 130
@@ -940,6 +1026,11 @@ def handle_index(args: argparse.Namespace) -> int:
         print(f"Workdir: {summary['workdir']}")
         result_status = payload["result"].get("result_status", "ready")
         print(f"Result status: {result_status}")
+        job = payload.get("job")
+        if isinstance(job, dict):
+            print(f"Resume policy: {job['resume_policy']['mode']}")
+            if job.get("job_id"):
+                print(f"Job id: {job['job_id']}")
     return 0
 
 
@@ -950,6 +1041,7 @@ def _run_index_command(
     mode: str,
     target: str,
     source: str,
+    resume_policy: Mapping[str, object],
     progress_callback,
 ) -> dict[str, object]:
     """Execute the index command and return the final payload."""
@@ -968,6 +1060,15 @@ def _run_index_command(
             "source": source,
             "mode": mode,
             "result": result.to_dict(),
+            "job": build_index_job_payload(
+                resume_policy=resume_policy,
+                status=result.result_status,
+                result=result,
+                config=resolved.model,
+                mode=mode,
+                target=target,
+                source=source,
+            ),
             "config": summary,
         }
 
@@ -985,7 +1086,58 @@ def _run_index_command(
         "source": source,
         "mode": mode,
         "result": full_result,
+        "job": build_index_job_payload(
+            resume_policy=resume_policy,
+            status=str(full_result.get("result_status", "ready")),
+            result=full_result,
+            config=resolved.model,
+            mode=mode,
+            target=target,
+            source=source,
+        ),
         "config": summary,
+    }
+
+
+def build_index_job_payload(
+    *,
+    resume_policy: Mapping[str, object],
+    status: str,
+    result: IncrementalIndexResult | Mapping[str, object] | None = None,
+    config: Any | None = None,
+    mode: str | None = None,
+    target: str | None = None,
+    source: str | None = None,
+) -> dict[str, object]:
+    """Build the stable AR0-03 final JSON job contract."""
+
+    plan = getattr(result, "plan", None)
+    plan_signature: dict[str, object] | None = None
+    tasks_total: int | None = None
+    if plan is not None and config is not None:
+        signature = make_index_plan_signature(
+            plan,
+            config=config,
+            mode=mode,
+            target=target,
+        )
+        plan_signature = signature.to_dict()
+        tasks_total = len(make_index_task_list(plan))
+
+    return {
+        "schema_version": _INDEX_JOB_CONTRACT_SCHEMA_VERSION,
+        "job_id": resume_policy.get("planned_job_id"),
+        "status": status,
+        "resumed": False,
+        "resume_policy": dict(resume_policy),
+        "mode": mode,
+        "target": target,
+        "source": source,
+        "plan_signature": plan_signature,
+        "tasks_total": tasks_total,
+        "tasks_applied": None,
+        "tasks_skipped": None,
+        "tasks_failed": None,
     }
 
 

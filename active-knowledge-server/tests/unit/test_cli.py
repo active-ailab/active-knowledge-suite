@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sqlite3
 import subprocess
@@ -11,6 +12,7 @@ from active_knowledge_server.cli import (
     parse_performance_exemptions,
     resolve_index_output_mode,
     resolve_index_progress_output_mode,
+    resolve_index_resume_policy,
     storage_write_target_for_cli_target,
 )
 from active_knowledge_server.config.loader import ConfigError
@@ -47,6 +49,71 @@ def test_subcommands_have_help() -> None:
 
         assert "usage: active-kb" in result.stdout
         assert command in result.stdout
+
+
+def test_index_help_documents_resume_contract() -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "active_knowledge_server.cli", "index", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--resume auto|JOB_ID" in result.stdout
+    assert "--restart" in result.stdout
+    assert "--no-resume" in result.stdout
+    assert "--job-id JOB_ID" in result.stdout
+    assert "the default" in result.stdout
+    assert "newest compatible job" in result.stdout
+
+
+def test_index_resume_restart_flags_are_mutually_exclusive() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "index",
+            "--restart",
+            "--no-resume",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "not allowed with argument" in result.stderr
+
+
+def test_resolve_index_resume_policy_contract() -> None:
+    args = argparse.Namespace(
+        resume="auto",
+        restart=False,
+        no_resume=False,
+        job_id=None,
+    )
+
+    assert resolve_index_resume_policy(args)["mode"] == "auto"
+
+    explicit = argparse.Namespace(
+        resume="index:abc",
+        restart=False,
+        no_resume=False,
+        job_id=None,
+    )
+    explicit_policy = resolve_index_resume_policy(explicit)
+    assert explicit_policy["mode"] == "job_id"
+    assert explicit_policy["resume_job_id"] == "index:abc"
+
+    restart = argparse.Namespace(
+        resume="auto",
+        restart=True,
+        no_resume=False,
+        job_id="index:new",
+    )
+    restart_policy = resolve_index_resume_policy(restart)
+    assert restart_policy["mode"] == "restart"
+    assert restart_policy["planned_job_id"] == "index:new"
 
 
 def test_eval_run_subcommand_has_help() -> None:
@@ -1225,6 +1292,76 @@ def test_index_incremental_json_is_machine_readable(
     assert payload["command"] == "index"
     assert payload["status"] == "ok"
     assert payload["result"]["result_status"] == "ready"
+    assert payload["job"]["schema_version"] == "index_job_contract.v1"
+    assert payload["job"]["resume_policy"]["mode"] == "auto"
+    assert payload["job"]["resumed"] is False
+    assert payload["job"]["plan_signature"]["digest"].startswith("sha256:")
+    assert payload["job"]["tasks_total"] == 0
+
+
+def test_index_incremental_json_accepts_explicit_job_id_policy(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+        ) -> IncrementalIndexResult:
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=IncrementalIndexPlan(
+                    snapshot_id=snapshot_id,
+                    source="all",
+                    previous_state=None,
+                    current_state=object(),
+                    workspace_inventory=object(),
+                    source_docs_manifest=object(),
+                    collected_profiles=object(),
+                ),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--no-resume",
+            "--job-id",
+            "index:ci-123",
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["job"]["job_id"] == "index:ci-123"
+    assert payload["job"]["resume_policy"]["mode"] == "disabled"
+    assert payload["job"]["resume_policy"]["resume_enabled"] is False
 
 
 def test_index_incremental_json_can_render_progress_to_stderr(
@@ -1301,6 +1438,7 @@ def test_index_incremental_json_can_render_progress_to_stderr(
     assert exit_code == 0
     assert payload["command"] == "index"
     assert "Incremental indexing finished" in captured.err
+    assert payload["job"]["resume_policy"]["mode"] == "auto"
 
 
 def test_index_incremental_json_interrupt_keeps_stdout_payload(
@@ -1364,6 +1502,8 @@ def test_index_incremental_json_interrupt_keeps_stdout_payload(
 
     assert exit_code == 130
     assert payload["status"] == "interrupted"
+    assert payload["job"]["status"] == "interrupted"
+    assert payload["job"]["resume_policy"]["mode"] == "auto"
     assert "Index interrupted." in captured.err
 
 

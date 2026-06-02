@@ -148,7 +148,7 @@ TODO：
 
 ### AR0-03 定义 resume policy 与 CLI 契约
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`CONTRACT`、`DOC`、`TEST`
 - 依赖：`AR0-01`
@@ -156,11 +156,26 @@ TODO：
 
 TODO：
 
-- [ ] 定义 CLI 参数：`--resume auto|<job_id>`、`--restart`、`--no-resume`、`--job-id <job_id>`。
-- [ ] 规定默认行为为 `--resume auto`。
-- [ ] 规定 `--restart` 与 `--resume/--no-resume` 的互斥校验。
-- [ ] 规定 JSON final payload 新增 `job` 对象，不破坏现有 `result` payload。
-- [ ] 更新 help 文案和本地集成测试文档命令示例。
+- [x] 定义 CLI 参数：`--resume auto|<job_id>`、`--restart`、`--no-resume`、`--job-id <job_id>`。
+- [x] 规定默认行为为 `--resume auto`。
+- [x] 规定 `--restart` 与 `--resume/--no-resume` 的互斥校验。
+- [x] 规定 JSON final payload 新增 `job` 对象，不破坏现有 `result` payload。
+- [x] 更新 help 文案和本地集成测试文档命令示例。
+
+行业实践调研结论：
+
+- Google Cloud Storage 的可恢复上传建议中断后“重新运行同一命令即可继续”，因此本项目默认采用 `--resume auto`，减少用户在长索引被打断后的认知负担。
+- Wget 的 `--continue` 明确区分继续下载和从头开始，且在不能续传时会回退/提示；本项目对应保留 `--restart` 与 `--no-resume`，避免把“重建”和“续建”混在一起。
+- Python `argparse` 原生支持 mutually exclusive group；本项目把 `--resume`、`--restart`、`--no-resume` 放在 parser 层互斥，保证 help、错误码和 CI 行为一致。
+- AWS CLI 把 JSON 作为独立输出格式；本项目继续保持 `--format json` stdout 只输出一个最终 JSON payload，进度仍走 stderr 或 text renderer。
+
+完成记录：
+
+- `active_knowledge_server/cli.py` 新增 `resolve_index_resume_policy(...)`、`build_index_job_payload(...)`，并把 `index` parser 扩展为 `--resume auto|JOB_ID | --restart | --no-resume` 加 `--job-id JOB_ID`。
+- `active_knowledge_server/config/schema.py` 新增 `IndexResumeMode` 类型，供 CLI/pipeline/job store 后续复用。
+- `index --format json` 顶层新增 `job` 对象；`result` 对象保持原结构。增量路径在已有 `IncrementalIndexResult.plan` 上生成 `plan_signature` 与 task 总数，full 路径先输出空 plan/task 字段，等待 AR1/R6 job 化/staging 接入。
+- `KeyboardInterrupt` JSON payload 新增 `job` 对象，保证中断场景仍有机器可读的 resume policy。
+- `doc/active_knowledge_server_local_full_integration_test.md` 的增量索引示例已显式加入 `--resume auto`。
 
 验收标准：
 

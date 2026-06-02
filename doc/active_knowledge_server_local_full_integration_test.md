@@ -70,6 +70,7 @@ uv run active-kb index \
   --config "$CONFIG" \
   --incremental \
   --source all \
+  --resume auto \
   --format json
 
 uv run active-kb index \
