@@ -297,7 +297,7 @@ TODO：
 
 ### AR1-03 Pipeline 接收 job context
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR1-02`
@@ -305,11 +305,26 @@ TODO：
 
 TODO：
 
-- [ ] `IncrementalIndexPipeline.run(...)` 新增可选 `job_store`、`job_id`、`resume_policy` 或 `IndexRunContext`。
-- [ ] run 开始时写入 `plan_signature`、plan summary、task counts 到 job metadata。
-- [ ] 阶段切换时更新 `last_phase`。
-- [ ] task 处理时更新 `last_task_key`。
-- [ ] pipeline 单测使用 fake/in-memory job store 或临时 jobs SQLite 覆盖 metadata 更新。
+- [x] `IncrementalIndexPipeline.run(...)` 新增可选 `job_store`、`job_id`、`resume_policy` 或 `IndexRunContext`。
+- [x] run 开始时写入 `plan_signature`、plan summary、task counts 到 job metadata。
+- [x] 阶段切换时更新 `last_phase`。
+- [x] task 处理时更新 `last_task_key`。
+- [x] pipeline 单测使用 fake/in-memory job store 或临时 jobs SQLite 覆盖 metadata 更新。
+
+行业实践调研结论：
+
+- Apache Flink checkpoint 文档强调 checkpoint 要保存可恢复 state 和输入位置；本项目对应在 pipeline run 开始就持久化 `plan_signature`、plan summary 和 task counts，让恢复/观测先绑定到同一执行计划。
+- Spark Structured Streaming 文档强调同一 checkpoint location 下 source/sink/schema 变更受限；本项目继续使用 AR0-01 的 `plan_signature` 作为 job context 的计划身份，避免把不同索引计划混为同一可恢复作业。
+- Celery task state 文档支持长任务通过 custom state metadata 上报 `done/total`；本项目对应在 pipeline 阶段和 task 边界更新 `last_phase`、`last_task_key`、`tasks_applied/tasks_failed/tasks_skipped`。
+- Kubernetes Job 以持久 Job status/conditions 表示 run-to-completion 状态；本项目让 pipeline 推进 running 状态到 `reporting`，终态 `ready/failed/partial_ready` 仍由 CLI/MCP 编排层收口。
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 新增 `IndexRunContext` 和内部 `_PipelineJobReporter`，`IncrementalIndexPipeline.run(...)` 可接收 `run_context`；未传 context 时旧调用路径保持不变。
+- run materialize plan 后会生成 deterministic task list，并写入 `plan_signature`、`plan_signature_payload`、`plan_summary`、`tasks_total`、`tasks_by_phase`、`tasks_by_source_kind`、`tasks_required` 和 `resume_policy` metadata。
+- pipeline 进度事件会把主要阶段映射到 jobs SQLite running 状态：discover/plan -> `discovering`，collect -> `parsing`，metadata/profile/workspace apply -> `extracting`，vector apply -> `embedding`，done -> `reporting`。
+- code/doc delete、code/doc apply、vector doc、profile relations、workspace map 的 task 边界会更新 `last_task_key`、`last_task`、`last_path` 与 task 计数。
+- `tests/unit/test_incremental_pipeline.py` 新增临时 jobs SQLite 单测，覆盖传入 `IndexRunContext` 后 metadata 可查询。
 
 验收标准：
 

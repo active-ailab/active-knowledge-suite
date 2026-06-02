@@ -33,6 +33,10 @@ from active_knowledge_server.indexing.doc_indexer import (
     DocumentIndexer,
     IndexedDocuments,
 )
+from active_knowledge_server.indexing.jobs import (
+    JobStateTransitionError,
+    SQLiteJobStore,
+)
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
     CollectedProfiles,
@@ -50,7 +54,9 @@ from active_knowledge_server.indexing.relation_extractor import (
     ProfileConditionedRelationExtractor,
     profile_config_hash,
 )
+from active_knowledge_server.indexing.resume import IndexPlanSignature, make_index_plan_signature
 from active_knowledge_server.indexing.snapshot import CURRENT_SNAPSHOT_ID
+from active_knowledge_server.indexing.tasks import IndexTask, make_index_task_list
 from active_knowledge_server.indexing.workspace_map import WorkspaceMapBuilder
 from active_knowledge_server.storage import (
     ALL_SCOPE,
@@ -58,6 +64,7 @@ from active_knowledge_server.storage import (
     EntityRecord,
     EvidenceRecord,
     FileRecord,
+    JobStatus,
     QueryScope,
     RelationRecord,
     StorageAdapter,
@@ -235,6 +242,16 @@ class IncrementalIndexResult:
 
 
 @dataclass(frozen=True)
+class IndexRunContext:
+    """Persistent job context observed by the incremental pipeline."""
+
+    job_store: SQLiteJobStore
+    job_id: str
+    resume_policy: Mapping[str, object] | None = None
+    plan_signature: IndexPlanSignature | None = None
+
+
+@dataclass(frozen=True)
 class _ObjectBundle:
     file_record: FileRecord
     chunks: tuple[ChunkRecord, ...]
@@ -249,6 +266,192 @@ class _LiveObject:
     logical_object_id: str
     source_index: StorageSourceIndex
     record: ChunkRecord | EntityRecord | EvidenceRecord | RelationRecord
+
+
+_RUNNING_JOB_STATUS_ORDER: Final[tuple[JobStatus, ...]] = (
+    "discovering",
+    "parsing",
+    "extracting",
+    "embedding",
+    "reporting",
+)
+_INDEX_PHASE_JOB_STATUS: Final[dict[str, JobStatus]] = {
+    "discover": "discovering",
+    "plan": "discovering",
+    "code": "parsing",
+    "code_collect": "parsing",
+    "code_finalize": "parsing",
+    "docs": "parsing",
+    "doc_collect": "parsing",
+    "doc_finalize": "parsing",
+    "code_apply": "extracting",
+    "doc_apply": "extracting",
+    "profile_relations": "extracting",
+    "workspace_map": "extracting",
+    "vectors_apply": "embedding",
+    "done": "reporting",
+}
+
+
+@dataclass
+class _PipelineJobReporter:
+    context: IndexRunContext
+    config: ActiveKnowledgeConfig
+    plan: IncrementalIndexPlan
+    tasks: tuple[IndexTask, ...]
+    source: str
+    snapshot_id: str
+    started_at: str
+    _status: str = field(init=False)
+    _last_phase: str | None = field(default=None, init=False)
+    _tasks_applied: int = field(default=0, init=False)
+    _tasks_failed: int = field(default=0, init=False)
+    _tasks_skipped: int = field(default=0, init=False)
+
+    def __post_init__(self) -> None:
+        job = self.context.job_store.get_job(self.context.job_id)
+        self._status = "pending" if job is None else job.status
+
+    def start(self) -> None:
+        signature = self.context.plan_signature or make_index_plan_signature(
+            self.plan,
+            config=self.config,
+        )
+        task_counts = _index_task_counts(self.tasks)
+        self._update(
+            phase="plan",
+            status="discovering",
+            metadata_update={
+                "execution_state": "running",
+                "started_at": self.started_at,
+                "last_phase": "plan",
+                "plan_signature": signature.digest,
+                "plan_signature_payload": signature.to_dict(),
+                "plan_summary": _index_plan_summary(self.plan),
+                "tasks_total": task_counts["total"],
+                "tasks_by_phase": task_counts["by_phase"],
+                "tasks_by_source_kind": task_counts["by_source_kind"],
+                "tasks_required": task_counts["required"],
+                "tasks_applied": self._tasks_applied,
+                "tasks_skipped": self._tasks_skipped,
+                "tasks_failed": self._tasks_failed,
+                **_resume_policy_metadata(self.context.resume_policy),
+            },
+        )
+
+    def observe_event(self, event: IndexProgressEvent) -> None:
+        phase = str(event.phase)
+        if phase == self._last_phase and event.current_path is None and phase != "done":
+            return
+        self._update(
+            phase=phase,
+            status=_INDEX_PHASE_JOB_STATUS.get(phase),
+            metadata_update={
+                "execution_state": "running",
+                "last_phase": phase,
+                "last_message": event.message,
+                "global_total": event.global_total,
+                "global_done": event.global_done,
+            },
+        )
+
+    def begin_task(self, task_key: str, *, phase: str | None = None) -> None:
+        task = _find_index_task(self.tasks, task_key)
+        task_phase = phase or (task.phase if task is not None else self._last_phase or "plan")
+        metadata_update: dict[str, object] = {
+            "execution_state": "running",
+            "last_phase": task_phase,
+            "last_task_key": task_key,
+            "tasks_applied": self._tasks_applied,
+            "tasks_skipped": self._tasks_skipped,
+            "tasks_failed": self._tasks_failed,
+        }
+        if task is not None:
+            metadata_update["last_task"] = task.to_dict()
+            if task.relative_path is not None:
+                metadata_update["last_path"] = task.relative_path
+        self._update(
+            phase=task_phase,
+            status=_INDEX_PHASE_JOB_STATUS.get(task_phase),
+            metadata_update=metadata_update,
+        )
+
+    def task_applied(self, task_key: str) -> None:
+        self._tasks_applied += 1
+        self._update(
+            phase=self._last_phase or "plan",
+            metadata_update={
+                "last_task_key": task_key,
+                "tasks_applied": self._tasks_applied,
+                "tasks_failed": self._tasks_failed,
+                "tasks_skipped": self._tasks_skipped,
+            },
+        )
+
+    def task_failed(self, task_key: str, error: BaseException | str) -> None:
+        self._tasks_failed += 1
+        self._update(
+            phase=self._last_phase or "plan",
+            metadata_update={
+                "last_task_key": task_key,
+                "last_task_error": str(error),
+                "tasks_applied": self._tasks_applied,
+                "tasks_failed": self._tasks_failed,
+                "tasks_skipped": self._tasks_skipped,
+            },
+        )
+
+    def _update(
+        self,
+        *,
+        phase: str,
+        metadata_update: Mapping[str, object],
+        status: JobStatus | None = None,
+    ) -> None:
+        self._last_phase = phase
+        if status is None:
+            self.context.job_store.transition_or_update_running_metadata(
+                self.context.job_id,
+                metadata_update=metadata_update,
+            )
+            return
+        self._advance_to(status, metadata_update=metadata_update)
+
+    def _advance_to(self, status: JobStatus, *, metadata_update: Mapping[str, object]) -> None:
+        if status not in _RUNNING_JOB_STATUS_ORDER:
+            self.context.job_store.transition_or_update_running_metadata(
+                self.context.job_id,
+                metadata_update=metadata_update,
+            )
+            return
+        target_index = _RUNNING_JOB_STATUS_ORDER.index(status)
+        if self._status in _RUNNING_JOB_STATUS_ORDER:
+            current_index = _RUNNING_JOB_STATUS_ORDER.index(self._status)
+            if target_index < current_index:
+                self.context.job_store.transition_or_update_running_metadata(
+                    self.context.job_id,
+                    metadata_update=metadata_update,
+                )
+                return
+        elif self._status != "pending":
+            raise JobStateTransitionError(
+                f"job {self.context.job_id!r} is not running or pending from {self._status!r}"
+            )
+
+        while self._status != status:
+            next_status = _next_running_status(self._status)
+            update = metadata_update if next_status == status else None
+            job = self.context.job_store.transition_or_update_running_metadata(
+                self.context.job_id,
+                next_status,
+                metadata_update=update,
+            )
+            self._status = job.status
+        if self._status == status:
+            self.context.job_store.transition_or_update_running_metadata(
+                self.context.job_id,
+                metadata_update=metadata_update,
+            )
 
 
 class IncrementalIndexPipeline:
@@ -556,6 +759,7 @@ class IncrementalIndexPipeline:
         source: Literal["all", "code", "docs"] = "all",
         progress_callback: IndexProgressCallback | None = None,
         plan: IncrementalIndexPlan | None = None,
+        run_context: IndexRunContext | None = None,
     ) -> IncrementalIndexResult:
         """Execute one incremental overlay update and persist the next incremental state."""
 
@@ -571,6 +775,23 @@ class IncrementalIndexPipeline:
                 progress_callback=callback,
                 started_at=started_at,
             )
+        tasks = make_index_task_list(plan)
+        task_counts = _index_task_counts(tasks)
+        job_reporter = (
+            None
+            if run_context is None
+            else _PipelineJobReporter(
+                context=run_context,
+                config=self._config,
+                plan=plan,
+                tasks=tasks,
+                source=source,
+                snapshot_id=snapshot_id,
+                started_at=started_at,
+            )
+        )
+        if job_reporter is not None:
+            job_reporter.start()
         doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
         code_paths_to_collect = _incremental_code_paths_to_collect(plan)
         progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)
@@ -588,23 +809,22 @@ class IncrementalIndexPipeline:
             explicit_global_done: int | None = None,
             eta_seconds: float | None = None,
         ) -> None:
-            callback(
-                IndexProgressEvent(
-                    phase=cast(Any, phase),
-                    stage_total=stage_total,
-                    stage_done=stage_done,
-                    global_total=global_total,
-                    global_done=global_done
-                    if explicit_global_done is None
-                    else explicit_global_done,
-                    current_path=current_path,
-                    message=message,
-                    warnings_count=warnings_count,
-                    started_at=started_at,
-                    updated_at=utc_timestamp(),
-                    eta_seconds=eta_seconds,
-                )
+            event = IndexProgressEvent(
+                phase=cast(Any, phase),
+                stage_total=stage_total,
+                stage_done=stage_done,
+                global_total=global_total,
+                global_done=global_done if explicit_global_done is None else explicit_global_done,
+                current_path=current_path,
+                message=message,
+                warnings_count=warnings_count,
+                started_at=started_at,
+                updated_at=utc_timestamp(),
+                eta_seconds=eta_seconds,
             )
+            if job_reporter is not None:
+                job_reporter.observe_event(event)
+            callback(event)
 
         global_done += 1
         emit(
@@ -634,25 +854,33 @@ class IncrementalIndexPipeline:
             "diagnostics": {
                 "slowest_items": [],
             },
+            "tasks": {
+                "total": task_counts["total"],
+                "by_phase": task_counts["by_phase"],
+                "by_source_kind": task_counts["by_source_kind"],
+                "required": task_counts["required"],
+            },
         }
 
         code_indexed: IndexedCode | None = None
         if source in {"all", "code"} and (
             plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
         ):
+            current_task_key: str | None = None
             try:
                 code_collect_base = global_done
 
                 def handle_code_collect(event: IndexProgressEvent) -> None:
-                    callback(
-                        replace(
-                            event,
-                            global_total=global_total,
-                            global_done=code_collect_base + (event.stage_done or 0),
-                            started_at=started_at,
-                            updated_at=utc_timestamp(),
-                        )
+                    updated_event = replace(
+                        event,
+                        global_total=global_total,
+                        global_done=code_collect_base + (event.stage_done or 0),
+                        started_at=started_at,
+                        updated_at=utc_timestamp(),
                     )
+                    if job_reporter is not None:
+                        job_reporter.observe_event(updated_event)
+                    callback(updated_event)
 
                 code_indexed = self._code_indexer.collect(
                     snapshot_id=snapshot_id,
@@ -695,6 +923,9 @@ class IncrementalIndexPipeline:
                 code_apply_done = 0
                 code_apply_eta = SlidingWindowEtaEstimator()
                 for relative_path in plan.deleted_code_paths:
+                    current_task_key = f"code:delete:{relative_path}"
+                    if job_reporter is not None:
+                        job_reporter.begin_task(current_task_key, phase="code_apply")
                     apply_started_at = time.perf_counter()
                     self._tombstone_deleted_path(
                         reader,
@@ -724,10 +955,15 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
+                    if job_reporter is not None:
+                        job_reporter.task_applied(current_task_key)
                 for relative_path in plan.changed_code_paths:
                     bundle = new_code_bundles.get(relative_path)
                     if bundle is None:
                         continue
+                    current_task_key = f"code:apply:{relative_path}"
+                    if job_reporter is not None:
+                        job_reporter.begin_task(current_task_key, phase="code_apply")
                     apply_started_at = time.perf_counter()
                     self._apply_code_bundle(
                         reader,
@@ -757,6 +993,8 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
+                    if job_reporter is not None:
+                        job_reporter.task_applied(current_task_key)
                 if progress_totals["code_apply"] > 0:
                     emit(
                         phase="code_apply",
@@ -766,6 +1004,8 @@ class IncrementalIndexPipeline:
                     )
                 writer.flush()
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
+                if job_reporter is not None and current_task_key is not None:
+                    job_reporter.task_failed(current_task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -786,6 +1026,9 @@ class IncrementalIndexPipeline:
             doc_apply_done = 0
             vector_apply_done = 0
             for relative_path in plan.deleted_doc_paths:
+                task_key = f"doc:delete:{relative_path}"
+                if job_reporter is not None:
+                    job_reporter.begin_task(task_key, phase="doc_apply")
                 try:
                     self._tombstone_deleted_path(
                         reader,
@@ -809,6 +1052,8 @@ class IncrementalIndexPipeline:
                             details={"path": relative_path, "error": str(exc)},
                         )
                     )
+                    if job_reporter is not None:
+                        job_reporter.task_failed(task_key, exc)
                 else:
                     doc_apply_done += 1
                     global_done += 1
@@ -819,6 +1064,8 @@ class IncrementalIndexPipeline:
                         current_path=relative_path,
                         message="Applying document changes",
                     )
+                    if job_reporter is not None:
+                        job_reporter.task_applied(task_key)
 
             indexed_docs: IndexedDocuments | None = None
             if doc_paths_to_collect:
@@ -826,15 +1073,16 @@ class IncrementalIndexPipeline:
                     doc_collect_base = global_done
 
                     def handle_doc_collect(event: IndexProgressEvent) -> None:
-                        callback(
-                            replace(
-                                event,
-                                global_total=global_total,
-                                global_done=doc_collect_base + (event.stage_done or 0),
-                                started_at=started_at,
-                                updated_at=utc_timestamp(),
-                            )
+                        updated_event = replace(
+                            event,
+                            global_total=global_total,
+                            global_done=doc_collect_base + (event.stage_done or 0),
+                            started_at=started_at,
+                            updated_at=utc_timestamp(),
                         )
+                        if job_reporter is not None:
+                            job_reporter.observe_event(updated_event)
+                        callback(updated_event)
 
                     manifest = _filter_source_docs_manifest(
                         plan.source_docs_manifest,
@@ -900,6 +1148,7 @@ class IncrementalIndexPipeline:
                         plan.source_docs_manifest,
                         relative_path,
                     )
+                    current_doc_task_key: str | None = None
                     try:
                         new_bundle = indexed_by_path.get(storage_relative_path)
                         if new_bundle is None:
@@ -908,6 +1157,9 @@ class IncrementalIndexPipeline:
                             plan.reindex_all_docs or relative_path in plan.changed_doc_paths
                         )
                         if metadata_changed:
+                            current_doc_task_key = f"doc:apply:{relative_path}"
+                            if job_reporter is not None:
+                                job_reporter.begin_task(current_doc_task_key, phase="doc_apply")
                             metadata_started_at = time.perf_counter()
                             self._apply_doc_bundle(
                                 reader,
@@ -937,7 +1189,15 @@ class IncrementalIndexPipeline:
                                     total=progress_totals["doc_apply"],
                                 ),
                             )
+                            if job_reporter is not None:
+                                job_reporter.task_applied(current_doc_task_key)
                         if plan.rebuild_vectors or metadata_changed:
+                            current_doc_task_key = f"vector:doc:{relative_path}"
+                            if job_reporter is not None:
+                                job_reporter.begin_task(
+                                    current_doc_task_key,
+                                    phase="vectors_apply",
+                                )
                             vector_started_at = time.perf_counter()
                             self._upsert_doc_vectors(
                                 vector_writer,
@@ -965,7 +1225,11 @@ class IncrementalIndexPipeline:
                                     total=progress_totals["vectors_apply"],
                                 ),
                             )
+                            if job_reporter is not None:
+                                job_reporter.task_applied(current_doc_task_key)
                     except Exception as exc:  # noqa: BLE001
+                        if job_reporter is not None and current_doc_task_key is not None:
+                            job_reporter.task_failed(current_doc_task_key, exc)
                         failed = True
                         warnings.append(
                             IncrementalIndexWarning(
@@ -992,6 +1256,9 @@ class IncrementalIndexPipeline:
             vector_writer.flush()
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
+            task_key = "profile:relations"
+            if job_reporter is not None:
+                job_reporter.begin_task(task_key, phase="profile_relations")
             try:
                 profile_started_at = time.perf_counter()
                 emit(
@@ -1027,7 +1294,11 @@ class IncrementalIndexPipeline:
                     stage_done=1,
                     message="Refreshing profile-conditioned relations",
                 )
+                if job_reporter is not None:
+                    job_reporter.task_applied(task_key)
             except Exception as exc:  # noqa: BLE001
+                if job_reporter is not None:
+                    job_reporter.task_failed(task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1041,6 +1312,9 @@ class IncrementalIndexPipeline:
                 )
 
         if _workspace_map_refresh_required(plan):
+            task_key = "workspace:map"
+            if job_reporter is not None:
+                job_reporter.begin_task(task_key, phase="workspace_map")
             try:
                 workspace_map_started_at = time.perf_counter()
                 emit(
@@ -1067,7 +1341,11 @@ class IncrementalIndexPipeline:
                     stage_done=1,
                     message="Refreshing workspace map",
                 )
+                if job_reporter is not None:
+                    job_reporter.task_applied(task_key)
             except Exception as exc:  # noqa: BLE001
+                if job_reporter is not None:
+                    job_reporter.task_failed(task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1405,6 +1683,74 @@ def _diff_maps(
     changed = tuple(sorted(path for path, value in current.items() if previous.get(path) != value))
     deleted = tuple(sorted(path for path in previous if path not in current))
     return changed, deleted
+
+
+def _next_running_status(current: str) -> JobStatus:
+    if current == "pending":
+        return _RUNNING_JOB_STATUS_ORDER[0]
+    current_index = _RUNNING_JOB_STATUS_ORDER.index(current)
+    if current_index + 1 >= len(_RUNNING_JOB_STATUS_ORDER):
+        return _RUNNING_JOB_STATUS_ORDER[-1]
+    return _RUNNING_JOB_STATUS_ORDER[current_index + 1]
+
+
+def _index_task_counts(tasks: Sequence[IndexTask]) -> dict[str, object]:
+    by_phase: dict[str, int] = {}
+    by_source_kind: dict[str, int] = {}
+    required = 0
+    for task in tasks:
+        by_phase[task.phase] = by_phase.get(task.phase, 0) + 1
+        by_source_kind[task.source_kind] = by_source_kind.get(task.source_kind, 0) + 1
+        if task.required:
+            required += 1
+    return {
+        "total": len(tasks),
+        "required": required,
+        "by_phase": dict(sorted(by_phase.items())),
+        "by_source_kind": dict(sorted(by_source_kind.items())),
+    }
+
+
+def _index_plan_summary(plan: IncrementalIndexPlan) -> dict[str, object]:
+    return {
+        "snapshot_id": plan.snapshot_id,
+        "source": plan.source,
+        "has_previous_state": plan.previous_state is not None,
+        "reindex_all_code": plan.reindex_all_code,
+        "reindex_all_docs": plan.reindex_all_docs,
+        "rebuild_vectors": plan.rebuild_vectors,
+        "rebuild_profile_conditioned_relations": (
+            plan.rebuild_profile_conditioned_relations
+        ),
+        "changed_code_paths_count": len(plan.changed_code_paths),
+        "deleted_code_paths_count": len(plan.deleted_code_paths),
+        "changed_doc_paths_count": len(plan.changed_doc_paths),
+        "deleted_doc_paths_count": len(plan.deleted_doc_paths),
+        "changed_profile_ids_count": len(plan.changed_profile_ids),
+        "removed_profile_ids_count": len(plan.removed_profile_ids),
+        "warnings_count": len(plan.warnings),
+    }
+
+
+def _resume_policy_metadata(
+    resume_policy: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if resume_policy is None:
+        return {}
+    return {
+        "resume_policy": {
+            str(key): value
+            for key, value in resume_policy.items()
+            if value is not None
+        }
+    }
+
+
+def _find_index_task(tasks: Sequence[IndexTask], task_key: str) -> IndexTask | None:
+    for task in tasks:
+        if task.task_key == task_key:
+            return task
+    return None
 
 
 def _incremental_doc_paths_to_collect(plan: IncrementalIndexPlan) -> tuple[str, ...]:

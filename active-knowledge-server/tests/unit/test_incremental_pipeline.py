@@ -22,7 +22,9 @@ from active_knowledge_server.indexing import (
     ProfileConditionedRelationExtractor,
     summarize_entity_profile_states_from_reader,
 )
+from active_knowledge_server.indexing.jobs import SQLiteJobStore
 from active_knowledge_server.indexing.pipeline import (
+    IndexRunContext,
     _format_discover_target,
     _format_source_docs_discover_message,
     _format_workspace_discover_message,
@@ -755,6 +757,61 @@ int health_incremental_probe(void)
     assert "components/health/bt.c" not in include_paths
     assert len(include_paths) < len(previous_state.code_files)
     assert result.metadata["code_collect_workers"]["workers"] == 2
+
+
+def test_incremental_pipeline_updates_job_context_metadata(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+int health_job_context_probe(void)
+{
+    return 99;
+}
+""",
+        encoding="utf-8",
+    )
+    pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(snapshot_id=CURRENT_SNAPSHOT_ID)
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.status == "reporting"
+    assert updated.metadata["plan_signature"].startswith("sha256:")
+    assert (
+        updated.metadata["plan_signature_payload"]["digest"]
+        == updated.metadata["plan_signature"]
+    )
+    assert updated.metadata["plan_summary"]["changed_code_paths_count"] == 1
+    assert updated.metadata["plan_summary"]["source"] == "code"
+    assert updated.metadata["tasks_total"] == result.metadata["tasks"]["total"]
+    assert updated.metadata["tasks_by_phase"]["code_apply"] >= 1
+    assert updated.metadata["tasks_applied"] >= 1
+    assert updated.metadata["last_phase"] == "done"
+    assert isinstance(updated.metadata["last_task_key"], str)
+    assert updated.metadata["resume_policy"] == {"mode": "auto"}
 
 
 def write_workspace_fixture(workspace_root: Path) -> None:

@@ -38,6 +38,7 @@ from active_knowledge_server.indexing.pipeline import (
     IncrementalIndexResult,
     IncrementalIndexState,
     IncrementalIndexWarning,
+    IndexRunContext,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -135,6 +136,7 @@ __all__ = [
     "IndexProgressCallback",
     "IndexProgressEvent",
     "IndexProgressPhase",
+    "IndexRunContext",
     "IndexTask",
     "IndexTaskCheckpoint",
     "IndexedCode",
