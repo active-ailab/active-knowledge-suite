@@ -555,6 +555,7 @@ class IncrementalIndexPipeline:
         snapshot_id: str = CURRENT_SNAPSHOT_ID,
         source: Literal["all", "code", "docs"] = "all",
         progress_callback: IndexProgressCallback | None = None,
+        plan: IncrementalIndexPlan | None = None,
     ) -> IncrementalIndexResult:
         """Execute one incremental overlay update and persist the next incremental state."""
 
@@ -563,12 +564,13 @@ class IncrementalIndexPipeline:
 
         callback = progress_callback or noop_progress_callback
         started_at = utc_timestamp()
-        plan = self.plan(
-            snapshot_id=snapshot_id,
-            source=source,
-            progress_callback=callback,
-            started_at=started_at,
-        )
+        if plan is None:
+            plan = self.plan(
+                snapshot_id=snapshot_id,
+                source=source,
+                progress_callback=callback,
+                started_at=started_at,
+            )
         doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
         code_paths_to_collect = _incremental_code_paths_to_collect(plan)
         progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)

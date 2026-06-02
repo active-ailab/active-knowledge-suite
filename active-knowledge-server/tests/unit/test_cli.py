@@ -1228,6 +1228,22 @@ def test_index_baseline_requires_publish_mode(capsys) -> None:
     assert payload["warnings"][0]["code"] == "baseline.publish_mode_required"
 
 
+def _empty_incremental_plan(
+    *,
+    snapshot_id: str = "current",
+    source: str = "all",
+) -> IncrementalIndexPlan:
+    return IncrementalIndexPlan(
+        snapshot_id=snapshot_id,
+        source=source,
+        previous_state=None,
+        current_state=object(),
+        workspace_inventory=object(),
+        source_docs_manifest=object(),
+        collected_profiles=object(),
+    )
+
+
 def test_index_incremental_json_is_machine_readable(
     tmp_path: Path,
     capsys,
@@ -1243,29 +1259,26 @@ def test_index_incremental_json_is_machine_readable(
         def __init__(self, *_args, **_kwargs) -> None:
             return None
 
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
         def run(
             self,
             *,
             snapshot_id: str,
             source: str,
             progress_callback,
+            plan: IncrementalIndexPlan | None = None,
         ) -> IncrementalIndexResult:
             assert snapshot_id == "current"
             assert source == "all"
             assert progress_callback is not None
+            assert plan is not None
             return IncrementalIndexResult(
                 schema_version="incremental_index_result.v1",
                 snapshot_id=snapshot_id,
                 result_status="ready",
-                plan=IncrementalIndexPlan(
-                    snapshot_id=snapshot_id,
-                    source="all",
-                    previous_state=None,
-                    current_state=object(),
-                    workspace_inventory=object(),
-                    source_docs_manifest=object(),
-                    collected_profiles=object(),
-                ),
+                plan=plan,
             )
 
     monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
@@ -1295,8 +1308,19 @@ def test_index_incremental_json_is_machine_readable(
     assert payload["job"]["schema_version"] == "index_job_contract.v1"
     assert payload["job"]["resume_policy"]["mode"] == "auto"
     assert payload["job"]["resumed"] is False
+    assert payload["job"]["job_id"].startswith("index:")
     assert payload["job"]["plan_signature"]["digest"].startswith("sha256:")
     assert payload["job"]["tasks_total"] == 0
+    assert payload["job"]["tasks_applied"] == 0
+
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        row = connection.execute(
+            "SELECT status, metadata_json FROM job WHERE job_id = ?",
+            (payload["job"]["job_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "ready"
+    assert json.loads(row[1])["plan_signature"].startswith("sha256:")
 
 
 def test_index_incremental_json_accepts_explicit_job_id_policy(
@@ -1314,26 +1338,22 @@ def test_index_incremental_json_accepts_explicit_job_id_policy(
         def __init__(self, *_args, **_kwargs) -> None:
             return None
 
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
         def run(
             self,
             *,
             snapshot_id: str,
             source: str,
             progress_callback,
+            plan: IncrementalIndexPlan | None = None,
         ) -> IncrementalIndexResult:
             return IncrementalIndexResult(
                 schema_version="incremental_index_result.v1",
                 snapshot_id=snapshot_id,
                 result_status="ready",
-                plan=IncrementalIndexPlan(
-                    snapshot_id=snapshot_id,
-                    source="all",
-                    previous_state=None,
-                    current_state=object(),
-                    workspace_inventory=object(),
-                    source_docs_manifest=object(),
-                    collected_profiles=object(),
-                ),
+                plan=plan or _empty_incremental_plan(snapshot_id=snapshot_id, source=source),
             )
 
     monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
@@ -1363,6 +1383,202 @@ def test_index_incremental_json_accepts_explicit_job_id_policy(
     assert payload["job"]["resume_policy"]["mode"] == "disabled"
     assert payload["job"]["resume_policy"]["resume_enabled"] is False
 
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        status = connection.execute(
+            "SELECT status FROM job WHERE job_id = 'index:ci-123'"
+        ).fetchone()
+    assert status == ("ready",)
+
+
+def test_index_incremental_json_auto_resumes_interrupted_job(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    calls = {"count": 0}
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+            plan: IncrementalIndexPlan | None = None,
+        ) -> IncrementalIndexResult:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise KeyboardInterrupt
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=plan or _empty_incremental_plan(snapshot_id=snapshot_id, source=source),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+
+    first_exit = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--no-resume",
+            "--job-id",
+            "index:auto-resume",
+            "--format",
+            "json",
+        ]
+    )
+    first_payload = json.loads(capsys.readouterr().out)
+
+    second_exit = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--resume",
+            "auto",
+            "--format",
+            "json",
+        ]
+    )
+    second_payload = json.loads(capsys.readouterr().out)
+
+    assert first_exit == 130
+    assert first_payload["job"]["job_id"] == "index:auto-resume"
+    assert second_exit == 0
+    assert second_payload["job"]["job_id"] == "index:auto-resume"
+    assert second_payload["job"]["resumed"] is True
+
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        row = connection.execute(
+            "SELECT status, metadata_json FROM job WHERE job_id = 'index:auto-resume'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "ready"
+    assert json.loads(row[1])["resume_count"] == 1
+
+
+def test_index_incremental_restart_supersedes_compatible_job(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    calls = {"count": 0}
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+            plan: IncrementalIndexPlan | None = None,
+        ) -> IncrementalIndexResult:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise KeyboardInterrupt
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=plan or _empty_incremental_plan(snapshot_id=snapshot_id, source=source),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+
+    assert (
+        main(
+            [
+                "index",
+                "--workdir",
+                str(workdir),
+                "--workspace",
+                str(workspace),
+                "--source-docs-root",
+                str(source_docs),
+                "--incremental",
+                "--no-resume",
+                "--job-id",
+                "index:restart-old",
+                "--format",
+                "json",
+            ]
+        )
+        == 130
+    )
+    capsys.readouterr()
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--restart",
+            "--job-id",
+            "index:restart-new",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["job"]["job_id"] == "index:restart-new"
+    assert payload["job"]["resumed"] is False
+
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        old_row = connection.execute(
+            "SELECT status, metadata_json FROM job WHERE job_id = 'index:restart-old'"
+        ).fetchone()
+        new_row = connection.execute(
+            "SELECT status FROM job WHERE job_id = 'index:restart-new'"
+        ).fetchone()
+    assert old_row is not None
+    assert old_row[0] == "failed"
+    old_metadata = json.loads(old_row[1])
+    assert old_metadata["execution_state"] == "superseded"
+    assert old_metadata["superseded_by_job_id"] == "index:restart-new"
+    assert new_row == ("ready",)
+
 
 def test_index_incremental_json_can_render_progress_to_stderr(
     tmp_path: Path,
@@ -1379,12 +1595,16 @@ def test_index_incremental_json_can_render_progress_to_stderr(
         def __init__(self, *_args, **_kwargs) -> None:
             return None
 
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
         def run(
             self,
             *,
             snapshot_id: str,
             source: str,
             progress_callback,
+            plan: IncrementalIndexPlan | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(
@@ -1400,15 +1620,7 @@ def test_index_incremental_json_can_render_progress_to_stderr(
                 schema_version="incremental_index_result.v1",
                 snapshot_id=snapshot_id,
                 result_status="ready",
-                plan=IncrementalIndexPlan(
-                    snapshot_id=snapshot_id,
-                    source="all",
-                    previous_state=None,
-                    current_state=object(),
-                    workspace_inventory=object(),
-                    source_docs_manifest=object(),
-                    collected_profiles=object(),
-                ),
+                plan=plan or _empty_incremental_plan(snapshot_id=snapshot_id, source=source),
             )
 
     monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
@@ -1456,12 +1668,16 @@ def test_index_incremental_json_interrupt_keeps_stdout_payload(
         def __init__(self, *_args, **_kwargs) -> None:
             return None
 
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
         def run(
             self,
             *,
             snapshot_id: str,
             source: str,
             progress_callback,
+            plan: IncrementalIndexPlan | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(
@@ -1698,12 +1914,16 @@ def test_index_interrupt_prints_snapshot_without_traceback(
         def __init__(self, *_args, **_kwargs) -> None:
             return None
 
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
         def run(
             self,
             *,
             snapshot_id: str,
             source: str,
             progress_callback,
+            plan: IncrementalIndexPlan | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(

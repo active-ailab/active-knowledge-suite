@@ -261,7 +261,7 @@ TODO：
 
 ### AR1-02 CLI 创建/恢复 index job
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR0-03`、`AR1-01`
@@ -269,11 +269,26 @@ TODO：
 
 TODO：
 
-- [ ] `handle_index` 在执行前根据 resume policy 创建或恢复 job。
-- [ ] `KeyboardInterrupt` 时把 job 标记为 interrupted/failed，并释放 lock。
-- [ ] JSON final payload 增加 `job_id/status/resumed/plan_signature/tasks_*`。
-- [ ] text progress 首屏或最终摘要显示 job id 和 resumed 状态。
-- [ ] CLI 测试覆盖 `--resume auto`、`--restart`、`--no-resume`、JSON 输出。
+- [x] `handle_index` 在执行前根据 resume policy 创建或恢复 job。
+- [x] `KeyboardInterrupt` 时把 job 标记为 interrupted/failed，并释放 lock。
+- [x] JSON final payload 增加 `job_id/status/resumed/plan_signature/tasks_*`。
+- [x] text progress 首屏或最终摘要显示 job id 和 resumed 状态。
+- [x] CLI 测试覆盖 `--resume auto`、`--restart`、`--no-resume`、JSON 输出。
+
+行业实践调研结论：
+
+- Google Cloud Storage resumable upload/gcloud 的模式是中断后重跑同一命令即可继续；本项目对应保留默认 `--resume auto`，减少长索引中断后的用户操作成本。
+- Kubernetes Job 使用持久 Job 对象和 terminal condition 表达完成/失败；本项目对应每次 CLI index 都写入持久 `job_id/status/metadata`，Ctrl+C 在 SQLite 状态机中落 `failed`，并用 `metadata.execution_state=interrupted` 表达中断语义。
+- AWS CLI 将机器可读 JSON 保持在 stdout，错误/进度走 stderr；本项目继续保证 `--format json` 只输出单个最终 payload，动态进度和中断摘要不污染 JSON。
+- `argparse` 的互斥参数组用于把 `--resume`、`--restart`、`--no-resume` 的语义固定在 parser 层；AR1-02 继续沿用 AR0-03 的互斥契约。
+
+完成记录：
+
+- `active_knowledge_server/cli.py` 新增 `IndexJobContext` 和 CLI job 编排 helpers：incremental local 会先生成 plan/signature/task count，再按 `--resume auto`、`--resume JOB_ID`、`--restart`、`--no-resume` 创建或恢复 `SQLiteJobStore` 中的 index job。
+- CLI index 执行期间会获取 `INDEX_JOB_LOCK_ID`，通过 progress callback 写入 `last_phase/last_path/global_*` 并 heartbeat lock；正常完成时推进到 `ready/partial_ready`，异常或 Ctrl+C 时 best-effort 标记 `failed` 并释放 lock。
+- full index 暂无可恢复 plan signature，因此本轮只创建新的持久 job，不支持 `--resume JOB_ID` 续建；真正 full staging/resume 留给 R6。
+- `IncrementalIndexPipeline.run(...)` 新增可选 `plan` 参数，使 CLI 能先 plan 再 job 化执行，避免为了 signature 扫描两遍。
+- `tests/unit/test_cli.py` 增加/更新 JSON、`--no-resume --job-id`、中断后 `--resume auto`、`--restart` supersede 旧 job 的覆盖，并验证 jobs SQLite 中的状态和 metadata。
 
 验收标准：
 

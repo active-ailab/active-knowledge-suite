@@ -8,6 +8,7 @@ import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, TextIO, cast
@@ -55,7 +56,9 @@ from active_knowledge_server.indexing import (
     CodeIndexer,
     DocumentIndexer,
     IncrementalIndexPipeline,
+    IncrementalIndexPlan,
     IncrementalIndexResult,
+    IndexProgressCallback,
     IndexProgressEvent,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
@@ -67,7 +70,15 @@ from active_knowledge_server.indexing import (
     noop_progress_callback,
     utc_timestamp,
 )
-from active_knowledge_server.indexing.jobs import RUNNING_JOB_STATUSES
+from active_knowledge_server.indexing.jobs import (
+    INDEX_JOB_LOCK_ID,
+    RESUMABLE_INDEX_JOB_STATUSES,
+    RUNNING_JOB_STATUSES,
+    JobLockConflictError,
+    JobStateTransitionError,
+    SQLiteJobStore,
+    lock_expired,
+)
 from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
 from active_knowledge_server.models import QueryResult, Warning
 from active_knowledge_server.models.responses import QUERY_RESULT_SCHEMA_VERSION
@@ -84,7 +95,13 @@ from active_knowledge_server.security.config import (
     validate_startup_security,
 )
 from active_knowledge_server.server import build_server_app, server_name
-from active_knowledge_server.storage import StorageWriteRequest, StorageWriteTarget
+from active_knowledge_server.storage import (
+    ALL_SCOPE,
+    JobRecord,
+    StorageMetadata,
+    StorageWriteRequest,
+    StorageWriteTarget,
+)
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
@@ -99,8 +116,32 @@ _TRANSPORT_CHOICES = ("stdio", "streamable-http", "http")
 _FORMAT_CHOICES = ("text", "json")
 _INDEX_JOB_CONTRACT_SCHEMA_VERSION = "index_job_contract.v1"
 _INDEX_RESUME_POLICY_SCHEMA_VERSION = "index_resume_policy.v1"
+_INDEX_JOB_LOCK_TTL_SECONDS = 24 * 60 * 60
 IndexOutputMode = Literal["json_final", "text_dynamic", "text_plain"]
 IndexProgressOutputMode = Literal["none", "text_dynamic", "text_plain"]
+
+
+@dataclass
+class IndexJobContext:
+    """Runtime context for a persisted CLI index job."""
+
+    store: SQLiteJobStore
+    job: JobRecord
+    resumed: bool
+    plan_signature: dict[str, object] | None
+    plan_signature_digest: str | None
+    tasks_total: int | None
+    tasks_applied: int | None = 0
+    tasks_skipped: int | None = 0
+    tasks_failed: int | None = 0
+
+
+class IndexCommandInterrupted(KeyboardInterrupt):
+    """KeyboardInterrupt carrying the final CLI payload for a persisted job."""
+
+    def __init__(self, payload: Mapping[str, object]) -> None:
+        super().__init__("index interrupted")
+        self.payload = dict(payload)
 
 
 def storage_write_target_for_cli_target(target: str) -> StorageWriteTarget:
@@ -1001,12 +1042,16 @@ def handle_index(args: argparse.Namespace) -> int:
                     resume_policy=resume_policy,
                     progress_callback=progress_callback,
                 )
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         if reporter is not None:
             reporter.emit_interrupt_summary()
+        interrupted_payload: Mapping[str, object] | None = (
+            exc.payload if isinstance(exc, IndexCommandInterrupted) else None
+        )
         if args.format == "json":
             print_json(
-                {
+                interrupted_payload
+                or {
                     "command": "index",
                     "status": "interrupted",
                     "message": "Indexing was interrupted before completion.",
@@ -1016,7 +1061,22 @@ def handle_index(args: argparse.Namespace) -> int:
                     ),
                 }
             )
+        elif interrupted_payload is not None:
+            job = interrupted_payload.get("job")
+            if isinstance(job, Mapping) and job.get("job_id"):
+                print(f"Job id: {job['job_id']}")
+                print(f"Resumed: {job.get('resumed', False)}")
         return 130
+    except JobLockConflictError as exc:
+        return emit_command_blocked(
+            args,
+            tool_name="index",
+            code="index.job_lock_active",
+            message=str(exc),
+            suggested_action=(
+                "Wait for the running index job to finish, or retry after the lock expires."
+            ),
+        )
 
     if args.format == "json":
         print_json(payload)
@@ -1024,13 +1084,19 @@ def handle_index(args: argparse.Namespace) -> int:
         print(f"Index completed: {payload['mode']} ({payload['source']})")
         print(f"Target: {payload['target']}")
         print(f"Workdir: {summary['workdir']}")
-        result_status = payload["result"].get("result_status", "ready")
+        result_payload = payload.get("result")
+        result_status = (
+            result_payload.get("result_status", "ready")
+            if isinstance(result_payload, Mapping)
+            else "ready"
+        )
         print(f"Result status: {result_status}")
         job = payload.get("job")
         if isinstance(job, dict):
             print(f"Resume policy: {job['resume_policy']['mode']}")
             if job.get("job_id"):
                 print(f"Job id: {job['job_id']}")
+                print(f"Resumed: {job.get('resumed', False)}")
     return 0
 
 
@@ -1042,17 +1108,63 @@ def _run_index_command(
     target: str,
     source: str,
     resume_policy: Mapping[str, object],
-    progress_callback,
+    progress_callback: IndexProgressCallback,
 ) -> dict[str, object]:
     """Execute the index command and return the final payload."""
 
     if mode == "incremental" and target == "local":
         pipeline = IncrementalIndexPipeline(resolved.model, cwd=Path.cwd())
-        result = pipeline.run(
+        plan = pipeline.plan(
             snapshot_id=CURRENT_SNAPSHOT_ID,
             source=cast(Any, source),
             progress_callback=progress_callback,
         )
+        job_context = prepare_incremental_index_job(
+            resolved,
+            plan=plan,
+            mode=mode,
+            target=target,
+            source=source,
+            resume_policy=resume_policy,
+        )
+        job_progress_callback = build_index_job_progress_callback(
+            job_context,
+            progress_callback=progress_callback,
+        )
+        try:
+            result = pipeline.run(
+                snapshot_id=CURRENT_SNAPSHOT_ID,
+                source=cast(Any, source),
+                progress_callback=job_progress_callback,
+                plan=plan,
+            )
+        except KeyboardInterrupt:
+            mark_index_job_interrupted(job_context)
+            raise IndexCommandInterrupted(
+                {
+                    "command": "index",
+                    "status": "interrupted",
+                    "message": "Indexing was interrupted before completion.",
+                    "job": build_index_job_payload(
+                        resume_policy=resume_policy,
+                        status="interrupted",
+                        result=None,
+                        mode=mode,
+                        target=target,
+                        source=source,
+                        job_context=job_context,
+                    ),
+                    "config": summary,
+                }
+            ) from None
+        except Exception:
+            mark_index_job_failed(job_context, error_summary="index command failed")
+            raise
+        else:
+            finalize_index_job(job_context, result_status=result.result_status)
+        finally:
+            job_context.store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job_context.job.job_id)
+
         return {
             "command": "index",
             "status": "ok",
@@ -1068,17 +1180,59 @@ def _run_index_command(
                 mode=mode,
                 target=target,
                 source=source,
+                job_context=job_context,
             ),
             "config": summary,
         }
 
-    full_result = run_full_index(
+    job_context = prepare_nonresumable_index_job(
         resolved,
+        mode=mode,
         target=target,
         source=source,
-        operation_mode="baseline_publish" if target == "baseline" else "normal",
+        resume_policy=resume_policy,
+    )
+    job_progress_callback = build_index_job_progress_callback(
+        job_context,
         progress_callback=progress_callback,
     )
+    try:
+        full_result = run_full_index(
+            resolved,
+            target=target,
+            source=source,
+            operation_mode="baseline_publish" if target == "baseline" else "normal",
+            progress_callback=job_progress_callback,
+        )
+    except KeyboardInterrupt:
+        mark_index_job_interrupted(job_context)
+        raise IndexCommandInterrupted(
+            {
+                "command": "index",
+                "status": "interrupted",
+                "message": "Indexing was interrupted before completion.",
+                "job": build_index_job_payload(
+                    resume_policy=resume_policy,
+                    status="interrupted",
+                    mode=mode,
+                    target=target,
+                    source=source,
+                    job_context=job_context,
+                ),
+                "config": summary,
+            }
+        ) from None
+    except Exception:
+        mark_index_job_failed(job_context, error_summary="index command failed")
+        raise
+    else:
+        finalize_index_job(
+            job_context,
+            result_status=str(full_result.get("result_status", "ready")),
+        )
+    finally:
+        job_context.store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job_context.job.job_id)
+
     return {
         "command": "index",
         "status": "ok",
@@ -1094,6 +1248,7 @@ def _run_index_command(
             mode=mode,
             target=target,
             source=source,
+            job_context=job_context,
         ),
         "config": summary,
     }
@@ -1108,12 +1263,15 @@ def build_index_job_payload(
     mode: str | None = None,
     target: str | None = None,
     source: str | None = None,
+    job_context: IndexJobContext | None = None,
 ) -> dict[str, object]:
     """Build the stable AR0-03 final JSON job contract."""
 
     plan = getattr(result, "plan", None)
-    plan_signature: dict[str, object] | None = None
-    tasks_total: int | None = None
+    plan_signature: dict[str, object] | None = (
+        None if job_context is None else job_context.plan_signature
+    )
+    tasks_total: int | None = None if job_context is None else job_context.tasks_total
     if plan is not None and config is not None:
         signature = make_index_plan_signature(
             plan,
@@ -1126,19 +1284,449 @@ def build_index_job_payload(
 
     return {
         "schema_version": _INDEX_JOB_CONTRACT_SCHEMA_VERSION,
-        "job_id": resume_policy.get("planned_job_id"),
+        "job_id": (
+            resume_policy.get("planned_job_id")
+            if job_context is None
+            else job_context.job.job_id
+        ),
         "status": status,
-        "resumed": False,
-        "resume_policy": dict(resume_policy),
+        "resumed": False if job_context is None else job_context.resumed,
+        "resume_policy": cast(
+            StorageMetadata,
+            {str(key): value for key, value in resume_policy.items()},
+        ),
         "mode": mode,
         "target": target,
         "source": source,
         "plan_signature": plan_signature,
         "tasks_total": tasks_total,
-        "tasks_applied": None,
-        "tasks_skipped": None,
-        "tasks_failed": None,
+        "tasks_applied": None if job_context is None else job_context.tasks_applied,
+        "tasks_skipped": None if job_context is None else job_context.tasks_skipped,
+        "tasks_failed": None if job_context is None else job_context.tasks_failed,
     }
+
+
+def prepare_incremental_index_job(
+    resolved: ResolvedConfig,
+    *,
+    plan: IncrementalIndexPlan,
+    mode: str,
+    target: str,
+    source: str,
+    resume_policy: Mapping[str, object],
+) -> IndexJobContext:
+    """Create or resume the persisted job for one incremental local index run."""
+
+    paths = configured_sqlite_paths(resolved.model, cwd=Path.cwd())
+    migrate_sqlite_store(paths["jobs"], target="jobs")
+    store = SQLiteJobStore(paths["jobs"])
+    signature = make_index_plan_signature(
+        plan,
+        config=resolved.model,
+        mode=mode,
+        target=target,
+    )
+    tasks_total = len(make_index_task_list(plan))
+    metadata_match = {
+        "requested_mode": mode,
+        "requested_target": target,
+        "requested_source": source,
+    }
+    metadata = build_index_job_metadata(
+        resume_policy=resume_policy,
+        mode=mode,
+        target=target,
+        source=source,
+        plan_signature=signature.to_dict(),
+        tasks_total=tasks_total,
+    )
+    policy_mode = str(resume_policy.get("mode", "auto"))
+    resumed = False
+    job: JobRecord | None = None
+    planned_job_id = _optional_nonempty_text(resume_policy.get("planned_job_id"))
+
+    if policy_mode == "auto":
+        job = store.find_resumable_index_job(
+            plan_signature=signature.digest,
+            write_target=storage_write_target_for_cli_target(target),
+            snapshot_id=plan.snapshot_id,
+            profile_id=ALL_SCOPE,
+            metadata_match=metadata_match,
+        )
+        if job is not None:
+            resumed = True
+    elif policy_mode == "job_id":
+        resume_job_id = _optional_nonempty_text(resume_policy.get("resume_job_id"))
+        if resume_job_id is None:
+            raise ConfigError("--resume JOB_ID requires a non-empty job id.")
+        job = load_explicit_resumable_index_job(
+            store,
+            job_id=resume_job_id,
+            plan_signature_digest=signature.digest,
+            metadata_match=metadata_match,
+        )
+        resumed = True
+    elif policy_mode == "restart":
+        job = store.find_resumable_index_job(
+            plan_signature=signature.digest,
+            write_target=storage_write_target_for_cli_target(target),
+            snapshot_id=plan.snapshot_id,
+            profile_id=ALL_SCOPE,
+            metadata_match=metadata_match,
+        )
+        if job is not None:
+            store.supersede_job(
+                job.job_id,
+                superseded_by_job_id=planned_job_id,
+                reason="restart",
+            )
+        job = None
+    elif policy_mode != "disabled":
+        raise ConfigError(f"unsupported index resume policy: {policy_mode}")
+
+    if job is not None and job.status in {"failed", "partial_ready"}:
+        job = store.retry_job(job.job_id)
+    if job is not None:
+        resume_state = store.resume_job(job.job_id, increment_resume_count=resumed)
+        job = resume_state.job
+        metadata = {
+            **metadata,
+            "resume_count": job.metadata.get("resume_count", 0),
+            "resumed_from_status": job.status,
+        }
+        job = store.transition_or_update_running_metadata(
+            job.job_id,
+            metadata_update=metadata,
+        )
+    else:
+        job = store.create_job(
+            job_id=planned_job_id,
+            job_type="index",
+            write_target=storage_write_target_for_cli_target(target),
+            snapshot_id=plan.snapshot_id,
+            profile_id=ALL_SCOPE,
+            metadata=metadata,
+        )
+
+    store.acquire_lock(
+        INDEX_JOB_LOCK_ID,
+        owner_job_id=job.job_id,
+        ttl_seconds=_INDEX_JOB_LOCK_TTL_SECONDS,
+        metadata={
+            "job_type": "index",
+            "requested_mode": mode,
+            "requested_target": target,
+            "requested_source": source,
+            "plan_signature": signature.digest,
+        },
+    )
+    job = store.transition_or_update_running_metadata(
+        job.job_id,
+        "discovering",
+        metadata_update={
+            "execution_state": "running",
+            "started_at": utc_timestamp(),
+            "last_phase": "plan",
+            "tasks_total": tasks_total,
+            "tasks_applied": 0,
+            "tasks_skipped": 0,
+            "tasks_failed": 0,
+        },
+    )
+    return IndexJobContext(
+        store=store,
+        job=job,
+        resumed=resumed,
+        plan_signature=signature.to_dict(),
+        plan_signature_digest=signature.digest,
+        tasks_total=tasks_total,
+        tasks_applied=0,
+        tasks_skipped=0,
+        tasks_failed=0,
+    )
+
+
+def prepare_nonresumable_index_job(
+    resolved: ResolvedConfig,
+    *,
+    mode: str,
+    target: str,
+    source: str,
+    resume_policy: Mapping[str, object],
+) -> IndexJobContext:
+    """Create a persisted job for an index path that has no resume plan yet."""
+
+    if str(resume_policy.get("mode", "auto")) == "job_id":
+        raise ConfigError("--resume JOB_ID is only supported for incremental local indexing.")
+    paths = configured_sqlite_paths(resolved.model, cwd=Path.cwd())
+    migrate_sqlite_store(paths["jobs"], target="jobs")
+    store = SQLiteJobStore(paths["jobs"])
+    planned_job_id = _optional_nonempty_text(resume_policy.get("planned_job_id"))
+    job = store.create_job(
+        job_id=planned_job_id,
+        job_type="index",
+        write_target=storage_write_target_for_cli_target(target),
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        profile_id=ALL_SCOPE,
+        metadata=build_index_job_metadata(
+            resume_policy=resume_policy,
+            mode=mode,
+            target=target,
+            source=source,
+            plan_signature=None,
+            tasks_total=None,
+        ),
+    )
+    store.acquire_lock(
+        INDEX_JOB_LOCK_ID,
+        owner_job_id=job.job_id,
+        ttl_seconds=_INDEX_JOB_LOCK_TTL_SECONDS,
+        metadata={
+            "job_type": "index",
+            "requested_mode": mode,
+            "requested_target": target,
+            "requested_source": source,
+        },
+    )
+    job = store.transition_or_update_running_metadata(
+        job.job_id,
+        "discovering",
+        metadata_update={
+            "execution_state": "running",
+            "started_at": utc_timestamp(),
+            "last_phase": "discovering",
+            "tasks_total": None,
+            "tasks_applied": None,
+            "tasks_skipped": None,
+            "tasks_failed": None,
+        },
+    )
+    return IndexJobContext(
+        store=store,
+        job=job,
+        resumed=False,
+        plan_signature=None,
+        plan_signature_digest=None,
+        tasks_total=None,
+        tasks_applied=None,
+        tasks_skipped=None,
+        tasks_failed=None,
+    )
+
+
+def build_index_job_metadata(
+    *,
+    resume_policy: Mapping[str, object],
+    mode: str,
+    target: str,
+    source: str,
+    plan_signature: Mapping[str, object] | None,
+    tasks_total: int | None,
+) -> StorageMetadata:
+    """Build persisted metadata for a CLI-owned index job."""
+
+    metadata: StorageMetadata = {
+        "schema_version": _INDEX_JOB_CONTRACT_SCHEMA_VERSION,
+        "execution_state": "running",
+        "requested_mode": mode,
+        "requested_target": target,
+        "requested_source": source,
+        "resume_policy": cast(
+            StorageMetadata,
+            {str(key): value for key, value in resume_policy.items()},
+        ),
+        "tasks_total": tasks_total,
+        "tasks_applied": 0,
+        "tasks_skipped": 0,
+        "tasks_failed": 0,
+    }
+    if plan_signature is not None:
+        metadata["plan_signature"] = str(plan_signature["digest"])
+        metadata["plan_signature_payload"] = cast(
+            StorageMetadata,
+            {str(key): value for key, value in plan_signature.items()},
+        )
+    return metadata
+
+
+def load_explicit_resumable_index_job(
+    store: SQLiteJobStore,
+    *,
+    job_id: str,
+    plan_signature_digest: str,
+    metadata_match: Mapping[str, object],
+) -> JobRecord:
+    """Load and validate an explicitly requested resumable job."""
+
+    job = store.get_job(job_id)
+    if job is None:
+        raise ConfigError(f"index job {job_id!r} does not exist.")
+    if job.job_type != "index":
+        raise ConfigError(f"job {job_id!r} is not an index job.")
+    if job.status not in RESUMABLE_INDEX_JOB_STATUSES:
+        raise ConfigError(f"index job {job_id!r} is not resumable from status {job.status!r}.")
+    if str(job.metadata.get("plan_signature", "")) != plan_signature_digest:
+        raise ConfigError(
+            f"index job {job_id!r} is not compatible with the current index plan."
+        )
+    for key, expected in metadata_match.items():
+        if job.metadata.get(key) != expected:
+            raise ConfigError(
+                f"index job {job_id!r} does not match current {key}={expected!r}."
+            )
+    if job.metadata.get("execution_state") == "superseded":
+        raise ConfigError(f"index job {job_id!r} was superseded and cannot be resumed.")
+    if bool(job.metadata.get("cancelled")):
+        raise ConfigError(f"index job {job_id!r} was cancelled and cannot be resumed.")
+    lock = store.get_lock(INDEX_JOB_LOCK_ID)
+    if lock is not None and not lock_expired(lock.expires_at, datetime.now(UTC)):
+        raise JobLockConflictError(
+            f"index lock is still active for job {lock.owner_job_id!r} "
+            f"until {lock.expires_at or 'never'}"
+        )
+    return job
+
+
+def build_index_job_progress_callback(
+    job_context: IndexJobContext,
+    *,
+    progress_callback: IndexProgressCallback,
+) -> IndexProgressCallback:
+    """Wrap progress rendering with light job metadata and lock heartbeats."""
+
+    last_heartbeat_at = 0.0
+
+    def handle(event: IndexProgressEvent) -> None:
+        nonlocal last_heartbeat_at
+        progress_callback(event)
+        now = time.monotonic()
+        phase = str(event.phase)
+        current_path = event.current_path
+        if now - last_heartbeat_at < 5 and phase != "done":
+            return
+        last_heartbeat_at = now
+        metadata_update: StorageMetadata = {
+            "execution_state": "running",
+            "last_phase": phase,
+            "last_message": event.message,
+            "global_total": event.global_total,
+            "global_done": event.global_done,
+        }
+        if current_path is not None:
+            metadata_update["last_path"] = current_path
+        try:
+            job_context.store.transition_or_update_running_metadata(
+                job_context.job.job_id,
+                metadata_update=metadata_update,
+            )
+            job_context.store.heartbeat_lock(
+                INDEX_JOB_LOCK_ID,
+                owner_job_id=job_context.job.job_id,
+                ttl_seconds=_INDEX_JOB_LOCK_TTL_SECONDS,
+                metadata_update=metadata_update,
+            )
+        except (JobLockConflictError, JobStateTransitionError, KeyError):
+            return
+
+    return handle
+
+
+def finalize_index_job(job_context: IndexJobContext, *, result_status: str) -> None:
+    """Transition a CLI index job to ready or partial_ready and update task counts."""
+
+    _advance_index_job_to_reporting(job_context)
+    terminal_status = "partial_ready" if result_status == "partial_ready" else "ready"
+    tasks_failed = 0 if terminal_status == "ready" else None
+    tasks_applied = (
+        job_context.tasks_total
+        if terminal_status == "ready"
+        else job_context.tasks_applied
+    )
+    metadata_update = {
+        "execution_state": "complete",
+        "finished_at": utc_timestamp(),
+        "tasks_total": job_context.tasks_total,
+        "tasks_applied": tasks_applied,
+        "tasks_skipped": job_context.tasks_skipped,
+        "tasks_failed": tasks_failed,
+    }
+    job_context.job = job_context.store.transition_job(
+        job_context.job.job_id,
+        cast(Any, terminal_status),
+        metadata_update=metadata_update,
+    )
+    job_context.tasks_applied = tasks_applied
+    job_context.tasks_failed = tasks_failed
+
+
+def mark_index_job_interrupted(job_context: IndexJobContext) -> None:
+    """Mark a CLI index job as interrupted and release its lock."""
+
+    try:
+        mark_index_job_failed(
+            job_context,
+            error_summary="interrupted",
+            execution_state="interrupted",
+        )
+    finally:
+        job_context.store.release_lock(
+            INDEX_JOB_LOCK_ID,
+            owner_job_id=job_context.job.job_id,
+        )
+
+
+def mark_index_job_failed(
+    job_context: IndexJobContext,
+    *,
+    error_summary: str,
+    execution_state: str = "failed",
+) -> None:
+    """Best-effort transition of a CLI index job to failed."""
+
+    job = job_context.store.get_job(job_context.job.job_id)
+    if job is None or job.status in {"ready", "failed", "partial_ready"}:
+        return
+    job_context.job = job_context.store.transition_job(
+        job.job_id,
+        "failed",
+        error_summary=error_summary,
+        metadata_update={
+            "execution_state": execution_state,
+            "finished_at": utc_timestamp(),
+            "tasks_total": job_context.tasks_total,
+            "tasks_applied": job_context.tasks_applied,
+            "tasks_skipped": job_context.tasks_skipped,
+            "tasks_failed": job_context.tasks_failed,
+        },
+    )
+
+
+def _advance_index_job_to_reporting(job_context: IndexJobContext) -> None:
+    order = ("discovering", *RUNNING_JOB_STATUSES[1:])
+    job = job_context.store.get_job(job_context.job.job_id)
+    if job is None:
+        raise KeyError(f"job {job_context.job.job_id!r} does not exist")
+    if job.status == "reporting":
+        return
+    if job.status == "pending":
+        remaining = order
+    elif job.status in order:
+        remaining = order[order.index(job.status) + 1 :]
+    else:
+        raise JobStateTransitionError(f"job {job.job_id!r} cannot report from {job.status!r}")
+    for status in remaining:
+        job_context.job = job_context.store.transition_or_update_running_metadata(
+            job_context.job.job_id,
+            cast(Any, status),
+            metadata_update={"last_phase": status},
+        )
+
+
+def _optional_nonempty_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def handle_rebuild(args: argparse.Namespace) -> int:
