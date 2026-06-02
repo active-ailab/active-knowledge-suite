@@ -12,10 +12,9 @@ from pydantic import BaseModel, Field
 
 from active_knowledge_server import __version__
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig, Transport
-from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
+from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
 from active_knowledge_server.models.responses import Warning
-from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.security.audit import AuditLogger
 
 MCP_INTERFACE_SCHEMA_VERSION: Final = "mcp_interface.v1"
@@ -36,6 +35,7 @@ OPS_TOOL_NAMES: Final[tuple[str, ...]] = (
 	"ops_index_status",
 	"ops_start_index",
 	"ops_cancel_index",
+	"ops_resume_index",
 	"ops_list_profiles",
 	"ops_list_sources",
 )

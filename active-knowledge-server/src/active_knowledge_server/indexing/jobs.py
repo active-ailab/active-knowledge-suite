@@ -66,6 +66,10 @@ class JobLockConflictError(RuntimeError):
     """Raised when another job owns an unexpired write lock."""
 
 
+class IndexJobCancelled(RuntimeError):
+    """Raised when a cooperative cancel request is observed before a new task."""
+
+
 @dataclass(frozen=True)
 class JobLockLease:
     """One SQLite-backed job lock lease."""
@@ -246,6 +250,12 @@ class SQLiteJobStore:
                 (job_id,),
             ).fetchall()
         return {str(row["checkpoint_key"]): str(row["checkpoint_value"]) for row in rows}
+
+    def cancel_requested(self, job_id: str) -> bool:
+        """Return True when a job has been marked for cooperative cancellation."""
+
+        job = self.get_job(job_id)
+        return bool(job is not None and job.metadata.get("cancelled"))
 
     def find_resumable_index_job(
         self,
@@ -653,6 +663,8 @@ class IndexJobRunner:
 
             self._store.transition_job(job_id, "parsing")
             for path in files:
+                if self._store.cancel_requested(job_id):
+                    raise IndexJobCancelled(f"index job {job_id!r} was cancelled")
                 try:
                     parse_file(path)
                 except Exception as exc:  # noqa: BLE001 - parser errors are per-file degradations.

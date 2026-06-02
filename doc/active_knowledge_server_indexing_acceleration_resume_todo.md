@@ -333,7 +333,7 @@ TODO：
 
 ### AR1-04 MCP ops 与 CLI job 语义对齐
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR1-01`、`AR1-02`
@@ -341,10 +341,25 @@ TODO：
 
 TODO：
 
-- [ ] `ops_start_index` 创建的 job metadata 与 CLI 创建的 job 字段一致。
-- [ ] `ops_index_status` 返回 task 级统计字段，暂无 task 表时从 checkpoint/KV 聚合。
-- [ ] `ops_cancel_index` 标记 cancel 后让后续 pipeline 检测到并停止未开始 task。
-- [ ] 预留 `ops_resume_index(job_id)` 工具或在 `ops_start_index` 支持 resume 参数。
+- [x] `ops_start_index` 创建的 job metadata 与 CLI 创建的 job 字段一致。
+- [x] `ops_index_status` 返回 task 级统计字段，暂无 task 表时从 checkpoint/KV 聚合。
+- [x] `ops_cancel_index` 标记 cancel 后让后续 pipeline 检测到并停止未开始 task。
+- [x] 预留 `ops_resume_index(job_id)` 工具或在 `ops_start_index` 支持 resume 参数。
+
+行业实践调研结论：
+
+- Spark Structured Streaming 把 checkpoint location 作为恢复边界，并限制同一 checkpoint 下 query/source/schema 变化；本项目对应让 MCP job metadata 沿用 CLI 的 `schema_version`、`requested_mode/target/source`、`resume_policy` 和后续 `plan_signature` 字段，保证不同入口解释同一 job 时不会分叉。参考：https://spark.apache.org/docs/3.5.7/structured-streaming-programming-guide.html
+- Apache Flink checkpoint 依赖 durable storage 保存 state，并把 checkpoint 作为恢复 cut-off；本项目继续坚持 task `applied` checkpoint 后写，MCP status 在没有 task 表时从 `job_checkpoint` KV 聚合 task 统计。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/checkpointing/
+- Kubernetes Job suspend/resume 与 graceful termination 的语义是保留 Job 状态，由 controller/进程在边界协作停止；本项目对应把 `ops_cancel_index` 设计为协作式取消：metadata 标记 `cancelled=true`，runner/pipeline 在下一个 task 边界停止未开始 task，不破坏已提交事务。参考：https://kubernetes.io/docs/concepts/workloads/controllers/job/
+
+完成记录：
+
+- `active_knowledge_server/mcp/tools.py` 的 `ops_start_index` 新增 `resume="auto"|"disabled"` 参数，默认 auto；创建的 job metadata 写入 `schema_version=index_job_contract.v1`、`requested_mode`、`requested_target=overlay`、`requested_source`、`resume_policy`、`tasks_total/applied/skipped/failed` 等 CLI 同名字段，并把 `snapshot_id/profile_id` 写入 job record 主字段。
+- 新增 `ops_resume_index(job_id)` gated ops 工具，支持把 `failed/partial_ready` 的非取消、非 superseded index job retry 回 `pending`，并写入 `resume_count` 与显式 `resume_policy.mode=job_id`。
+- `ops_index_status` 的 job item 新增 `task_stats`，优先读 CLI metadata 字段，同时扫描 `job_checkpoint` 的 `task:collected:*` / `task:applied:*` KV，聚合 `checkpoint_counts`、`applied_by_phase`、`collected_by_phase`；payload 新增 `task_status_counts`。
+- `SQLiteJobStore` 新增 `cancel_requested(job_id)`，`IndexJobRunner` 和 `IncrementalIndexPipeline` 的 task 边界会检测取消标记并停止未开始 task；已有 apply 事务不被回滚或篡改。
+- `active_knowledge_server/mcp/schemas.py` 的 `OPS_TOOL_NAMES` 暴露 `ops_resume_index`。
+- `tests/unit/test_mcp_ops_tools.py` 覆盖 MCP job metadata 对齐、checkpoint task stats 聚合、显式 resume；`tests/unit/test_index_jobs.py` 覆盖取消后 runner 不处理后续未开始文件。
 
 验收标准：
 

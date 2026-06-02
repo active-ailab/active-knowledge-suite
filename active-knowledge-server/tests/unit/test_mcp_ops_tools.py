@@ -3,6 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
+from active_knowledge_server.indexing.jobs import (
+    SQLiteJobStore,
+    record_task_applied_checkpoint,
+)
+from active_knowledge_server.indexing.tasks import IndexTask
 from active_knowledge_server.mcp import create_fastmcp_app
 from active_knowledge_server.mcp.schemas import OPS_TOOL_NAMES
 from active_knowledge_server.storage import ProfileRecord, SourceRecord, StorageWriteRequest
@@ -174,6 +179,11 @@ def test_ops_tools_support_start_conflict_cancel_and_inventory_views(tmp_path: P
 
     assert first.status == "accepted"
     assert first.payload["job"]["status"] == "pending"
+    assert first.payload["job"]["snapshot_id"] == "snapshot:1"
+    assert first.payload["job"]["profile_id"] == "watch"
+    assert first.payload["job"]["metadata"]["schema_version"] == "index_job_contract.v1"
+    assert first.payload["job"]["metadata"]["requested_target"] == "overlay"
+    assert first.payload["job"]["metadata"]["resume_policy"]["mode"] == "auto"
     assert conflict.status == "conflict"
     assert profiles.status == "ok"
     assert profiles.items[0]["profile_id"] == "watch"
@@ -181,8 +191,65 @@ def test_ops_tools_support_start_conflict_cancel_and_inventory_views(tmp_path: P
     assert sources.items[0]["source_id"] == "source:workspace"
     assert status.status == "ok"
     assert status.items[0]["job_id"] == job_id
+    assert status.items[0]["task_stats"]["tasks_applied"] == 0
     assert status.payload["job_status_counts"]["pending"] == 1
     assert cancel.status == "ok"
     assert cancel.payload["job"]["status"] == "failed"
     assert cancel.payload["job"]["metadata"]["cancelled"] is True
     assert retry.status == "accepted"
+    assert retry.payload["job"]["job_id"] != job_id
+
+
+def test_ops_index_status_aggregates_task_checkpoints(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path, expose_ops_tools=True)
+    _prepare_store(resolved, tmp_path)
+
+    runtime = create_fastmcp_app(resolved, cwd=tmp_path)
+    handlers = {tool.name: tool.handler for tool in runtime.inventory.tools}
+    start = handlers["ops_start_index"]()
+    job_id = str(start.payload["job"]["job_id"])
+
+    paths = configured_sqlite_paths(resolved.model, cwd=tmp_path)
+    store = SQLiteJobStore(paths["jobs"])
+    record_task_applied_checkpoint(
+        store,
+        job_id,
+        IndexTask(
+            task_key="doc:apply:guide.md",
+            phase="doc_apply",
+            source_kind="docs",
+            operation="apply",
+            relative_path="guide.md",
+            input_hash="hash:guide",
+            schema_version="doc_indexer.v1",
+        ),
+    )
+
+    status = handlers["ops_index_status"](limit=1)
+
+    assert status.status == "ok"
+    assert status.items[0]["task_stats"]["tasks_applied"] == 1
+    assert status.items[0]["task_stats"]["applied_by_phase"] == {"doc_apply": 1}
+    assert status.payload["task_status_counts"]["applied"] == 1
+
+
+def test_ops_resume_index_retries_failed_job(tmp_path: Path) -> None:
+    resolved = _resolved_config(tmp_path, expose_ops_tools=True)
+    _prepare_store(resolved, tmp_path)
+
+    runtime = create_fastmcp_app(resolved, cwd=tmp_path)
+    handlers = {tool.name: tool.handler for tool in runtime.inventory.tools}
+    start = handlers["ops_start_index"](resume="disabled")
+    job_id = str(start.payload["job"]["job_id"])
+
+    paths = configured_sqlite_paths(resolved.model, cwd=tmp_path)
+    store = SQLiteJobStore(paths["jobs"])
+    store.transition_job(job_id, "failed", error_summary="interrupted")
+
+    resumed = handlers["ops_resume_index"](job_id)
+
+    assert resumed.status == "accepted"
+    assert resumed.payload["job"]["job_id"] == job_id
+    assert resumed.payload["job"]["status"] == "pending"
+    assert resumed.payload["job"]["metadata"]["resume_count"] == 1
+    assert resumed.payload["job"]["metadata"]["resume_policy"]["mode"] == "job_id"

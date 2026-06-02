@@ -7,6 +7,7 @@ import pytest
 
 from active_knowledge_server.indexing.jobs import (
     INDEX_JOB_LOCK_ID,
+    IndexJobCancelled,
     IndexJobRunner,
     JobLockConflictError,
     JobStateTransitionError,
@@ -121,6 +122,29 @@ def test_job_state_machine_rejects_invalid_transition(tmp_path: Path) -> None:
 
     with pytest.raises(JobStateTransitionError, match="invalid job transition"):
         store.transition_job(job.job_id, "ready")
+
+
+def test_index_runner_stops_unstarted_files_after_cancel(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    runner = IndexJobRunner(store)
+    parsed: list[str] = []
+
+    def parse_file(path: str) -> None:
+        parsed.append(path)
+        if path == "one.c":
+            store.transition_job(
+                job.job_id,
+                "failed",
+                error_summary="cancelled by test",
+                metadata_update={"cancelled": True},
+            )
+
+    with pytest.raises(IndexJobCancelled):
+        runner.run_files(job.job_id, ["one.c", "two.c"], parse_file)
+
+    assert parsed == ["one.c"]
+    assert store.cancel_requested(job.job_id) is True
 
 
 def test_resume_and_retry_preserve_checkpoints(tmp_path: Path) -> None:

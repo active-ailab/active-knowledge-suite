@@ -34,6 +34,7 @@ from active_knowledge_server.indexing.doc_indexer import (
     IndexedDocuments,
 )
 from active_knowledge_server.indexing.jobs import (
+    IndexJobCancelled,
     JobStateTransitionError,
     SQLiteJobStore,
 )
@@ -356,6 +357,8 @@ class _PipelineJobReporter:
         )
 
     def begin_task(self, task_key: str, *, phase: str | None = None) -> None:
+        if self.context.job_store.cancel_requested(self.context.job_id):
+            raise IndexJobCancelled(f"index job {self.context.job_id!r} was cancelled")
         task = _find_index_task(self.tasks, task_key)
         task_phase = phase or (task.phase if task is not None else self._last_phase or "plan")
         metadata_update: dict[str, object] = {
@@ -1003,6 +1006,8 @@ class IncrementalIndexPipeline:
                         message="Flushing code changes to overlay metadata",
                     )
                 writer.flush()
+            except IndexJobCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
                 if job_reporter is not None and current_task_key is not None:
                     job_reporter.task_failed(current_task_key, exc)
@@ -1040,6 +1045,8 @@ class IncrementalIndexPipeline:
                         snapshot_id=snapshot_id,
                         reason="incremental_delete",
                     )
+                except IndexJobCancelled:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     failed = True
                     warnings.append(
@@ -1124,6 +1131,8 @@ class IncrementalIndexPipeline:
                             )
                         )
                     global_done += progress_totals["doc_collect"]
+                except IndexJobCancelled:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     failed = True
                     warnings.append(
@@ -1227,6 +1236,8 @@ class IncrementalIndexPipeline:
                             )
                             if job_reporter is not None:
                                 job_reporter.task_applied(current_doc_task_key)
+                    except IndexJobCancelled:
+                        raise
                     except Exception as exc:  # noqa: BLE001
                         if job_reporter is not None and current_doc_task_key is not None:
                             job_reporter.task_failed(current_doc_task_key, exc)
@@ -1296,6 +1307,8 @@ class IncrementalIndexPipeline:
                 )
                 if job_reporter is not None:
                     job_reporter.task_applied(task_key)
+            except IndexJobCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 if job_reporter is not None:
                     job_reporter.task_failed(task_key, exc)
@@ -1343,6 +1356,8 @@ class IncrementalIndexPipeline:
                 )
                 if job_reporter is not None:
                     job_reporter.task_applied(task_key)
+            except IndexJobCancelled:
+                raise
             except Exception as exc:  # noqa: BLE001
                 if job_reporter is not None:
                     job_reporter.task_failed(task_key, exc)
