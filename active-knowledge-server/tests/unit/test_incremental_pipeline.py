@@ -26,7 +26,9 @@ from active_knowledge_server.indexing import (
 )
 from active_knowledge_server.indexing.jobs import (
     SQLiteJobStore,
+    decode_task_checkpoint,
     record_task_applied_checkpoint,
+    task_checkpoint_key,
 )
 from active_knowledge_server.indexing.pipeline import (
     IndexRunContext,
@@ -68,6 +70,11 @@ class SpyCodeIndexer:
             include_paths=include_paths,
             progress_callback=progress_callback,
         )
+
+
+class FailingCodeApplyPipeline(IncrementalIndexPipeline):
+    def _apply_code_bundle(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("synthetic code apply failure")
 
 
 def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
@@ -871,6 +878,257 @@ int health_bt_init(void)
             names_by_path.setdefault(path, set()).add(item.record.name)
     assert "HEALTH_SHOULD_NOT_APPLY" not in names_by_path["components/health/main.c"]
     assert "BT_INCREMENTAL_READY" in names_by_path["components/health/bt.c"]
+
+
+def test_incremental_pipeline_checkpoints_successful_code_apply_and_delete(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_CHECKPOINTED 3
+
+int health_checkpointed(void)
+{
+    return HEALTH_CHECKPOINTED;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "bt.c").unlink()
+
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    apply_checkpoint = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(tasks["code:apply:components/health/main.c"]),
+        )
+    )
+    delete_checkpoint = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(tasks["code:delete:components/health/bt.c"]),
+        )
+    )
+
+    assert apply_checkpoint is not None
+    assert apply_checkpoint.status == "applied"
+    assert apply_checkpoint.metadata["job_id"] == job.job_id
+    assert apply_checkpoint.metadata["plan_signature"] == signature.digest
+    assert isinstance(apply_checkpoint.metadata["applied_at"], str)
+    assert apply_checkpoint.metadata["relative_path"] == "components/health/main.c"
+    assert apply_checkpoint.metadata["operation"] == "apply"
+    assert apply_checkpoint.metadata["record_counts"]["files"] == 1
+    assert apply_checkpoint.metadata["record_counts"]["chunks"] >= 1
+    assert "compile_db.missing" in apply_checkpoint.metadata["warning_codes"]
+
+    assert delete_checkpoint is not None
+    assert delete_checkpoint.status == "applied"
+    assert delete_checkpoint.metadata["job_id"] == job.job_id
+    assert delete_checkpoint.metadata["operation"] == "delete"
+    assert delete_checkpoint.metadata["relative_path"] == "components/health/bt.c"
+    assert delete_checkpoint.metadata["record_counts"]["files"] == 1
+
+
+def test_incremental_pipeline_checkpoints_successful_doc_apply_and_delete(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    (docs_root / "api" / "actuator.md").write_text(
+        """---
+title: Actuator API
+authority_level: official
+module: actuator
+---
+# Actuator API
+
+## actuator_open
+Open actuator runtime support.
+""",
+        encoding="utf-8",
+    )
+    _metadata_adapter, _vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path, include_docs=True)
+    )
+    (docs_root / "api" / "sensor.md").write_text(
+        """---
+title: Sensor Register API
+authority_level: official
+version: 1.3.0
+module: sensor
+code_symbols:
+  - sensor_open
+tags:
+  - sensor
+---
+# Sensor Register API
+
+## sensor_open
+This update should receive a task checkpoint.
+""",
+        encoding="utf-8",
+    )
+    (docs_root / "api" / "actuator.md").unlink()
+
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    apply_checkpoint = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(tasks["doc:apply:api/sensor.md"]),
+        )
+    )
+    delete_checkpoint = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(tasks["doc:delete:api/actuator.md"]),
+        )
+    )
+
+    assert apply_checkpoint is not None
+    assert apply_checkpoint.status == "applied"
+    assert apply_checkpoint.metadata["job_id"] == job.job_id
+    assert apply_checkpoint.metadata["plan_signature"] == signature.digest
+    assert apply_checkpoint.metadata["operation"] == "apply"
+    assert apply_checkpoint.metadata["relative_path"] == "api/sensor.md"
+    assert (
+        apply_checkpoint.metadata["storage_relative_path"]
+        == "knowledge-sources/api/sensor.md"
+    )
+    assert apply_checkpoint.metadata["record_counts"]["files"] == 1
+    assert apply_checkpoint.metadata["record_counts"]["chunks"] >= 1
+    assert apply_checkpoint.metadata["warning_codes"] == []
+
+    assert delete_checkpoint is not None
+    assert delete_checkpoint.status == "applied"
+    assert delete_checkpoint.metadata["job_id"] == job.job_id
+    assert delete_checkpoint.metadata["operation"] == "delete"
+    assert delete_checkpoint.metadata["relative_path"] == "api/actuator.md"
+    assert (
+        delete_checkpoint.metadata["storage_relative_path"]
+        == "knowledge-sources/api/actuator.md"
+    )
+
+
+def test_incremental_pipeline_does_not_checkpoint_failed_code_apply(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+int health_apply_failure_probe(void)
+{
+    return 5;
+}
+""",
+        encoding="utf-8",
+    )
+    pipeline = FailingCodeApplyPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    failed_task = next(
+        task
+        for task in make_index_task_list(plan)
+        if task.task_key == "code:apply:components/health/main.c"
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "partial_ready"
+    assert result.metadata["tasks"]["failed"] >= 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(failed_task)) is None
 
 
 def test_incremental_pipeline_updates_job_context_metadata(tmp_path: Path) -> None:

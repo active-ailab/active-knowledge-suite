@@ -38,6 +38,7 @@ from active_knowledge_server.indexing.jobs import (
     JobStateTransitionError,
     SQLiteJobStore,
     decode_task_checkpoint,
+    record_task_applied_checkpoint,
     task_checkpoint_key,
 )
 from active_knowledge_server.indexing.profile import (
@@ -889,7 +890,25 @@ class IncrementalIndexPipeline:
                 job_reporter.observe_event(event)
             callback(event)
 
-        def mark_task_applied(task_key: str) -> None:
+        def mark_task_applied(
+            task_key: str,
+            *,
+            checkpoint_metadata: Mapping[str, object] | None = None,
+        ) -> None:
+            if run_context is not None and checkpoint_metadata is not None:
+                task = _find_index_task(tasks, task_key)
+                if task is not None:
+                    record_task_applied_checkpoint(
+                        run_context.job_store,
+                        run_context.job_id,
+                        task,
+                        metadata={
+                            "job_id": run_context.job_id,
+                            "plan_signature": signature.digest,
+                            "applied_at": utc_now(),
+                            **dict(checkpoint_metadata),
+                        },
+                    )
             task_stats["applied"] += 1
             if job_reporter is not None:
                 job_reporter.task_applied(task_key)
@@ -1053,7 +1072,13 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
-                    mark_task_applied(current_task_key)
+                    mark_task_applied(
+                        current_task_key,
+                        checkpoint_metadata=_delete_checkpoint_metadata(
+                            source_kind="code",
+                            relative_path=relative_path,
+                        ),
+                    )
                 for relative_path in plan.changed_code_paths:
                     current_task_key = f"code:apply:{relative_path}"
                     if task_is_skipped(current_task_key):
@@ -1092,7 +1117,18 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
-                    mark_task_applied(current_task_key)
+                    mark_task_applied(
+                        current_task_key,
+                        checkpoint_metadata=_bundle_checkpoint_metadata(
+                            bundle,
+                            source_kind="code",
+                            relative_path=relative_path,
+                            warnings=_warning_codes_for_path(
+                                code_indexed.warnings,
+                                relative_path,
+                            ),
+                        ),
+                    )
                 if progress_totals["code_apply"] > 0:
                     emit(
                         phase="code_apply",
@@ -1167,7 +1203,17 @@ class IncrementalIndexPipeline:
                         current_path=relative_path,
                         message="Applying document changes",
                     )
-                    mark_task_applied(task_key)
+                    mark_task_applied(
+                        task_key,
+                        checkpoint_metadata=_delete_checkpoint_metadata(
+                            source_kind="doc",
+                            relative_path=relative_path,
+                            storage_relative_path=_doc_storage_relative_path(
+                                plan.source_docs_manifest,
+                                relative_path,
+                            ),
+                        ),
+                    )
 
             indexed_docs: IndexedDocuments | None = None
             if doc_paths_to_collect:
@@ -1297,7 +1343,19 @@ class IncrementalIndexPipeline:
                                         total=progress_totals["doc_apply"],
                                     ),
                                 )
-                                mark_task_applied(current_doc_task_key)
+                                mark_task_applied(
+                                    current_doc_task_key,
+                                    checkpoint_metadata=_bundle_checkpoint_metadata(
+                                        new_bundle,
+                                        source_kind="doc",
+                                        relative_path=relative_path,
+                                        storage_relative_path=storage_relative_path,
+                                        warnings=_warning_codes_for_path(
+                                            indexed_docs.warnings,
+                                            storage_relative_path,
+                                        ),
+                                    ),
+                                )
                         if plan.rebuild_vectors or metadata_changed:
                             current_doc_task_key = f"vector:doc:{relative_path}"
                             if task_is_skipped(current_doc_task_key):
@@ -1956,6 +2014,69 @@ def _resume_policy_metadata(
             if value is not None
         }
     }
+
+
+def _delete_checkpoint_metadata(
+    *,
+    source_kind: Literal["code", "doc"],
+    relative_path: str,
+    storage_relative_path: str | None = None,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "operation": "delete",
+        "source_kind": source_kind,
+        "relative_path": relative_path,
+        "record_counts": {
+            "files": 1,
+            "chunks": 0,
+            "entities": 0,
+            "relations": 0,
+            "evidence": 0,
+            "vector_refs": 0,
+        },
+        "warning_codes": [],
+    }
+    if storage_relative_path is not None:
+        metadata["storage_relative_path"] = storage_relative_path
+    return metadata
+
+
+def _bundle_checkpoint_metadata(
+    bundle: _ObjectBundle,
+    *,
+    source_kind: Literal["code", "doc"],
+    relative_path: str,
+    storage_relative_path: str | None = None,
+    warnings: Sequence[str] = (),
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "operation": "apply",
+        "source_kind": source_kind,
+        "relative_path": relative_path,
+        "record_counts": {
+            "files": 1,
+            "chunks": len(bundle.chunks),
+            "entities": len(bundle.entities),
+            "relations": len(bundle.relations),
+            "evidence": len(bundle.evidence),
+            "vector_refs": len(bundle.vectors),
+        },
+        "warning_codes": list(warnings),
+    }
+    if storage_relative_path is not None:
+        metadata["storage_relative_path"] = storage_relative_path
+    return metadata
+
+
+def _warning_codes_for_path(warnings: Sequence[object], relative_path: str) -> tuple[str, ...]:
+    codes = {
+        str(code)
+        for warning in warnings
+        if getattr(warning, "relative_path", None) == relative_path
+        for code in (getattr(warning, "code", None),)
+        if code is not None
+    }
+    return tuple(sorted(codes))
 
 
 def _find_index_task(tasks: Sequence[IndexTask], task_key: str) -> IndexTask | None:

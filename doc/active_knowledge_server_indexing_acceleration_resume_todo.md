@@ -447,7 +447,7 @@ TODO：
 
 ### AR2-03 code/doc apply 成功后 checkpoint
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-01`
@@ -455,11 +455,25 @@ TODO：
 
 TODO：
 
-- [ ] code delete tombstone 成功后写 `code:delete:<path>` applied。
-- [ ] code changed bundle apply 成功后写 `code:apply:<path>` applied。
-- [ ] doc delete tombstone 成功后写 `doc:delete:<path>` applied。
-- [ ] doc changed bundle apply 成功后写 `doc:apply:<path>` applied。
-- [ ] checkpoint value 记录 record counts、warning codes、applied_at、job_id。
+- [x] code delete tombstone 成功后写 `code:delete:<path>` applied。
+- [x] code changed bundle apply 成功后写 `code:apply:<path>` applied。
+- [x] doc delete tombstone 成功后写 `doc:delete:<path>` applied。
+- [x] doc changed bundle apply 成功后写 `doc:apply:<path>` applied。
+- [x] checkpoint value 记录 record counts、warning codes、applied_at、job_id。
+
+行业实践调研结论：
+
+- Spring Batch chunk processing 把 read/process/write 聚合到事务边界，commit interval 到达后才提交；restartable job 会跳过已 `COMPLETED` 的 step。本项目对应把 code/doc task checkpoint 放在 writer transaction 成功返回之后，只跳过已 `applied` task。参考：https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/commit-interval.html 与 https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/restart.html
+- Spark Structured Streaming 对同一 checkpoint location 下的 source/sink/schema 变更有限制；本项目在 checkpoint metadata 中写入 `plan_signature`，继续防止不同 plan 复用旧 applied task。参考：https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+- Flink checkpoint 是可恢复 state 的 point-in-time snapshot；本项目用 task ledger 模拟文件级 offset，未 checkpoint 的 task 允许幂等重放，已 checkpoint 的 task 才可恢复跳过。参考：https://nightlies.apache.org/flink/flink-docs-release-1.20/docs/concepts/stateful-stream-processing/
+- OpenSearch bulk refresh 明确区分“写入已完成”和“搜索可见”；本项目对应只把 metadata writer transaction 成功作为 code/doc `applied` 边界，不把 collect 完成或后续 flush/refresh 文案当作 skip 边界。参考：https://docs.opensearch.org/latest/api-reference/document-apis/bulk/
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 的 code/doc apply 循环在 `_tombstone_deleted_path(...)`、`_apply_code_bundle(...)`、`_apply_doc_bundle(...)` 正常返回后调用 `record_task_applied_checkpoint(...)`，写入 `task:applied:<task_key>`。
+- checkpoint metadata 包含 `job_id`、`plan_signature`、`applied_at`、`operation`、`source_kind`、`relative_path`、可选 `storage_relative_path`、`record_counts` 和 `warning_codes`；不包含源码、正文或大对象。
+- `mark_task_applied(...)` 只有在传入 code/doc checkpoint metadata 时才落 ledger，避免 AR2-04 尚未确认 vector writer flush 边界前提前写 `vector:doc:*` applied。
+- `tests/unit/test_incremental_pipeline.py` 新增 code apply/delete、doc apply/delete 成功 checkpoint 覆盖，并验证 code apply 抛错时不会写 applied checkpoint。
 
 验收标准：
 
