@@ -519,17 +519,29 @@ TODO：
 
 ### AR2-05 中断/崩溃恢复测试
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`TEST`
 - 依赖：`AR2-02`、`AR2-03`、`AR2-04`
 
 TODO：
 
-- [ ] 增加 pipeline 测试：第 N 个 code apply 后抛出 `KeyboardInterrupt`，重跑跳过前 N 个 task。
-- [ ] 增加 pipeline 测试：apply 成功但 checkpoint 前抛错，重跑重复 apply 后结果不重复。
-- [ ] 增加 subprocess 集成测试：SIGTERM 后重跑恢复并 `validate`。
-- [ ] 增加 JSON payload 断言：`resumed=true`、`tasks_skipped > 0`。
+- [x] 增加 pipeline 测试：第 N 个 code apply 后抛出 `KeyboardInterrupt`，重跑跳过前 N 个 task。
+- [x] 增加 pipeline 测试：apply 成功但 checkpoint 前抛错，重跑重复 apply 后结果不重复。
+- [x] 增加 subprocess 集成测试：SIGTERM 后重跑恢复并 `validate`。
+- [x] 增加 JSON payload 断言：`resumed=true`、`tasks_skipped > 0`。
+
+行业实践调研结论：
+
+- Spring Batch 的 restart 语义把“已完成 step 跳过”和“未提交 chunk 重放”区分开；本项目对应分别覆盖“checkpoint 后中断会 skip”和“checkpoint 前中断会 replay”。参考：https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/restart.html 与 https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing.html
+- AWS Durable Execution 将默认重试语义定义为 at-least-once，并明确要求外部写入必须幂等；本项目对应为 `apply 成功但 checkpoint 前中断` 增加重放测试，验证稳定 ID/upsert 能把重复 apply 收敛。参考：https://docs.aws.amazon.com/durable-execution/patterns/best-practices/idempotency/
+- Spark Structured Streaming 要求恢复后沿用同一 checkpoint 身份；本项目对应在 subprocess 恢复测试里复用同一 `job_id/plan_signature`，并断言最终 JSON `resumed=true`、`tasks_skipped>0`。参考：https://spark.apache.org/docs/3.5.0/structured-streaming-programming-guide.html
+
+完成记录：
+
+- `tests/unit/test_incremental_pipeline.py` 新增两条恢复测试：一条在第 2 个 code task checkpoint 后抛出 `KeyboardInterrupt`，重跑后跳过已 checkpoint task；另一条在 `_apply_code_bundle(...)` 成功返回前注入 `KeyboardInterrupt`，验证未 checkpoint task 会重放且逻辑对象不重复。
+- `tests/unit/test_cli.py` 新增子进程集成测试：通过 `sitecustomize.py` 在首个 task checkpoint 后制造可观测停顿，向 `active-kb index --format json` 发送 `SIGTERM`，随后 `--resume auto` 恢复并执行 `validate --format json`。
+- `active_knowledge_server/cli.py` 增加仅对 `index` 命令生效的 `SIGTERM -> KeyboardInterrupt` 翻译上下文，使现有 interrupted job 标记、lock 释放和 JSON 中断 payload 能覆盖进程终止场景，而不需要为测试手工篡改 lock TTL。
 
 验收标准：
 

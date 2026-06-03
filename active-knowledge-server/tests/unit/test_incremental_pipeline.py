@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.connectors.source_docs import SourceDocsScanProgress
@@ -75,6 +77,32 @@ class SpyCodeIndexer:
 class FailingCodeApplyPipeline(IncrementalIndexPipeline):
     def _apply_code_bundle(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("synthetic code apply failure")
+
+
+class InterruptBeforeCodeCheckpointPipeline(IncrementalIndexPipeline):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.interrupted_paths: list[str] = []
+
+    def _apply_code_bundle(
+        self,
+        reader: Any,
+        writer: Any,
+        *,
+        relative_path: str,
+        new_bundle: Any,
+        snapshot_id: str,
+    ) -> None:
+        super()._apply_code_bundle(
+            reader,
+            writer,
+            relative_path=relative_path,
+            new_bundle=new_bundle,
+            snapshot_id=snapshot_id,
+        )
+        self.interrupted_paths.append(relative_path)
+        if len(self.interrupted_paths) == 1:
+            raise KeyboardInterrupt
 
 
 class SpyVectorWriter:
@@ -1151,6 +1179,247 @@ int health_bt_init(void)
             names_by_path.setdefault(path, set()).add(item.record.name)
     assert "HEALTH_SHOULD_NOT_APPLY" not in names_by_path["components/health/main.c"]
     assert "BT_INCREMENTAL_READY" in names_by_path["components/health/bt.c"]
+
+
+def test_incremental_pipeline_resumes_after_checkpointed_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = resolve_model(tmp_path, overrides={"indexing": {"workers": 2}})
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, _pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_INTERRUPT_MAIN 11
+
+int health_interrupt_main(void)
+{
+    return HEALTH_INTERRUPT_MAIN;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "bt.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_INTERRUPT_BT 22
+
+int health_interrupt_bt(void)
+{
+    return HEALTH_INTERRUPT_BT;
+}
+""",
+        encoding="utf-8",
+    )
+    pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    interrupted_task_keys: list[str] = []
+    original_record = record_task_applied_checkpoint
+
+    def interrupt_after_second_code_checkpoint(
+        store_arg: SQLiteJobStore,
+        job_id: str,
+        task,
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        original_record(store_arg, job_id, task, metadata=metadata)
+        if not task.task_key.startswith("code:apply:"):
+            return
+        interrupted_task_keys.append(task.task_key)
+        if len(interrupted_task_keys) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "active_knowledge_server.indexing.pipeline.record_task_applied_checkpoint",
+        interrupt_after_second_code_checkpoint,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.run(
+            snapshot_id=CURRENT_SNAPSHOT_ID,
+            source="code",
+            plan=plan,
+            run_context=IndexRunContext(
+                job_store=store,
+                job_id=job.job_id,
+                plan_signature=signature,
+                resume_policy={"mode": "auto"},
+            ),
+        )
+
+    assert interrupted_task_keys == [
+        "code:apply:components/health/bt.c",
+        "code:apply:components/health/main.c",
+    ]
+    for task_key in interrupted_task_keys:
+        assert store.get_checkpoint(job.job_id, task_checkpoint_key(tasks[task_key])) is not None
+
+    resumed_pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    events: list[IndexProgressEvent] = []
+    result = resumed_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        progress_callback=events.append,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    assert result.metadata["tasks"]["skipped"] == 2
+    skipped_paths = {
+        event.current_path
+        for event in events
+        if event.message == "Skipping previously applied task"
+    }
+    assert skipped_paths == {
+        "components/health/bt.c",
+        "components/health/main.c",
+    }
+
+    reader = metadata_adapter.reader()
+    scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
+    file_paths = {record.file_id: record.relative_path for record in reader.iter_files(scope)}
+    main_entities = [
+        item.record.name
+        for item in reader.logical_entities(scope)
+        if file_paths.get(item.record.file_id) == "components/health/main.c"
+    ]
+    bt_entities = [
+        item.record.name
+        for item in reader.logical_entities(scope)
+        if file_paths.get(item.record.file_id) == "components/health/bt.c"
+    ]
+    assert main_entities.count("HEALTH_INTERRUPT_MAIN") == 1
+    assert bt_entities.count("HEALTH_INTERRUPT_BT") == 1
+
+
+def test_incremental_pipeline_replays_code_apply_after_interrupt_before_checkpoint(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_REPLAY_PROBE 33
+
+int health_replay_probe(void)
+{
+    return HEALTH_REPLAY_PROBE;
+}
+""",
+        encoding="utf-8",
+    )
+    interrupted_pipeline = InterruptBeforeCodeCheckpointPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    replayed_task = next(
+        task
+        for task in make_index_task_list(plan)
+        if task.task_key == "code:apply:components/health/main.c"
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupted_pipeline.run(
+            snapshot_id=CURRENT_SNAPSHOT_ID,
+            source="code",
+            plan=plan,
+            run_context=IndexRunContext(
+                job_store=store,
+                job_id=job.job_id,
+                plan_signature=signature,
+                resume_policy={"mode": "auto"},
+            ),
+        )
+
+    assert interrupted_pipeline.interrupted_paths == ["components/health/main.c"]
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(replayed_task)) is None
+
+    resumed_pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    result = resumed_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    reader = metadata_adapter.reader()
+    scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
+    file_records = [
+        record
+        for record in reader.iter_files(scope)
+        if record.relative_path == "components/health/main.c"
+    ]
+    replay_entities = [
+        item.record.name
+        for item in reader.logical_entities(scope)
+        if item.record.name == "HEALTH_REPLAY_PROBE"
+    ]
+    assert len(file_records) == 1
+    assert replay_entities.count("HEALTH_REPLAY_PROBE") == 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(replayed_task)) is not None
 
 
 def test_incremental_pipeline_checkpoints_successful_code_apply_and_delete(

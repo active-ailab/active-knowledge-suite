@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -197,6 +199,30 @@ def resolve_index_progress_output_mode(
     if mode == "json_final":
         return "none"
     return mode
+
+
+@contextmanager
+def _translate_sigterm_to_keyboard_interrupt():
+    """Route SIGTERM through the existing interrupted-index cleanup path."""
+
+    sigterm = getattr(signal, "SIGTERM", None)
+    if sigterm is None:
+        yield
+        return
+
+    def handle_sigterm(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        previous = signal.getsignal(sigterm)
+        signal.signal(sigterm, handle_sigterm)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(sigterm, previous)
 
 
 def resolve_index_resume_policy(args: argparse.Namespace) -> dict[str, object]:
@@ -1022,18 +1048,8 @@ def handle_index(args: argparse.Namespace) -> int:
         progress_callback = reporter.handle
 
     try:
-        if reporter is None:
-            payload = _run_index_command(
-                resolved,
-                summary=summary,
-                mode=mode,
-                target=target,
-                source=str(args.source),
-                resume_policy=resume_policy,
-                progress_callback=progress_callback,
-            )
-        else:
-            with reporter:
+        with _translate_sigterm_to_keyboard_interrupt():
+            if reporter is None:
                 payload = _run_index_command(
                     resolved,
                     summary=summary,
@@ -1043,6 +1059,17 @@ def handle_index(args: argparse.Namespace) -> int:
                     resume_policy=resume_policy,
                     progress_callback=progress_callback,
                 )
+            else:
+                with reporter:
+                    payload = _run_index_command(
+                        resolved,
+                        summary=summary,
+                        mode=mode,
+                        target=target,
+                        source=str(args.source),
+                        resume_policy=resume_policy,
+                        progress_callback=progress_callback,
+                    )
     except KeyboardInterrupt as exc:
         if reporter is not None:
             reporter.emit_interrupt_summary()

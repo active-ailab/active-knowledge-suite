@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from active_knowledge_server.cli import (
@@ -22,6 +25,88 @@ from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.indexing.pipeline import IncrementalIndexPlan, IncrementalIndexResult
 from active_knowledge_server.indexing.progress import IndexProgressEvent
 from active_knowledge_server.mcp.schemas import ALL_RESOURCE_URIS, ALL_TOOL_NAMES
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _pythonpath_with(*extra_paths: Path) -> str:
+    parts = [str(path) for path in extra_paths]
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        parts.append(existing)
+    return os.pathsep.join(parts)
+
+
+def _write_cli_workspace_fixture(workspace: Path) -> None:
+    component_dir = workspace / "components" / "health"
+    component_dir.mkdir(parents=True, exist_ok=True)
+    (component_dir / "module.mk").write_text(
+        """NAME = health_core
+MODULE = health.logic
+HEALTH_SOURCES = main.c health.h
+ifdef CONFIG_HEALTH_BT
+HEALTH_SOURCES += bt.c
+endif
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_BASELINE 1
+
+int health_main(void)
+{
+    return HEALTH_BASELINE;
+}
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "bt.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_BT_BASELINE 1
+
+int health_bt(void)
+{
+    return HEALTH_BT_BASELINE;
+}
+""",
+        encoding="utf-8",
+    )
+    (component_dir / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_main(void);
+int health_bt(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+
+
+def _wait_for_applied_checkpoint(jobs_path: Path, job_id: str, *, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if jobs_path.exists():
+            with sqlite3.connect(jobs_path) as connection:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM job_checkpoint
+                    WHERE job_id = ?
+                      AND checkpoint_key LIKE 'task:applied:%'
+                    """,
+                    (job_id,),
+                ).fetchone()
+            if row is not None and int(row[0]) > 0:
+                return
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for applied checkpoint in {jobs_path}")
 
 
 def test_subcommands_have_help() -> None:
@@ -1583,6 +1668,180 @@ def test_index_incremental_restart_supersedes_compatible_job(
     assert old_metadata["execution_state"] == "superseded"
     assert old_metadata["superseded_by_job_id"] == "index:restart-new"
     assert new_row == ("ready",)
+
+
+def test_index_incremental_sigterm_resume_reuses_checkpointed_work_and_validates(
+    tmp_path: Path,
+) -> None:
+    project_root = _project_root()
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    support = tmp_path / "support"
+    sitecustomize = support / "sitecustomize.py"
+    workspace.mkdir()
+    source_docs.mkdir()
+    support.mkdir()
+    _write_cli_workspace_fixture(workspace)
+    sitecustomize.write_text(
+        """import os
+import time
+
+if os.environ.get("ACTIVE_KB_TEST_SLEEP_AFTER_FIRST_CHECKPOINT") == "1":
+    import active_knowledge_server.indexing.pipeline as pipeline_module
+
+    _original = pipeline_module.record_task_applied_checkpoint
+    _state = {"count": 0}
+
+    def _wrapped(*args, **kwargs):
+        result = _original(*args, **kwargs)
+        _state["count"] += 1
+        if _state["count"] == 1:
+            time.sleep(float(os.environ.get("ACTIVE_KB_TEST_SLEEP_SECONDS", "30")))
+        return result
+
+    pipeline_module.record_task_applied_checkpoint = _wrapped
+""",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": _pythonpath_with(support, project_root / "src"),
+    }
+
+    (workspace / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_SIGTERM_MAIN 7
+
+int health_main(void)
+{
+    return HEALTH_SIGTERM_MAIN;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace / "components" / "health" / "bt.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_SIGTERM_BT 9
+
+int health_bt(void)
+{
+    return HEALTH_SIGTERM_BT;
+}
+""",
+        encoding="utf-8",
+    )
+    first_env = {
+        **env,
+        "ACTIVE_KB_TEST_SLEEP_AFTER_FIRST_CHECKPOINT": "1",
+        "ACTIVE_KB_TEST_SLEEP_SECONDS": "30",
+    }
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--source",
+            "code",
+            "--no-resume",
+            "--job-id",
+            "index:sigterm-resume",
+            "--format",
+            "json",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=project_root,
+        env=first_env,
+    )
+    jobs_path = workdir / "local" / "db" / "jobs.db"
+    try:
+        _wait_for_applied_checkpoint(
+            jobs_path,
+            "index:sigterm-resume",
+            timeout_seconds=15,
+        )
+        proc.send_signal(signal.SIGTERM)
+        interrupted_stdout, interrupted_stderr = proc.communicate(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=5)
+
+    interrupted_payload = json.loads(interrupted_stdout)
+    assert proc.returncode == 130
+    assert interrupted_payload["status"] == "interrupted"
+    assert interrupted_payload["job"]["job_id"] == "index:sigterm-resume"
+    assert interrupted_payload["job"]["status"] == "interrupted"
+
+    resumed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--source",
+            "code",
+            "--resume",
+            "auto",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        env=env,
+    )
+    resumed_payload = json.loads(resumed.stdout)
+    assert resumed_payload["status"] == "ok"
+    assert resumed_payload["job"]["job_id"] == "index:sigterm-resume"
+    assert resumed_payload["job"]["resumed"] is True
+    assert resumed_payload["job"]["tasks_skipped"] is not None
+    assert resumed_payload["job"]["tasks_skipped"] > 0
+
+    validate = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "active_knowledge_server.cli",
+            "validate",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+        env=env,
+    )
+    validate_payload = json.loads(validate.stdout)
+    assert validate_payload["status"] == "ok"
+    assert validate_payload["storage_report"]["status"] != "blocked"
 
 
 def test_index_incremental_json_can_render_progress_to_stderr(
