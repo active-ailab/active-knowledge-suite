@@ -1269,11 +1269,13 @@ def test_index_incremental_json_is_machine_readable(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             assert snapshot_id == "current"
             assert source == "all"
             assert progress_callback is not None
             assert plan is not None
+            assert run_context is not None
             return IncrementalIndexResult(
                 schema_version="incremental_index_result.v1",
                 snapshot_id=snapshot_id,
@@ -1348,6 +1350,7 @@ def test_index_incremental_json_accepts_explicit_job_id_policy(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             return IncrementalIndexResult(
                 schema_version="incremental_index_result.v1",
@@ -1416,6 +1419,7 @@ def test_index_incremental_json_auto_resumes_interrupted_job(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             calls["count"] += 1
             if calls["count"] == 1:
@@ -1507,6 +1511,7 @@ def test_index_incremental_restart_supersedes_compatible_job(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             calls["count"] += 1
             if calls["count"] == 1:
@@ -1605,6 +1610,7 @@ def test_index_incremental_json_can_render_progress_to_stderr(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(
@@ -1678,6 +1684,7 @@ def test_index_incremental_json_interrupt_keeps_stdout_payload(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(
@@ -1924,6 +1931,7 @@ def test_index_interrupt_prints_snapshot_without_traceback(
             source: str,
             progress_callback,
             plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
         ) -> IncrementalIndexResult:
             progress_callback(
                 IndexProgressEvent(

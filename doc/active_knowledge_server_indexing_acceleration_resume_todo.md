@@ -411,7 +411,7 @@ TODO：
 
 ### AR2-02 实现 applied task 跳过
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-01`
@@ -419,11 +419,26 @@ TODO：
 
 TODO：
 
-- [ ] pipeline materialize task list 后读取 task ledger。
-- [ ] 对 `status=applied` 且 `plan_signature/input_hash/schema` 匹配的 task 标记 skipped。
-- [ ] skipped task 进入 progress 和 final job stats。
-- [ ] changed/deleted path 的 collect list 过滤掉已 applied task 对应输入。
-- [ ] 单测覆盖恢复时只 collect 未完成路径。
+- [x] pipeline materialize task list 后读取 task ledger。
+- [x] 对 `status=applied` 且 `plan_signature/input_hash/schema` 匹配的 task 标记 skipped。
+- [x] skipped task 进入 progress 和 final job stats。
+- [x] changed/deleted path 的 collect list 过滤掉已 applied task 对应输入。
+- [x] 单测覆盖恢复时只 collect 未完成路径。
+
+行业实践调研结论：
+
+- Spark Structured Streaming 要求同一 checkpoint 下 source/schema 等变更受限；本项目对应在 skip 判定时同时校验 job/checkpoint 的 `plan_signature`，避免不同 plan 复用旧 task checkpoint。参考：https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+- Flink checkpoint 保存可恢复 state 和输入位置，失败后从 durable checkpoint 继续；本项目对应把 task ledger 作为 path/task 级恢复游标，已 checkpoint 的 task 在恢复时推进 progress 而不重新 collect/apply。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/checkpointing/
+- AWS Durable Execution 的重试实践强调 at-least-once 重放只适合幂等操作；本项目继续沿用 AR0-04 的“checkpoint 后写”边界，未 checkpoint 的 task 仍允许幂等重放，AR2-02 只跳过已确认 applied 的 task。参考：https://docs.aws.amazon.com/durable-execution/patterns/best-practices/idempotency/
+- Airflow 将 `skipped` 作为 task instance 的显式状态；本项目对应把 skipped 计入 progress、job metadata 和最终 JSON payload，而不是静默过滤。参考：https://airflow.apache.org/docs/apache-airflow/2.10.3/core-concepts/tasks.html
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 在 materialize task list 后读取 `job_checkpoint` KV ledger，并通过 `task:applied:<task_key>` 的 checkpoint payload 校验 `status/task_key/phase/input_hash/task_schema_version`；checkpoint metadata 中带 `plan_signature` 时必须与当前 plan 匹配，旧 checkpoint 没带签名时退回校验 job metadata 的 `plan_signature`。
+- 新增 `_PipelineJobReporter.task_skipped(...)` 和 pipeline 本地 task stats；skipped task 会发出 `IndexProgressEvent(message="Skipping previously applied task")`，并写入 `tasks_skipped` job metadata。
+- code/doc collect path 基于未完成任务过滤；code 额外扣除已 skipped 的 `code:apply:<path>` 输入，避免全局 collect dependency 把已 applied path 带回。
+- `IncrementalIndexResult.metadata["tasks"]` 新增 `applied/skipped/failed` 统计；CLI 传入真实 `IndexRunContext`，final job payload 会从 jobs DB 同步最新 task counters，保证 JSON 中 `tasks_skipped` 不丢失。
+- `tests/unit/test_incremental_pipeline.py` 新增手工 applied checkpoint 恢复用例：两个 code path 变化时，已 applied 的 `main.c` 不再进入 collect/apply，未完成的 `bt.c` 仍正常 apply，skipped 进入 result/job/progress。
 
 验收标准：
 

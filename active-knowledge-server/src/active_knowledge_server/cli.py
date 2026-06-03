@@ -60,6 +60,7 @@ from active_knowledge_server.indexing import (
     IncrementalIndexResult,
     IndexProgressCallback,
     IndexProgressEvent,
+    IndexRunContext,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
     SnapshotCollector,
@@ -1132,11 +1133,23 @@ def _run_index_command(
             progress_callback=progress_callback,
         )
         try:
+            run_signature = make_index_plan_signature(
+                plan,
+                config=resolved.model,
+                mode=mode,
+                target=target,
+            )
             result = pipeline.run(
                 snapshot_id=CURRENT_SNAPSHOT_ID,
                 source=cast(Any, source),
                 progress_callback=job_progress_callback,
                 plan=plan,
+                run_context=IndexRunContext(
+                    job_store=job_context.store,
+                    job_id=job_context.job.job_id,
+                    resume_policy=resume_policy,
+                    plan_signature=run_signature,
+                ),
             )
         except KeyboardInterrupt:
             mark_index_job_interrupted(job_context)
@@ -1266,6 +1279,9 @@ def build_index_job_payload(
     job_context: IndexJobContext | None = None,
 ) -> dict[str, object]:
     """Build the stable AR0-03 final JSON job contract."""
+
+    if job_context is not None:
+        _sync_index_job_context_counts(job_context)
 
     plan = getattr(result, "plan", None)
     plan_signature: dict[str, object] | None = (
@@ -1635,18 +1651,14 @@ def finalize_index_job(job_context: IndexJobContext, *, result_status: str) -> N
     """Transition a CLI index job to ready or partial_ready and update task counts."""
 
     _advance_index_job_to_reporting(job_context)
+    _sync_index_job_context_counts(job_context)
     terminal_status = "partial_ready" if result_status == "partial_ready" else "ready"
-    tasks_failed = 0 if terminal_status == "ready" else None
-    tasks_applied = (
-        job_context.tasks_total
-        if terminal_status == "ready"
-        else job_context.tasks_applied
-    )
+    tasks_failed = 0 if terminal_status == "ready" else job_context.tasks_failed
     metadata_update = {
         "execution_state": "complete",
         "finished_at": utc_timestamp(),
         "tasks_total": job_context.tasks_total,
-        "tasks_applied": tasks_applied,
+        "tasks_applied": job_context.tasks_applied,
         "tasks_skipped": job_context.tasks_skipped,
         "tasks_failed": tasks_failed,
     }
@@ -1655,7 +1667,6 @@ def finalize_index_job(job_context: IndexJobContext, *, result_status: str) -> N
         cast(Any, terminal_status),
         metadata_update=metadata_update,
     )
-    job_context.tasks_applied = tasks_applied
     job_context.tasks_failed = tasks_failed
 
 
@@ -1720,6 +1731,35 @@ def _advance_index_job_to_reporting(job_context: IndexJobContext) -> None:
             cast(Any, status),
             metadata_update={"last_phase": status},
         )
+
+
+def _sync_index_job_context_counts(job_context: IndexJobContext) -> None:
+    job = job_context.store.get_job(job_context.job.job_id)
+    if job is None:
+        return
+    job_context.job = job
+    metadata = job.metadata
+    job_context.tasks_total = _metadata_int(metadata.get("tasks_total"), job_context.tasks_total)
+    job_context.tasks_applied = _metadata_int(
+        metadata.get("tasks_applied"),
+        job_context.tasks_applied,
+    )
+    job_context.tasks_skipped = _metadata_int(
+        metadata.get("tasks_skipped"),
+        job_context.tasks_skipped,
+    )
+    job_context.tasks_failed = _metadata_int(
+        metadata.get("tasks_failed"),
+        job_context.tasks_failed,
+    )
+
+
+def _metadata_int(value: object, default: int | None) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        return int(value)
+    return default
 
 
 def _optional_nonempty_text(value: object) -> str | None:

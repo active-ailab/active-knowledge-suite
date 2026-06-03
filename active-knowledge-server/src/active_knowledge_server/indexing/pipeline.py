@@ -37,6 +37,8 @@ from active_knowledge_server.indexing.jobs import (
     IndexJobCancelled,
     JobStateTransitionError,
     SQLiteJobStore,
+    decode_task_checkpoint,
+    task_checkpoint_key,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -389,6 +391,26 @@ class _PipelineJobReporter:
                 "tasks_failed": self._tasks_failed,
                 "tasks_skipped": self._tasks_skipped,
             },
+        )
+
+    def task_skipped(self, task_key: str) -> None:
+        self._tasks_skipped += 1
+        task = _find_index_task(self.tasks, task_key)
+        task_phase = task.phase if task is not None else self._last_phase or "plan"
+        metadata_update: dict[str, object] = {
+            "last_task_key": task_key,
+            "tasks_applied": self._tasks_applied,
+            "tasks_failed": self._tasks_failed,
+            "tasks_skipped": self._tasks_skipped,
+        }
+        if task is not None:
+            metadata_update["last_task"] = task.to_dict()
+            if task.relative_path is not None:
+                metadata_update["last_path"] = task.relative_path
+        self._update(
+            phase=task_phase,
+            status=_INDEX_PHASE_JOB_STATUS.get(task_phase),
+            metadata_update=metadata_update,
         )
 
     def task_failed(self, task_key: str, error: BaseException | str) -> None:
@@ -779,6 +801,30 @@ class IncrementalIndexPipeline:
                 started_at=started_at,
             )
         tasks = make_index_task_list(plan)
+        signature = (
+            run_context.plan_signature
+            if run_context is not None and run_context.plan_signature is not None
+            else make_index_plan_signature(plan, config=self._config)
+        )
+        checkpoints: Mapping[str, str] = {}
+        job_plan_signature: str | None = None
+        if run_context is not None:
+            checkpoints = run_context.job_store.get_checkpoints(run_context.job_id)
+            job = run_context.job_store.get_job(run_context.job_id)
+            if job is not None and isinstance(job.metadata.get("plan_signature"), str):
+                job_plan_signature = cast(str, job.metadata["plan_signature"])
+        skipped_tasks = tuple(
+            task
+            for task in tasks
+            if _task_has_matching_applied_checkpoint(
+                checkpoints,
+                task,
+                plan_signature=signature.digest,
+                job_plan_signature=job_plan_signature,
+            )
+        )
+        skipped_task_keys = frozenset(task.task_key for task in skipped_tasks)
+        tasks_to_run = tuple(task for task in tasks if task.task_key not in skipped_task_keys)
         task_counts = _index_task_counts(tasks)
         job_reporter = (
             None
@@ -795,11 +841,25 @@ class IncrementalIndexPipeline:
         )
         if job_reporter is not None:
             job_reporter.start()
-        doc_paths_to_collect = _incremental_doc_paths_to_collect(plan)
-        code_paths_to_collect = _incremental_code_paths_to_collect(plan)
-        progress_totals = _incremental_progress_totals(plan, source, doc_paths_to_collect)
+        doc_paths_to_collect = _collect_dependency_paths(tasks_to_run, prefix="doc:collect:")
+        code_paths_to_collect = _code_collect_paths_after_skips(plan, skipped_tasks)
+        progress_totals = _progress_totals_from_tasks(
+            plan,
+            source,
+            tasks,
+            code_paths_to_collect=code_paths_to_collect,
+            doc_paths_to_collect=doc_paths_to_collect,
+        )
         global_total = progress_totals["global_total"]
         global_done = 0
+        task_stats = {"applied": 0, "skipped": 0, "failed": 0}
+        phase_done = {
+            "code_apply": 0,
+            "doc_apply": 0,
+            "vectors_apply": 0,
+            "profile_relations": 0,
+            "workspace_map": 0,
+        }
 
         def emit(
             *,
@@ -829,6 +889,34 @@ class IncrementalIndexPipeline:
                 job_reporter.observe_event(event)
             callback(event)
 
+        def mark_task_applied(task_key: str) -> None:
+            task_stats["applied"] += 1
+            if job_reporter is not None:
+                job_reporter.task_applied(task_key)
+
+        def mark_task_skipped(task: IndexTask) -> None:
+            nonlocal global_done
+            task_stats["skipped"] += 1
+            phase_done[task.phase] = phase_done.get(task.phase, 0) + 1
+            global_done += 1
+            if job_reporter is not None:
+                job_reporter.task_skipped(task.task_key)
+            emit(
+                phase=task.phase,
+                stage_total=progress_totals.get(task.phase),
+                stage_done=phase_done[task.phase],
+                current_path=task.relative_path,
+                message="Skipping previously applied task",
+            )
+
+        def mark_task_failed(task_key: str, error: BaseException | str) -> None:
+            task_stats["failed"] += 1
+            if job_reporter is not None:
+                job_reporter.task_failed(task_key, error)
+
+        def task_is_skipped(task_key: str) -> bool:
+            return task_key in skipped_task_keys
+
         global_done += 1
         emit(
             phase="plan",
@@ -837,6 +925,8 @@ class IncrementalIndexPipeline:
             message="Incremental plan ready",
             warnings_count=len(plan.warnings),
         )
+        for skipped_task in skipped_tasks:
+            mark_task_skipped(skipped_task)
         reader = self._metadata_adapter.reader()
         writer = self._metadata_adapter.writer(StorageWriteRequest(target="overlay"))
         vector_writer = self._vector_adapter.writer(StorageWriteRequest(target="overlay"))
@@ -862,6 +952,9 @@ class IncrementalIndexPipeline:
                 "by_phase": task_counts["by_phase"],
                 "by_source_kind": task_counts["by_source_kind"],
                 "required": task_counts["required"],
+                "applied": task_stats["applied"],
+                "skipped": task_stats["skipped"],
+                "failed": task_stats["failed"],
             },
         }
 
@@ -888,7 +981,7 @@ class IncrementalIndexPipeline:
                 code_indexed = self._code_indexer.collect(
                     snapshot_id=snapshot_id,
                     workspace_inventory=plan.workspace_inventory,
-                    include_paths=None if plan.reindex_all_code else code_paths_to_collect,
+                    include_paths=code_paths_to_collect,
                     progress_callback=handle_code_collect,
                 )
                 result_metadata["code_collect_workers"] = code_indexed.metadata.get(
@@ -923,10 +1016,12 @@ class IncrementalIndexPipeline:
                     )
                 global_done += progress_totals["code_collect"]
                 new_code_bundles = _code_bundles_by_path(code_indexed)
-                code_apply_done = 0
+                code_apply_done = phase_done["code_apply"]
                 code_apply_eta = SlidingWindowEtaEstimator()
                 for relative_path in plan.deleted_code_paths:
                     current_task_key = f"code:delete:{relative_path}"
+                    if task_is_skipped(current_task_key):
+                        continue
                     if job_reporter is not None:
                         job_reporter.begin_task(current_task_key, phase="code_apply")
                     apply_started_at = time.perf_counter()
@@ -958,13 +1053,14 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
-                    if job_reporter is not None:
-                        job_reporter.task_applied(current_task_key)
+                    mark_task_applied(current_task_key)
                 for relative_path in plan.changed_code_paths:
+                    current_task_key = f"code:apply:{relative_path}"
+                    if task_is_skipped(current_task_key):
+                        continue
                     bundle = new_code_bundles.get(relative_path)
                     if bundle is None:
                         continue
-                    current_task_key = f"code:apply:{relative_path}"
                     if job_reporter is not None:
                         job_reporter.begin_task(current_task_key, phase="code_apply")
                     apply_started_at = time.perf_counter()
@@ -996,8 +1092,7 @@ class IncrementalIndexPipeline:
                             total=progress_totals["code_apply"],
                         ),
                     )
-                    if job_reporter is not None:
-                        job_reporter.task_applied(current_task_key)
+                    mark_task_applied(current_task_key)
                 if progress_totals["code_apply"] > 0:
                     emit(
                         phase="code_apply",
@@ -1009,8 +1104,8 @@ class IncrementalIndexPipeline:
             except IndexJobCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
-                if job_reporter is not None and current_task_key is not None:
-                    job_reporter.task_failed(current_task_key, exc)
+                if current_task_key is not None:
+                    mark_task_failed(current_task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1028,10 +1123,12 @@ class IncrementalIndexPipeline:
             or plan.reindex_all_docs
             or plan.rebuild_vectors
         ):
-            doc_apply_done = 0
-            vector_apply_done = 0
+            doc_apply_done = phase_done["doc_apply"]
+            vector_apply_done = phase_done["vectors_apply"]
             for relative_path in plan.deleted_doc_paths:
                 task_key = f"doc:delete:{relative_path}"
+                if task_is_skipped(task_key):
+                    continue
                 if job_reporter is not None:
                     job_reporter.begin_task(task_key, phase="doc_apply")
                 try:
@@ -1059,8 +1156,7 @@ class IncrementalIndexPipeline:
                             details={"path": relative_path, "error": str(exc)},
                         )
                     )
-                    if job_reporter is not None:
-                        job_reporter.task_failed(task_key, exc)
+                    mark_task_failed(task_key, exc)
                 else:
                     doc_apply_done += 1
                     global_done += 1
@@ -1071,8 +1167,7 @@ class IncrementalIndexPipeline:
                         current_path=relative_path,
                         message="Applying document changes",
                     )
-                    if job_reporter is not None:
-                        job_reporter.task_applied(task_key)
+                    mark_task_applied(task_key)
 
             indexed_docs: IndexedDocuments | None = None
             if doc_paths_to_collect:
@@ -1167,41 +1262,46 @@ class IncrementalIndexPipeline:
                         )
                         if metadata_changed:
                             current_doc_task_key = f"doc:apply:{relative_path}"
-                            if job_reporter is not None:
-                                job_reporter.begin_task(current_doc_task_key, phase="doc_apply")
-                            metadata_started_at = time.perf_counter()
-                            self._apply_doc_bundle(
-                                reader,
-                                writer,
-                                relative_path=storage_relative_path,
-                                new_bundle=new_bundle,
-                                snapshot_id=snapshot_id,
-                            )
-                            doc_apply_done += 1
-                            global_done += 1
-                            elapsed_seconds = time.perf_counter() - metadata_started_at
-                            _record_elapsed(
-                                result_metadata,
-                                timing_key="metadata_write_seconds",
-                                elapsed_seconds=elapsed_seconds,
-                                path=storage_relative_path,
-                                stage="doc_apply",
-                            )
-                            emit(
-                                phase="doc_apply",
-                                stage_total=progress_totals["doc_apply"],
-                                stage_done=doc_apply_done,
-                                current_path=storage_relative_path,
-                                message="Applying document changes",
-                                eta_seconds=doc_apply_eta.observe(
-                                    completed=doc_apply_done,
-                                    total=progress_totals["doc_apply"],
-                                ),
-                            )
-                            if job_reporter is not None:
-                                job_reporter.task_applied(current_doc_task_key)
+                            if not task_is_skipped(current_doc_task_key):
+                                if job_reporter is not None:
+                                    job_reporter.begin_task(
+                                        current_doc_task_key,
+                                        phase="doc_apply",
+                                    )
+                                metadata_started_at = time.perf_counter()
+                                self._apply_doc_bundle(
+                                    reader,
+                                    writer,
+                                    relative_path=storage_relative_path,
+                                    new_bundle=new_bundle,
+                                    snapshot_id=snapshot_id,
+                                )
+                                doc_apply_done += 1
+                                global_done += 1
+                                elapsed_seconds = time.perf_counter() - metadata_started_at
+                                _record_elapsed(
+                                    result_metadata,
+                                    timing_key="metadata_write_seconds",
+                                    elapsed_seconds=elapsed_seconds,
+                                    path=storage_relative_path,
+                                    stage="doc_apply",
+                                )
+                                emit(
+                                    phase="doc_apply",
+                                    stage_total=progress_totals["doc_apply"],
+                                    stage_done=doc_apply_done,
+                                    current_path=storage_relative_path,
+                                    message="Applying document changes",
+                                    eta_seconds=doc_apply_eta.observe(
+                                        completed=doc_apply_done,
+                                        total=progress_totals["doc_apply"],
+                                    ),
+                                )
+                                mark_task_applied(current_doc_task_key)
                         if plan.rebuild_vectors or metadata_changed:
                             current_doc_task_key = f"vector:doc:{relative_path}"
+                            if task_is_skipped(current_doc_task_key):
+                                continue
                             if job_reporter is not None:
                                 job_reporter.begin_task(
                                     current_doc_task_key,
@@ -1234,13 +1334,12 @@ class IncrementalIndexPipeline:
                                     total=progress_totals["vectors_apply"],
                                 ),
                             )
-                            if job_reporter is not None:
-                                job_reporter.task_applied(current_doc_task_key)
+                            mark_task_applied(current_doc_task_key)
                     except IndexJobCancelled:
                         raise
                     except Exception as exc:  # noqa: BLE001
-                        if job_reporter is not None and current_doc_task_key is not None:
-                            job_reporter.task_failed(current_doc_task_key, exc)
+                        if current_doc_task_key is not None:
+                            mark_task_failed(current_doc_task_key, exc)
                         failed = True
                         warnings.append(
                             IncrementalIndexWarning(
@@ -1268,113 +1367,115 @@ class IncrementalIndexPipeline:
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
             task_key = "profile:relations"
-            if job_reporter is not None:
-                job_reporter.begin_task(task_key, phase="profile_relations")
-            try:
-                profile_started_at = time.perf_counter()
-                emit(
-                    phase="profile_relations",
-                    stage_total=1,
-                    stage_done=0,
-                    message="Refreshing profile-conditioned relations",
-                )
-                self._rebuild_profile_conditioned_relations(
-                    reader=reader,
-                    writer=writer,
-                    snapshot_id=snapshot_id,
-                    collected_profiles=plan.collected_profiles,
-                    changed_profile_ids=set(plan.changed_profile_ids),
-                    removed_profile_ids=set(plan.removed_profile_ids),
-                )
-                emit(
-                    phase="profile_relations",
-                    stage_total=1,
-                    stage_done=0,
-                    message="Flushing profile-conditioned relation updates",
-                )
-                writer.flush()
-                result_metadata["timings"]["metadata_write_seconds"] = round(
-                    float(result_metadata["timings"]["metadata_write_seconds"])
-                    + (time.perf_counter() - profile_started_at),
-                    6,
-                )
-                global_done += 1
-                emit(
-                    phase="profile_relations",
-                    stage_total=1,
-                    stage_done=1,
-                    message="Refreshing profile-conditioned relations",
-                )
+            if not task_is_skipped(task_key):
                 if job_reporter is not None:
-                    job_reporter.task_applied(task_key)
-            except IndexJobCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                if job_reporter is not None:
-                    job_reporter.task_failed(task_key, exc)
-                failed = True
-                warnings.append(
-                    IncrementalIndexWarning(
-                        code="index.profile_incremental_failed",
-                        message=(
-                            "Profile-conditioned relations failed to rebuild; previous profile "
-                            "projection remains live."
-                        ),
-                        details={"error": str(exc)},
+                    job_reporter.begin_task(task_key, phase="profile_relations")
+                try:
+                    profile_started_at = time.perf_counter()
+                    emit(
+                        phase="profile_relations",
+                        stage_total=1,
+                        stage_done=0,
+                        message="Refreshing profile-conditioned relations",
                     )
-                )
+                    self._rebuild_profile_conditioned_relations(
+                        reader=reader,
+                        writer=writer,
+                        snapshot_id=snapshot_id,
+                        collected_profiles=plan.collected_profiles,
+                        changed_profile_ids=set(plan.changed_profile_ids),
+                        removed_profile_ids=set(plan.removed_profile_ids),
+                    )
+                    emit(
+                        phase="profile_relations",
+                        stage_total=1,
+                        stage_done=0,
+                        message="Flushing profile-conditioned relation updates",
+                    )
+                    writer.flush()
+                    result_metadata["timings"]["metadata_write_seconds"] = round(
+                        float(result_metadata["timings"]["metadata_write_seconds"])
+                        + (time.perf_counter() - profile_started_at),
+                        6,
+                    )
+                    global_done += 1
+                    emit(
+                        phase="profile_relations",
+                        stage_total=1,
+                        stage_done=1,
+                        message="Refreshing profile-conditioned relations",
+                    )
+                    mark_task_applied(task_key)
+                except IndexJobCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    mark_task_failed(task_key, exc)
+                    failed = True
+                    warnings.append(
+                        IncrementalIndexWarning(
+                            code="index.profile_incremental_failed",
+                            message=(
+                                "Profile-conditioned relations failed to rebuild; previous "
+                                "profile projection remains live."
+                            ),
+                            details={"error": str(exc)},
+                        ),
+                    )
 
         if _workspace_map_refresh_required(plan):
             task_key = "workspace:map"
-            if job_reporter is not None:
-                job_reporter.begin_task(task_key, phase="workspace_map")
-            try:
-                workspace_map_started_at = time.perf_counter()
-                emit(
-                    phase="workspace_map",
-                    stage_total=1,
-                    stage_done=0,
-                    message="Refreshing workspace map",
-                )
-                self._workspace_map_builder.collect_and_write(
-                    snapshot_id=snapshot_id,
-                    workspace_inventory=plan.workspace_inventory,
-                    reader=self._metadata_adapter.reader(),
-                    profiles=plan.collected_profiles.profile_records,
-                    profile_resolution=plan.collected_profiles.resolution.to_dict(),
-                )
-                result_metadata["timings"]["workspace_map_seconds"] = round(
-                    time.perf_counter() - workspace_map_started_at,
-                    6,
-                )
-                global_done += 1
-                emit(
-                    phase="workspace_map",
-                    stage_total=1,
-                    stage_done=1,
-                    message="Refreshing workspace map",
-                )
+            if not task_is_skipped(task_key):
                 if job_reporter is not None:
-                    job_reporter.task_applied(task_key)
-            except IndexJobCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                if job_reporter is not None:
-                    job_reporter.task_failed(task_key, exc)
-                failed = True
-                warnings.append(
-                    IncrementalIndexWarning(
-                        code="index.workspace_map_failed",
-                        message=(
-                            "Workspace map projection failed to refresh; previous "
-                            "workspace navigation artifact remains live."
-                        ),
-                        details={"error": str(exc)},
+                    job_reporter.begin_task(task_key, phase="workspace_map")
+                try:
+                    workspace_map_started_at = time.perf_counter()
+                    emit(
+                        phase="workspace_map",
+                        stage_total=1,
+                        stage_done=0,
+                        message="Refreshing workspace map",
                     )
-                )
+                    self._workspace_map_builder.collect_and_write(
+                        snapshot_id=snapshot_id,
+                        workspace_inventory=plan.workspace_inventory,
+                        reader=self._metadata_adapter.reader(),
+                        profiles=plan.collected_profiles.profile_records,
+                        profile_resolution=plan.collected_profiles.resolution.to_dict(),
+                    )
+                    result_metadata["timings"]["workspace_map_seconds"] = round(
+                        time.perf_counter() - workspace_map_started_at,
+                        6,
+                    )
+                    global_done += 1
+                    emit(
+                        phase="workspace_map",
+                        stage_total=1,
+                        stage_done=1,
+                        message="Refreshing workspace map",
+                    )
+                    mark_task_applied(task_key)
+                except IndexJobCancelled:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    mark_task_failed(task_key, exc)
+                    failed = True
+                    warnings.append(
+                        IncrementalIndexWarning(
+                            code="index.workspace_map_failed",
+                            message=(
+                                "Workspace map projection failed to refresh; previous "
+                                "workspace navigation artifact remains live."
+                            ),
+                            details={"error": str(exc)},
+                        ),
+                    )
 
         if not failed:
             self.save_state(plan.current_state)
+
+        result_metadata["tasks"]["applied"] = task_stats["applied"]
+        result_metadata["tasks"]["skipped"] = task_stats["skipped"]
+        result_metadata["tasks"]["failed"] = task_stats["failed"]
 
         emit(
             phase="done",
@@ -1745,6 +1846,102 @@ def _index_plan_summary(plan: IncrementalIndexPlan) -> dict[str, object]:
         "removed_profile_ids_count": len(plan.removed_profile_ids),
         "warnings_count": len(plan.warnings),
     }
+
+
+def _task_has_matching_applied_checkpoint(
+    checkpoints: Mapping[str, str],
+    task: IndexTask,
+    *,
+    plan_signature: str,
+    job_plan_signature: str | None,
+) -> bool:
+    checkpoint = decode_task_checkpoint(checkpoints.get(task_checkpoint_key(task)))
+    if (
+        checkpoint is None
+        or checkpoint.status != "applied"
+        or checkpoint.task_key != task.task_key
+        or checkpoint.phase != task.phase
+        or checkpoint.input_hash != task.input_hash
+        or checkpoint.task_schema_version != task.schema_version
+    ):
+        return False
+    checkpoint_plan_signature = checkpoint.metadata.get("plan_signature")
+    if isinstance(checkpoint_plan_signature, str):
+        return checkpoint_plan_signature == plan_signature
+    return job_plan_signature == plan_signature
+
+
+def _collect_dependency_paths(tasks: Sequence[IndexTask], *, prefix: str) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            {
+                dependency.removeprefix(prefix)
+                for task in tasks
+                for dependency in task.collect_dependencies
+                if dependency.startswith(prefix)
+            }
+        )
+    )
+
+
+def _code_collect_paths_after_skips(
+    plan: IncrementalIndexPlan,
+    skipped_tasks: Sequence[IndexTask],
+) -> tuple[str, ...]:
+    skipped_apply_inputs = {
+        task.relative_path
+        for task in skipped_tasks
+        if task.source_kind == "code" and task.operation == "apply" and task.relative_path
+    }
+    return tuple(
+        path
+        for path in _incremental_code_paths_to_collect(plan)
+        if path not in skipped_apply_inputs
+    )
+
+
+def _progress_totals_from_tasks(
+    plan: IncrementalIndexPlan,
+    source: Literal["all", "code", "docs"],
+    tasks: Sequence[IndexTask],
+    *,
+    code_paths_to_collect: Sequence[str],
+    doc_paths_to_collect: Sequence[str],
+) -> dict[str, int]:
+    code_collect = 0
+    if source in {"all", "code"} and (
+        plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
+    ):
+        code_collect = count_indexable_workspace_files(
+            plan.workspace_inventory,
+            include_paths=code_paths_to_collect,
+        )
+
+    phase_counts: dict[str, int] = {}
+    for task in tasks:
+        phase_counts[task.phase] = phase_counts.get(task.phase, 0) + 1
+
+    totals = {
+        "code_collect": code_collect,
+        "code_apply": phase_counts.get("code_apply", 0),
+        "doc_collect": (
+            len(doc_paths_to_collect)
+            if source in {"all", "docs"}
+            and (
+                plan.changed_doc_paths
+                or plan.deleted_doc_paths
+                or plan.reindex_all_docs
+                or plan.rebuild_vectors
+            )
+            else 0
+        ),
+        "doc_apply": phase_counts.get("doc_apply", 0),
+        "vectors_apply": phase_counts.get("vectors_apply", 0),
+        "profile_relations": phase_counts.get("profile_relations", 0),
+        "workspace_map": phase_counts.get("workspace_map", 0),
+    }
+    totals["global_total"] = 1 + sum(totals.values())
+    return totals
 
 
 def _resume_policy_metadata(

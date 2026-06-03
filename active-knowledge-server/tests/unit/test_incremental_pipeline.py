@@ -20,9 +20,14 @@ from active_knowledge_server.indexing import (
     IndexedDocuments,
     ProfileCollector,
     ProfileConditionedRelationExtractor,
+    make_index_plan_signature,
+    make_index_task_list,
     summarize_entity_profile_states_from_reader,
 )
-from active_knowledge_server.indexing.jobs import SQLiteJobStore
+from active_knowledge_server.indexing.jobs import (
+    SQLiteJobStore,
+    record_task_applied_checkpoint,
+)
 from active_knowledge_server.indexing.pipeline import (
     IndexRunContext,
     _format_discover_target,
@@ -757,6 +762,115 @@ int health_incremental_probe(void)
     assert "components/health/bt.c" not in include_paths
     assert len(include_paths) < len(previous_state.code_files)
     assert result.metadata["code_collect_workers"]["workers"] == 2
+
+
+def test_incremental_pipeline_skips_applied_code_task_and_collects_only_unfinished_paths(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path, overrides={"indexing": {"workers": 2}})
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, _pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+#define HEALTH_SHOULD_NOT_APPLY 777
+
+int health_skipped_probe(void)
+{
+    return HEALTH_SHOULD_NOT_APPLY;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "bt.c").write_text(
+        """#include "health.h"
+
+#define BT_INCREMENTAL_READY 2
+
+int health_bt_init(void)
+{
+    return BT_INCREMENTAL_READY;
+}
+""",
+        encoding="utf-8",
+    )
+    spy = SpyCodeIndexer(CodeIndexer.from_config(config, cwd=tmp_path))
+    pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        code_indexer=spy,
+    )
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    skipped_task = next(
+        task
+        for task in make_index_task_list(plan)
+        if task.task_key == "code:apply:components/health/main.c"
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    record_task_applied_checkpoint(
+        store,
+        job.job_id,
+        skipped_task,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    events: list[IndexProgressEvent] = []
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        progress_callback=events.append,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            resume_policy={"mode": "auto"},
+            plan_signature=signature,
+        ),
+    )
+
+    assert result.result_status == "ready"
+    assert result.metadata["tasks"]["skipped"] == 1
+    assert result.metadata["tasks"]["applied"] >= 1
+    include_paths = spy.include_paths_calls[-1]
+    assert include_paths == (
+        "components/health/bt.c",
+        "components/health/module.mk",
+    )
+    assert any(
+        event.message == "Skipping previously applied task"
+        and event.current_path == "components/health/main.c"
+        for event in events
+    )
+    updated = store.get_job(job.job_id)
+    assert updated is not None
+    assert updated.metadata["tasks_skipped"] == 1
+
+    reader = metadata_adapter.reader()
+    scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
+    file_paths = {record.file_id: record.relative_path for record in reader.iter_files(scope)}
+    names_by_path: dict[str, set[str]] = {}
+    for item in reader.logical_entities(scope):
+        path = file_paths.get(item.record.file_id)
+        if path is not None:
+            names_by_path.setdefault(path, set()).add(item.record.name)
+    assert "HEALTH_SHOULD_NOT_APPLY" not in names_by_path["components/health/main.c"]
+    assert "BT_INCREMENTAL_READY" in names_by_path["components/health/bt.c"]
 
 
 def test_incremental_pipeline_updates_job_context_metadata(tmp_path: Path) -> None:
