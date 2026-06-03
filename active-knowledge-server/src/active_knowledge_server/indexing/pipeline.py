@@ -561,10 +561,10 @@ class IncrementalIndexPipeline:
 
         path = self.state_path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(state.to_dict(), ensure_ascii=True, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        payload = json.dumps(state.to_dict(), ensure_ascii=True, indent=2, sort_keys=True)
+        temporary_path = path.with_name(f"{path.name}.tmp")
+        temporary_path.write_text(payload, encoding="utf-8")
+        temporary_path.replace(path)
         return path
 
     def capture_state(

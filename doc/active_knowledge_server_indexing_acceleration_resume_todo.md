@@ -550,17 +550,29 @@ TODO：
 
 ### AR2-06 index_state 保存策略校验
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`TEST`、`IMPL`
 - 依赖：`AR2-05`
 
 TODO：
 
-- [ ] 确认 partial/interrupted job 不写 `index_state.json`。
-- [ ] ready job 才保存当前 state。
-- [ ] resume partial job ready 后保存 state。
-- [ ] 测试 state 与 task ledger 不一致时以 task ledger 恢复、以 ready 状态收敛。
+- [x] 确认 partial/interrupted job 不写 `index_state.json`。
+- [x] ready job 才保存当前 state。
+- [x] resume partial job ready 后保存 state。
+- [x] 测试 state 与 task ledger 不一致时以 task ledger 恢复、以 ready 状态收敛。
+
+行业实践调研结论：
+
+- Spring Batch 的 `ExecutionContext` 在 step commit 点持久化，restart 语义依赖“只从已提交边界恢复”；本项目对应 `index_state.json` 只在整次 incremental run 收敛为 ready 后推进，partial/interrupted 继续保留旧 baseline。参考：https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/configuring.html 与 https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/restart.html
+- Spark Structured Streaming 把 checkpoint/commit log 作为恢复真相源，已完成 micro-batch 才推进可恢复进度；本项目对应 task ledger 比旧 `index_state.json` 更优先，恢复时先按 applied checkpoint skip，直到 run 成功再发布新的 diff baseline。参考：https://spark.apache.org/docs/3.5.0/structured-streaming-programming-guide.html
+- Kafka consumer 将 committed position 定义为“进程失败后恢复到的位置”，并强调提交的是下一条将处理的 offset；本项目对应 `index_state.json` 只能表示“下一轮 diff 应从哪里开始”，不能在未完成 run 时提前推进。参考：https://kafka.apache.org/42/javadoc/org/apache/kafka/clients/consumer/KafkaConsumer.html
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 的 `save_state(...)` 改为同目录临时文件写入后原子替换，避免 ready 态发布 baseline 时把旧 `index_state.json` 部分覆盖。
+- `tests/unit/test_incremental_pipeline.py` 新增 ready run 保存当前 state 的覆盖，并扩展 interrupted/resume 测试：中断前 state 保持旧 baseline，resume 成功后 state 收敛到 `plan.current_state`。
+- 现有 `test_incremental_pipeline_returns_partial_ready_when_doc_increment_fails(...)` 继续覆盖 partial_ready 不推进 state；新增断言共同证明 `index_state.json` 只代表“上一次完整成功状态”。
 
 验收标准：
 

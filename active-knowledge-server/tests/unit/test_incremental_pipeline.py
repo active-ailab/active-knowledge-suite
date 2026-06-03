@@ -1072,6 +1072,43 @@ int health_incremental_probe(void)
     assert result.metadata["code_collect_workers"]["workers"] == 2
 
 
+def test_incremental_pipeline_saves_current_state_after_ready_run(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    previous_state = pipeline.load_state()
+    assert previous_state is not None
+
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """/* Health subsystem runtime entrypoints. */
+#include "health.h"
+
+#define HEALTH_READY_STATE 123
+
+int health_ready_state(void)
+{
+    return HEALTH_READY_STATE;
+}
+""",
+        encoding="utf-8",
+    )
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+    )
+
+    assert result.result_status == "ready"
+    saved_state = pipeline.load_state()
+    assert saved_state == plan.current_state
+    assert saved_state != previous_state
+
+
 def test_incremental_pipeline_skips_applied_code_task_and_collects_only_unfinished_paths(
     tmp_path: Path,
 ) -> None:
@@ -1236,6 +1273,8 @@ int health_interrupt_bt(void)
     tasks = {task.task_key: task for task in make_index_task_list(plan)}
     interrupted_task_keys: list[str] = []
     original_record = record_task_applied_checkpoint
+    previous_state = pipeline.load_state()
+    assert previous_state is not None
 
     def interrupt_after_second_code_checkpoint(
         store_arg: SQLiteJobStore,
@@ -1267,12 +1306,13 @@ int health_interrupt_bt(void)
                 plan_signature=signature,
                 resume_policy={"mode": "auto"},
             ),
-        )
+    )
 
     assert interrupted_task_keys == [
         "code:apply:components/health/bt.c",
         "code:apply:components/health/main.c",
     ]
+    assert pipeline.load_state() == previous_state
     for task_key in interrupted_task_keys:
         assert store.get_checkpoint(job.job_id, task_checkpoint_key(tasks[task_key])) is not None
 
@@ -1298,6 +1338,10 @@ int health_interrupt_bt(void)
 
     assert result.result_status == "ready"
     assert result.metadata["tasks"]["skipped"] == 2
+    assert resumed_pipeline.load_state() == plan.current_state
+    converged_plan = resumed_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    assert converged_plan.changed_code_paths == ()
+    assert converged_plan.deleted_code_paths == ()
     skipped_paths = {
         event.current_path
         for event in events
@@ -1364,6 +1408,8 @@ int health_replay_probe(void)
         for task in make_index_task_list(plan)
         if task.task_key == "code:apply:components/health/main.c"
     )
+    previous_state = healthy_pipeline.load_state()
+    assert previous_state is not None
     store = SQLiteJobStore(Path(config.storage.jobs.path))
     job = store.create_job(
         snapshot_id=CURRENT_SNAPSHOT_ID,
@@ -1381,10 +1427,11 @@ int health_replay_probe(void)
                 plan_signature=signature,
                 resume_policy={"mode": "auto"},
             ),
-        )
+    )
 
     assert interrupted_pipeline.interrupted_paths == ["components/health/main.c"]
     assert store.get_checkpoint(job.job_id, task_checkpoint_key(replayed_task)) is None
+    assert interrupted_pipeline.load_state() == previous_state
 
     resumed_pipeline = IncrementalIndexPipeline(
         config,
@@ -1405,6 +1452,7 @@ int health_replay_probe(void)
     )
 
     assert result.result_status == "ready"
+    assert resumed_pipeline.load_state() == plan.current_state
     reader = metadata_adapter.reader()
     scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
     file_records = [
