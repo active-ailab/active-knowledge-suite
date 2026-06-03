@@ -390,6 +390,7 @@ class LanceDBVectorWriter:
                 else:
                     rows[existing_index] = row
             write_collection_rows(root, object_type, rows)
+            validate_collection_rows_written(root, object_type, new_rows)
 
         with self._metadata_writer.transaction():
             self._metadata_writer.upsert_vector_refs(normalized_records)
@@ -562,6 +563,23 @@ def write_collection_rows(
         encoding="utf-8",
     )
     write_manifest(root)
+
+
+def validate_collection_rows_written(
+    root: Path,
+    object_type: VectorObjectType,
+    expected_rows: Sequence[_VectorRow],
+) -> None:
+    """Verify vector payload rows before committing metadata vector refs."""
+
+    persisted = {row.vector_ref_id: row for row in load_collection_rows(root, object_type)}
+    missing_or_mismatched = [
+        row.vector_ref_id for row in expected_rows if persisted.get(row.vector_ref_id) != row
+    ]
+    if missing_or_mismatched:
+        raise RuntimeError(
+            "vector payload validation failed for refs: " + ", ".join(sorted(missing_or_mismatched))
+        )
 
 
 def write_manifest(root: Path) -> None:

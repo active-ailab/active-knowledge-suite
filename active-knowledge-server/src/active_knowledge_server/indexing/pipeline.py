@@ -655,12 +655,10 @@ class IncrementalIndexPipeline:
         """Plan one incremental update from persisted state and current manifests."""
 
         previous = self.load_state()
-        current, workspace_inventory, source_docs_manifest, collected_profiles = (
-            self.capture_state(
-                snapshot_id=snapshot_id,
-                progress_callback=progress_callback,
-                started_at=started_at,
-            )
+        current, workspace_inventory, source_docs_manifest, collected_profiles = self.capture_state(
+            snapshot_id=snapshot_id,
+            progress_callback=progress_callback,
+            started_at=started_at,
         )
 
         code_schema_changed = (
@@ -861,6 +859,7 @@ class IncrementalIndexPipeline:
             "profile_relations": 0,
             "workspace_map": 0,
         }
+        pending_vector_task_checkpoints: list[tuple[str, dict[str, object]]] = []
 
         def emit(
             *,
@@ -894,6 +893,7 @@ class IncrementalIndexPipeline:
             task_key: str,
             *,
             checkpoint_metadata: Mapping[str, object] | None = None,
+            update_stats: bool = True,
         ) -> None:
             if run_context is not None and checkpoint_metadata is not None:
                 task = _find_index_task(tasks, task_key)
@@ -909,8 +909,9 @@ class IncrementalIndexPipeline:
                             **dict(checkpoint_metadata),
                         },
                     )
-            task_stats["applied"] += 1
-            if job_reporter is not None:
+            if update_stats:
+                task_stats["applied"] += 1
+            if job_reporter is not None and update_stats:
                 job_reporter.task_applied(task_key)
 
         def mark_task_skipped(task: IndexTask) -> None:
@@ -1371,6 +1372,16 @@ class IncrementalIndexPipeline:
                                 indexed_docs,
                                 relative_path=storage_relative_path,
                             )
+                            pending_vector_task_checkpoints.append(
+                                (
+                                    current_doc_task_key,
+                                    _vector_checkpoint_metadata(
+                                        indexed_docs,
+                                        relative_path=relative_path,
+                                        storage_relative_path=storage_relative_path,
+                                    ),
+                                )
+                            )
                             vector_apply_done += 1
                             global_done += 1
                             elapsed_seconds = time.perf_counter() - vector_started_at
@@ -1422,6 +1433,12 @@ class IncrementalIndexPipeline:
                     message="Flushing document vectors to overlay store",
                 )
             vector_writer.flush()
+            for task_key, checkpoint_metadata in pending_vector_task_checkpoints:
+                mark_task_applied(
+                    task_key,
+                    checkpoint_metadata=checkpoint_metadata,
+                    update_stats=False,
+                )
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
             task_key = "profile:relations"
@@ -1893,9 +1910,7 @@ def _index_plan_summary(plan: IncrementalIndexPlan) -> dict[str, object]:
         "reindex_all_code": plan.reindex_all_code,
         "reindex_all_docs": plan.reindex_all_docs,
         "rebuild_vectors": plan.rebuild_vectors,
-        "rebuild_profile_conditioned_relations": (
-            plan.rebuild_profile_conditioned_relations
-        ),
+        "rebuild_profile_conditioned_relations": (plan.rebuild_profile_conditioned_relations),
         "changed_code_paths_count": len(plan.changed_code_paths),
         "deleted_code_paths_count": len(plan.deleted_code_paths),
         "changed_doc_paths_count": len(plan.changed_doc_paths),
@@ -2009,9 +2024,7 @@ def _resume_policy_metadata(
         return {}
     return {
         "resume_policy": {
-            str(key): value
-            for key, value in resume_policy.items()
-            if value is not None
+            str(key): value for key, value in resume_policy.items() if value is not None
         }
     }
 
@@ -2066,6 +2079,40 @@ def _bundle_checkpoint_metadata(
     if storage_relative_path is not None:
         metadata["storage_relative_path"] = storage_relative_path
     return metadata
+
+
+def _vector_checkpoint_metadata(
+    indexed: IndexedDocuments,
+    *,
+    relative_path: str,
+    storage_relative_path: str,
+) -> dict[str, object]:
+    chunk_paths = {
+        record.chunk_id: _chunk_relative_path(record) for record in indexed.chunk_records
+    }
+    writes = tuple(
+        write
+        for write in indexed.vector_writes
+        if chunk_paths.get(write.record.object_id) == storage_relative_path
+    )
+    embedding_models = sorted({write.record.embedding_model_version for write in writes})
+    return {
+        "operation": "doc",
+        "source_kind": "vector",
+        "relative_path": relative_path,
+        "storage_relative_path": storage_relative_path,
+        "record_counts": {
+            "files": 0,
+            "chunks": len({write.record.object_id for write in writes}),
+            "entities": 0,
+            "relations": 0,
+            "evidence": 0,
+            "vector_refs": len(writes),
+        },
+        "embedding_models": embedding_models,
+        "vector_ref_ids": [write.record.vector_ref_id for write in writes],
+        "warning_codes": list(_warning_codes_for_path(indexed.warnings, storage_relative_path)),
+    }
 
 
 def _warning_codes_for_path(warnings: Sequence[object], relative_path: str) -> tuple[str, ...]:
@@ -2507,9 +2554,7 @@ def _merge_result_section(
             existing = diagnostics.get("slowest_items", [])
             assert isinstance(existing, list)
             existing.extend(dict(item) for item in slowest if isinstance(item, Mapping))
-            diagnostics["slowest_items"] = list(
-                _top_slowest_items(existing)
-            )
+            diagnostics["slowest_items"] = list(_top_slowest_items(existing))
 
 
 def _record_elapsed(
@@ -2543,11 +2588,7 @@ def _top_slowest_items(
     limit: int = 5,
 ) -> tuple[dict[str, object], ...]:
     ranked = sorted(
-        (
-            dict(item)
-            for item in items
-            if isinstance(item.get("elapsed_seconds"), (int, float))
-        ),
+        (dict(item) for item in items if isinstance(item.get("elapsed_seconds"), (int, float))),
         key=lambda item: float(item["elapsed_seconds"]),
         reverse=True,
     )

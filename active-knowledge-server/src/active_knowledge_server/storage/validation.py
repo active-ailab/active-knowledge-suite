@@ -123,7 +123,9 @@ def validate_storage_consistency(
         progress("check fts metadata consistency")
         checks.extend(check_fts_metadata_consistency(reader, sqlite_paths, query_scope))
         progress("check vector refs")
-        checks.extend(check_vector_refs(reader, baseline_vector_path, delta_vector_path, query_scope))
+        checks.extend(
+            check_vector_refs(reader, baseline_vector_path, delta_vector_path, query_scope)
+        )
         progress("check evidence targets")
         checks.extend(check_evidence_targets(reader, query_scope))
         progress("check relation targets")
@@ -281,17 +283,20 @@ def check_vector_refs(
     delta_vector_path: Path,
     scope: QueryScope,
 ) -> tuple[StorageValidationCheck, ...]:
-    payload_refs = {
-        row.vector_ref_id
-        for row in load_store_rows(baseline_vector_path, ("chunk", "entity", "evidence"))
+    payload_rows = {
+        row.vector_ref_id: row
+        for row in (
+            *load_store_rows(baseline_vector_path, ("chunk", "entity", "evidence")),
+            *load_store_rows(delta_vector_path, ("chunk", "entity", "evidence")),
+        )
     }
-    payload_refs.update(
-        row.vector_ref_id
-        for row in load_store_rows(delta_vector_path, ("chunk", "entity", "evidence"))
-    )
+    metadata_refs = {
+        vector_ref.vector_ref_id: vector_ref for vector_ref in reader.iter_vector_refs(scope)
+    }
     checks: list[StorageValidationCheck] = []
-    for vector_ref in reader.iter_vector_refs(scope):
-        if vector_ref.vector_ref_id not in payload_refs:
+    for vector_ref in metadata_refs.values():
+        payload = payload_rows.get(vector_ref.vector_ref_id)
+        if payload is None:
             checks.append(
                 StorageValidationCheck(
                     check_code="storage.vector_ref_missing",
@@ -301,6 +306,45 @@ def check_vector_refs(
                     suggested_action="Rebuild vectors for the affected object.",
                 )
             )
+            continue
+        mismatched_fields = tuple(
+            field
+            for field, metadata_value, payload_value in (
+                ("object_type", vector_ref.object_type, payload.object_type),
+                ("object_id", vector_ref.object_id, payload.object_id),
+                ("chunk_id", vector_ref.chunk_id, payload.chunk_id),
+                (
+                    "embedding_model_version",
+                    vector_ref.embedding_model_version,
+                    payload.embedding_model_version,
+                ),
+                ("content_hash", vector_ref.content_hash, payload.content_hash),
+                ("source_scope", vector_ref.source_scope, payload.source_scope),
+                ("profile_id", vector_ref.profile_id, payload.profile_id),
+            )
+            if metadata_value != payload_value
+        )
+        if mismatched_fields:
+            checks.append(
+                StorageValidationCheck(
+                    check_code="storage.vector_ref_payload_mismatch",
+                    severity="degraded",
+                    message="Metadata vector_ref and vector payload disagree.",
+                    affected_objects=(f"vector_ref:{vector_ref.vector_ref_id}",),
+                    suggested_action="Rebuild vectors for the affected object.",
+                    details={"fields": list(mismatched_fields)},
+                )
+            )
+    for vector_ref_id in sorted(set(payload_rows) - set(metadata_refs)):
+        checks.append(
+            StorageValidationCheck(
+                check_code="storage.vector_payload_orphan",
+                severity="degraded",
+                message="Vector payload has no matching metadata vector_ref.",
+                affected_objects=(f"vector_ref:{vector_ref_id}",),
+                suggested_action="Delete stale vector payloads or rebuild vectors.",
+            )
+        )
     return tuple(checks)
 
 
@@ -398,9 +442,7 @@ def check_tombstone_leaks(
                 )
             )
         if object_type in {"chunk", "entity"}:
-            fts_table: StorageFTSTable = (
-                "chunk_fts" if object_type == "chunk" else "entity_fts"
-            )
+            fts_table: StorageFTSTable = "chunk_fts" if object_type == "chunk" else "entity_fts"
             matches = tuple(
                 reader.search_fts(
                     FTSQuery(index_name=fts_table, query=object_id, scope=scope, top_k=20)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from active_knowledge_server.storage import (
     ChunkRecord,
     FileRecord,
@@ -12,6 +14,7 @@ from active_knowledge_server.storage import (
     TombstoneRecord,
     VectorQuery,
     VectorRefRecord,
+    lancedb_store,
 )
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.sqlite_store import (
@@ -240,6 +243,54 @@ def test_vector_batch_upsert_writes_collection_and_metadata_refs(tmp_path: Path)
     assert chunk_b is not None
     assert chunk_a.metadata["embedding_ref"] == "vec-a"
     assert chunk_b.metadata["embedding_ref"] == "vec-b"
+
+
+def test_vector_upsert_validates_payload_before_metadata_refs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_adapter, vector_adapter, _baseline_vectors, delta_vectors = build_adapters(tmp_path)
+    seed_file(
+        metadata_adapter,
+        target="overlay",
+        file_id="file-overlay",
+        relative_path="knowledge-sources/api/bad-vector.md",
+    )
+    seed_chunk(
+        metadata_adapter,
+        target="overlay",
+        chunk_id="chunk-bad",
+        file_id="file-overlay",
+        content_hash="hash:bad",
+    )
+    original_write_collection_rows = lancedb_store.write_collection_rows
+
+    def drop_collection_rows(
+        root: Path,
+        object_type: lancedb_store.VectorObjectType,
+        rows: object,
+    ) -> None:
+        original_write_collection_rows(root, object_type, ())
+
+    monkeypatch.setattr(lancedb_store, "write_collection_rows", drop_collection_rows)
+    writer = vector_adapter.writer(StorageWriteRequest(target="overlay"))
+
+    with pytest.raises(RuntimeError, match="vector payload validation failed"):
+        writer.upsert_vector(
+            VectorRefRecord(
+                vector_ref_id="vec-bad",
+                object_type="chunk",
+                object_id="chunk-bad",
+                chunk_id="chunk-bad",
+                embedding_model_version="bge-m3",
+                content_hash="hash:bad",
+                profile_id="watch",
+            ),
+            embedding=(0.4, 0.6),
+        )
+
+    assert metadata_adapter.reader().get_vector_ref("vec-bad") is None
+    assert read_collection(delta_vectors) == []
 
 
 def test_overlay_vector_overrides_baseline_candidate_for_same_logical_chunk(tmp_path: Path) -> None:

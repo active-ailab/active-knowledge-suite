@@ -472,7 +472,7 @@ TODO：
 
 - `active_knowledge_server/indexing/pipeline.py` 的 code/doc apply 循环在 `_tombstone_deleted_path(...)`、`_apply_code_bundle(...)`、`_apply_doc_bundle(...)` 正常返回后调用 `record_task_applied_checkpoint(...)`，写入 `task:applied:<task_key>`。
 - checkpoint metadata 包含 `job_id`、`plan_signature`、`applied_at`、`operation`、`source_kind`、`relative_path`、可选 `storage_relative_path`、`record_counts` 和 `warning_codes`；不包含源码、正文或大对象。
-- `mark_task_applied(...)` 只有在传入 code/doc checkpoint metadata 时才落 ledger，避免 AR2-04 尚未确认 vector writer flush 边界前提前写 `vector:doc:*` applied。
+- `mark_task_applied(...)` 只有在传入 checkpoint metadata 时才落 ledger；AR2-04 已为 vector task 在 vector writer flush 成功后补写 `vector:doc:*` applied。
 - `tests/unit/test_incremental_pipeline.py` 新增 code apply/delete、doc apply/delete 成功 checkpoint 覆盖，并验证 code apply 抛错时不会写 applied checkpoint。
 
 验收标准：
@@ -482,7 +482,7 @@ TODO：
 
 ### AR2-04 vector task checkpoint
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P0`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-03`
@@ -490,10 +490,27 @@ TODO：
 
 TODO：
 
-- [ ] 每个 doc vector upsert 成功后写 `vector:doc:<path>` applied。
-- [ ] vector apply 跳过时不重复写 vector payload。
-- [ ] vector ref 与 vector payload 校验失败时，该 vector task 保持 failed/pending。
-- [ ] 单测覆盖 vector task 已 applied 时只重写 metadata 或完全跳过的策略。
+- [x] 每个 doc vector upsert 成功后写 `vector:doc:<path>` applied。
+- [x] vector apply 跳过时不重复写 vector payload。
+- [x] vector ref 与 vector payload 校验失败时，该 vector task 保持 failed/pending。
+- [x] 单测覆盖 vector task 已 applied 时只重写 metadata 或完全跳过的策略。
+
+行业实践调研结论：
+
+- LanceDB 的 `merge_insert` 支持 matched update + unmatched insert 形成 upsert 语义；本项目对应继续用稳定 `vector_ref_id` 让重复 vector upsert 收敛，并在 payload 写后读回校验通过后才提交 metadata ref。参考：https://docs.lancedb.com/tables/update
+- Qdrant point loading 明确强调同 ID 重复上传是幂等覆盖；本项目对应在 vector task skip 时完全不重复写 payload，未 checkpoint 的重放仍依赖稳定 ID 覆盖而不是 append。参考：https://qdrant.tech/documentation/manage-data/points/
+- Flink checkpoint 用 durable state + 可重放 source 恢复到已完成 checkpoint；本项目对应把 `task:applied:vector:doc:<path>` 作为“已提交 vector payload/ref”的恢复游标，checkpoint 仍然后写。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/datastream/fault-tolerance/checkpointing/
+- Spark Structured Streaming 从 checkpoint location 恢复 progress/state，同时限制 source/schema 等恢复兼容性；本项目继续复用 plan signature 校验，避免 embedding model 或 manifest 变化时误用旧 vector checkpoint。参考：https://spark.apache.org/docs/3.5.6/structured-streaming-programming-guide.html
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 对 doc vector apply 记录 pending checkpoint metadata；`vector_writer.flush()` 成功后才写 `task:applied:vector:doc:<path>`，metadata 包含 `job_id`、`plan_signature`、`applied_at`、`relative_path`、`storage_relative_path`、`record_counts`、`embedding_models` 和 `vector_ref_ids`。
+- 已 applied 的 vector task 会进入 skipped 统计并发出 skipped progress event；对应 doc path 不再进入 `doc_paths_to_collect`，因此不会再次调用 vector writer 写 payload。
+- `active_knowledge_server/storage/lancedb_store.py` 在 fallback vector collection 写入后立即读回校验 payload row；校验失败会抛错，pipeline 将该 vector task 计为 failed 且不写 applied checkpoint。
+- `active_knowledge_server/storage/validation.py` 扩展 vector ref/payload 双向一致性检查：metadata ref 缺 payload 继续报告 `storage.vector_ref_missing`，payload 缺 metadata ref 报告 `storage.vector_payload_orphan`，字段不一致报告 `storage.vector_ref_payload_mismatch`。
+- `tests/unit/test_incremental_pipeline.py` 覆盖 successful vector checkpoint、已 applied vector task 不重复写 payload、vector 写入失败不 checkpoint。
+- `tests/unit/test_lancedb_store.py` 覆盖 payload 写后读回校验失败时不写 metadata ref。
+- `tests/unit/test_storage_validation.py` 覆盖 missing payload、orphan payload、ref/payload mismatch。
 
 验收标准：
 

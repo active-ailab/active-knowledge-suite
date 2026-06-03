@@ -16,6 +16,7 @@ from active_knowledge_server.storage import (
     StorageWriteRequest,
     VectorRefRecord,
 )
+from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
     migrate_sqlite_store,
@@ -41,9 +42,7 @@ def resolve_model(tmp_path: Path) -> ActiveKnowledgeConfig:
         },
         "project": {"workspace_root": str(workspace)},
         "storage": {
-            "baseline": {
-                "manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")
-            },
+            "baseline": {"manifest": str(tmp_path / ".active-kb" / "baseline" / "manifest.json")},
             "metadata": {"path": str(baseline_db), "mode": "readwrite"},
             "overlay": {"path": str(overlay_db), "mode": "readwrite"},
             "jobs": {"path": str(jobs_db), "mode": "readwrite"},
@@ -117,9 +116,7 @@ def test_validate_reports_missing_fts_row(tmp_path: Path) -> None:
     report = validate_storage_consistency(config, cwd=tmp_path)
 
     assert report.status == "degraded"
-    assert [check.check_code for check in report.checks] == [
-        "storage.fts_metadata_mismatch"
-    ]
+    assert [check.check_code for check in report.checks] == ["storage.fts_metadata_mismatch"]
     assert report.checks[0].affected_objects == ("chunk:chunk-doc",)
 
 
@@ -161,6 +158,77 @@ def test_validate_reports_missing_vector_payload(tmp_path: Path) -> None:
     report = validate_storage_consistency(config, cwd=tmp_path)
 
     assert "storage.vector_ref_missing" in {check.check_code for check in report.checks}
+
+
+def test_validate_reports_orphan_vector_payload(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    adapter = build_adapter(config)
+    seed_file_and_chunk(adapter)
+    vector_adapter = LanceDBVectorAdapter(
+        baseline_vector_path=Path(config.storage.vector.path),
+        delta_vector_path=Path(config.storage.vector_delta.path),
+        metadata_adapter=adapter,
+    )
+    vector_adapter.writer(
+        StorageWriteRequest(target="baseline", operation_mode="baseline_publish")
+    ).upsert_vector(
+        VectorRefRecord(
+            vector_ref_id="vec-doc",
+            object_type="chunk",
+            object_id="chunk-doc",
+            chunk_id="chunk-doc",
+            embedding_model_version="bge-m3",
+            content_hash="hash:chunk",
+        ),
+        embedding=(1.0, 0.0),
+    )
+    with sqlite_connection(Path(config.storage.metadata.path)) as connection:
+        connection.execute("DELETE FROM vector_ref WHERE vector_ref_id = ?", ("vec-doc",))
+        connection.commit()
+
+    report = validate_storage_consistency(config, cwd=tmp_path)
+
+    assert "storage.vector_payload_orphan" in {check.check_code for check in report.checks}
+
+
+def test_validate_reports_vector_ref_payload_mismatch(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    adapter = build_adapter(config)
+    seed_file_and_chunk(adapter)
+    vector_adapter = LanceDBVectorAdapter(
+        baseline_vector_path=Path(config.storage.vector.path),
+        delta_vector_path=Path(config.storage.vector_delta.path),
+        metadata_adapter=adapter,
+    )
+    vector_adapter.writer(
+        StorageWriteRequest(target="baseline", operation_mode="baseline_publish")
+    ).upsert_vector(
+        VectorRefRecord(
+            vector_ref_id="vec-doc",
+            object_type="chunk",
+            object_id="chunk-doc",
+            chunk_id="chunk-doc",
+            embedding_model_version="bge-m3",
+            content_hash="hash:chunk",
+        ),
+        embedding=(1.0, 0.0),
+    )
+    with sqlite_connection(Path(config.storage.metadata.path)) as connection:
+        connection.execute(
+            "UPDATE vector_ref SET content_hash = ? WHERE vector_ref_id = ?",
+            ("hash:changed", "vec-doc"),
+        )
+        connection.commit()
+
+    report = validate_storage_consistency(config, cwd=tmp_path)
+    mismatch = next(
+        check
+        for check in report.checks
+        if check.check_code == "storage.vector_ref_payload_mismatch"
+    )
+
+    assert mismatch.affected_objects == ("vector_ref:vec-doc",)
+    assert mismatch.details["fields"] == ["content_hash"]
 
 
 def test_validate_reports_dangling_evidence(tmp_path: Path) -> None:

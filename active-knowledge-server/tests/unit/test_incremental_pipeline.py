@@ -77,6 +77,75 @@ class FailingCodeApplyPipeline(IncrementalIndexPipeline):
         raise RuntimeError("synthetic code apply failure")
 
 
+class SpyVectorWriter:
+    def __init__(self, inner: Any, upsert_batches: list[tuple[object, ...]]) -> None:
+        self._inner = inner
+        self._upsert_batches = upsert_batches
+
+    @property
+    def request(self) -> StorageWriteRequest:
+        return self._inner.request
+
+    def upsert_vector(self, record: object, embedding: object) -> object:
+        self._upsert_batches.append(((record, embedding),))
+        return self._inner.upsert_vector(record, embedding)
+
+    def upsert_vectors(self, records: object) -> object:
+        batch = tuple(records)
+        self._upsert_batches.append(batch)
+        return self._inner.upsert_vectors(batch)
+
+    def delete_object_vectors(self, object_type: object, object_ids: object) -> object:
+        return self._inner.delete_object_vectors(object_type, object_ids)
+
+    def flush(self) -> None:
+        self._inner.flush()
+
+
+class SpyVectorAdapter:
+    def __init__(self, inner: LanceDBVectorAdapter) -> None:
+        self._inner = inner
+        self.upsert_batches: list[tuple[object, ...]] = []
+
+    def writer(self, request: StorageWriteRequest) -> SpyVectorWriter:
+        return SpyVectorWriter(self._inner.writer(request), self.upsert_batches)
+
+    def reader(self) -> object:
+        return self._inner.reader()
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class FailingVectorWriter:
+    @property
+    def request(self) -> StorageWriteRequest:
+        return StorageWriteRequest(target="overlay")
+
+    def upsert_vector(self, record: object, embedding: object) -> object:
+        raise RuntimeError("vector payload validation failed")
+
+    def upsert_vectors(self, records: object) -> object:
+        raise RuntimeError("vector payload validation failed")
+
+    def delete_object_vectors(self, object_type: object, object_ids: object) -> int:
+        return 0
+
+    def flush(self) -> None:
+        return None
+
+
+class FailingVectorAdapter:
+    def writer(self, request: StorageWriteRequest) -> FailingVectorWriter:
+        return FailingVectorWriter()
+
+    def reader(self) -> object:
+        raise AssertionError("reader is not used by this test")
+
+    def close(self) -> None:
+        return None
+
+
 def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
     workspace = tmp_path / "workspace"
     docs = tmp_path / "knowledge-sources"
@@ -548,6 +617,211 @@ def test_incremental_pipeline_rebuilds_doc_vectors_on_embedding_model_change(
     assert {row["embedding_model_version"] for row in stored_vectors} == {"text-embedding-local-v2"}
 
 
+def test_incremental_pipeline_checkpoints_successful_doc_vector_tasks(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    seed_baseline(config, cwd=tmp_path, include_docs=True)
+    updated_config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"embeddings": {"model": "text-embedding-local-v2"}}},
+    )
+    metadata_adapter, vector_adapter, _baseline_vectors, _delta_vectors = build_adapters(
+        updated_config
+    )
+    pipeline = IncrementalIndexPipeline(
+        updated_config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(
+        plan,
+        config=updated_config,
+        mode="incremental",
+        target="local",
+    )
+    store = SQLiteJobStore(Path(updated_config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    assert result.plan.rebuild_vectors is True
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    checkpoint = decode_task_checkpoint(
+        store.get_checkpoint(
+            job.job_id,
+            task_checkpoint_key(tasks["vector:doc:api/sensor.md"]),
+        )
+    )
+
+    assert checkpoint is not None
+    assert checkpoint.status == "applied"
+    assert checkpoint.metadata["job_id"] == job.job_id
+    assert checkpoint.metadata["plan_signature"] == signature.digest
+    assert checkpoint.metadata["operation"] == "doc"
+    assert checkpoint.metadata["source_kind"] == "vector"
+    assert checkpoint.metadata["relative_path"] == "api/sensor.md"
+    assert checkpoint.metadata["storage_relative_path"] == "knowledge-sources/api/sensor.md"
+    assert checkpoint.metadata["record_counts"]["vector_refs"] >= 1
+    assert checkpoint.metadata["embedding_models"] == ["text-embedding-local-v2"]
+
+
+def test_incremental_pipeline_skips_applied_doc_vector_task_without_payload_rewrite(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    seed_baseline(config, cwd=tmp_path, include_docs=True)
+    updated_config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"embeddings": {"model": "text-embedding-local-v2"}}},
+    )
+    metadata_adapter, vector_adapter, _baseline_vectors, delta_vectors = build_adapters(
+        updated_config
+    )
+    pipeline = IncrementalIndexPipeline(
+        updated_config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+    )
+    plan = pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(
+        plan,
+        config=updated_config,
+        mode="incremental",
+        target="local",
+    )
+    vector_task = next(
+        task for task in make_index_task_list(plan) if task.task_key == "vector:doc:api/sensor.md"
+    )
+    store = SQLiteJobStore(Path(updated_config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    record_task_applied_checkpoint(
+        store,
+        job.job_id,
+        vector_task,
+        metadata={"plan_signature": signature.digest},
+    )
+    spy_vector_adapter = SpyVectorAdapter(vector_adapter)
+    pipeline = IncrementalIndexPipeline(
+        updated_config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=spy_vector_adapter,  # type: ignore[arg-type]
+    )
+
+    events: list[IndexProgressEvent] = []
+    result = pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        progress_callback=events.append,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    assert result.metadata["tasks"]["skipped"] == 1
+    assert spy_vector_adapter.upsert_batches == []
+    assert read_vector_collection(delta_vectors) == []
+    assert any(
+        event.message == "Skipping previously applied task"
+        and event.current_path == "api/sensor.md"
+        for event in events
+    )
+
+
+def test_incremental_pipeline_does_not_checkpoint_failed_doc_vector_task(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    seed_baseline(config, cwd=tmp_path, include_docs=True)
+    updated_config = resolve_model(
+        tmp_path,
+        overrides={"indexing": {"embeddings": {"model": "text-embedding-local-v2"}}},
+    )
+    metadata_adapter, _vector_adapter, _baseline_vectors, _delta_vectors = build_adapters(
+        updated_config
+    )
+    healthy_pipeline = IncrementalIndexPipeline(
+        updated_config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(
+        plan,
+        config=updated_config,
+        mode="incremental",
+        target="local",
+    )
+    vector_task = next(
+        task for task in make_index_task_list(plan) if task.task_key == "vector:doc:api/sensor.md"
+    )
+    store = SQLiteJobStore(Path(updated_config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    failing_pipeline = IncrementalIndexPipeline(
+        updated_config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=FailingVectorAdapter(),  # type: ignore[arg-type]
+    )
+
+    result = failing_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "partial_ready"
+    assert result.metadata["tasks"]["failed"] == 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(vector_task)) is None
+
+
 def test_incremental_pipeline_returns_partial_ready_when_doc_increment_fails(
     tmp_path: Path,
 ) -> None:
@@ -667,8 +941,7 @@ int health_progress_probe(void)
     assert code_finalize_events
     assert any("assembling" in (event.message or "").lower() for event in code_finalize_events)
     assert any(
-        event.phase == "code_apply"
-        and event.message == "Flushing code changes to overlay metadata"
+        event.phase == "code_apply" and event.message == "Flushing code changes to overlay metadata"
         for event in events
     )
     workspace_map_events = [event for event in events if event.phase == "workspace_map"]
@@ -1052,10 +1325,7 @@ This update should receive a task checkpoint.
     assert apply_checkpoint.metadata["plan_signature"] == signature.digest
     assert apply_checkpoint.metadata["operation"] == "apply"
     assert apply_checkpoint.metadata["relative_path"] == "api/sensor.md"
-    assert (
-        apply_checkpoint.metadata["storage_relative_path"]
-        == "knowledge-sources/api/sensor.md"
-    )
+    assert apply_checkpoint.metadata["storage_relative_path"] == "knowledge-sources/api/sensor.md"
     assert apply_checkpoint.metadata["record_counts"]["files"] == 1
     assert apply_checkpoint.metadata["record_counts"]["chunks"] >= 1
     assert apply_checkpoint.metadata["warning_codes"] == []
@@ -1066,8 +1336,7 @@ This update should receive a task checkpoint.
     assert delete_checkpoint.metadata["operation"] == "delete"
     assert delete_checkpoint.metadata["relative_path"] == "api/actuator.md"
     assert (
-        delete_checkpoint.metadata["storage_relative_path"]
-        == "knowledge-sources/api/actuator.md"
+        delete_checkpoint.metadata["storage_relative_path"] == "knowledge-sources/api/actuator.md"
     )
 
 
@@ -1173,8 +1442,7 @@ int health_job_context_probe(void)
     assert updated.status == "reporting"
     assert updated.metadata["plan_signature"].startswith("sha256:")
     assert (
-        updated.metadata["plan_signature_payload"]["digest"]
-        == updated.metadata["plan_signature"]
+        updated.metadata["plan_signature_payload"]["digest"] == updated.metadata["plan_signature"]
     )
     assert updated.metadata["plan_summary"]["changed_code_paths_count"] == 1
     assert updated.metadata["plan_summary"]["source"] == "code"
