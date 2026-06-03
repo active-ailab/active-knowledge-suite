@@ -13,9 +13,12 @@ from active_knowledge_server.indexing.jobs import (
     JobStateTransitionError,
     SQLiteJobStore,
     decode_task_checkpoint,
+    get_task_state,
+    list_task_states,
     parse_timestamp,
     record_task_applied_checkpoint,
     record_task_collected_checkpoint,
+    set_task_state,
     task_checkpoint_key,
     task_has_applied_checkpoint,
 )
@@ -364,3 +367,55 @@ def test_collected_checkpoint_is_not_an_applied_skip_boundary(tmp_path: Path) ->
     )
     assert collected is not None
     assert collected.status == "collected"
+
+
+def test_task_state_kv_ledger_persists_updates_and_filters(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    doc_task = IndexTask(
+        task_key="doc:apply:guide.md",
+        phase="doc_apply",
+        source_kind="doc",
+        operation="apply",
+        relative_path="guide.md",
+        input_hash="doc-hash",
+        schema_version="doc_indexer.v1",
+    )
+    vector_task = IndexTask(
+        task_key="vector:doc:guide.md",
+        phase="vectors_apply",
+        source_kind="vector",
+        operation="doc",
+        relative_path="guide.md",
+        input_hash="vector-hash",
+        schema_version="embedding_preparation.v1",
+    )
+
+    set_task_state(
+        store,
+        job.job_id,
+        doc_task,
+        status="applied",
+        metadata={"attempt": 1, "record_count": 3},
+    )
+    set_task_state(
+        store,
+        job.job_id,
+        doc_task,
+        status="applied",
+        metadata={"attempt": 2, "record_count": 4},
+    )
+    set_task_state(store, job.job_id, vector_task, status="collected")
+
+    reopened = SQLiteJobStore(tmp_path / "jobs.db")
+    doc_state = get_task_state(reopened, job.job_id, doc_task)
+    assert doc_state is not None
+    assert doc_state.status == "applied"
+    assert doc_state.metadata == {"attempt": 2, "record_count": 4}
+
+    applied = list_task_states(reopened, job.job_id, status="applied")
+    assert [state.task_key for state in applied] == [doc_task.task_key]
+    doc_apply = list_task_states(reopened, job.job_id, phase="doc_apply")
+    assert [state.task_key for state in doc_apply] == [doc_task.task_key]
+    collected = list_task_states(reopened, job.job_id, status="collected")
+    assert [state.task_key for state in collected] == [vector_task.task_key]

@@ -733,7 +733,7 @@ def record_task_collected_checkpoint(
 ) -> None:
     """Record collect artifact availability; this is not a query visibility boundary."""
 
-    _record_task_checkpoint(
+    set_task_state(
         store,
         job_id,
         task,
@@ -751,13 +751,78 @@ def record_task_applied_checkpoint(
 ) -> None:
     """Record that a task can be skipped; call only after metadata/vector commit succeeds."""
 
-    _record_task_checkpoint(
+    set_task_state(
         store,
         job_id,
         task,
         status="applied",
         metadata=metadata,
     )
+
+
+def get_task_state(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask | str,
+    *,
+    status: Literal["collected", "applied"] = "applied",
+) -> IndexTaskCheckpoint | None:
+    """Read one persisted task state from the v1 job_checkpoint KV ledger."""
+
+    return decode_task_checkpoint(
+        store.get_checkpoint(job_id, task_checkpoint_key(task, status=status))
+    )
+
+
+def set_task_state(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask,
+    *,
+    status: Literal["collected", "applied"],
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Write one task state into the v1 job_checkpoint KV ledger."""
+
+    checkpoint = IndexTaskCheckpoint(
+        schema_version=INDEX_TASK_CHECKPOINT_SCHEMA_VERSION,
+        status=status,
+        task_key=task.task_key,
+        phase=task.phase,
+        input_hash=task.input_hash,
+        task_schema_version=task.schema_version,
+        updated_at=utc_now(),
+        metadata={} if metadata is None else cast(StorageMetadata, dict(metadata)),
+    )
+    store.set_checkpoint(
+        job_id,
+        task_checkpoint_key(task, status=status),
+        encode_task_checkpoint(checkpoint),
+    )
+
+
+def list_task_states(
+    store: SQLiteJobStore,
+    job_id: str,
+    *,
+    phase: str | None = None,
+    status: Literal["collected", "applied"] | None = None,
+) -> tuple[IndexTaskCheckpoint, ...]:
+    """List persisted task states, optionally filtering by phase and checkpoint status."""
+
+    states: list[IndexTaskCheckpoint] = []
+    for key, value in store.get_checkpoints(job_id).items():
+        if not key.startswith("task:"):
+            continue
+        checkpoint = decode_task_checkpoint(value)
+        if checkpoint is None:
+            continue
+        if phase is not None and checkpoint.phase != phase:
+            continue
+        if status is not None and checkpoint.status != status:
+            continue
+        states.append(checkpoint)
+    return tuple(sorted(states, key=lambda item: (item.phase, item.task_key, item.status)))
 
 
 def task_has_applied_checkpoint(
@@ -813,31 +878,6 @@ def decode_task_checkpoint(value: str | None) -> IndexTaskCheckpoint | None:
         task_schema_version=cast(str, task_schema_version),
         updated_at=cast(str, updated_at),
         metadata=decode_metadata(json.dumps(metadata if isinstance(metadata, Mapping) else {})),
-    )
-
-
-def _record_task_checkpoint(
-    store: SQLiteJobStore,
-    job_id: str,
-    task: IndexTask,
-    *,
-    status: Literal["collected", "applied"],
-    metadata: Mapping[str, Any] | None = None,
-) -> None:
-    checkpoint = IndexTaskCheckpoint(
-        schema_version=INDEX_TASK_CHECKPOINT_SCHEMA_VERSION,
-        status=status,
-        task_key=task.task_key,
-        phase=task.phase,
-        input_hash=task.input_hash,
-        task_schema_version=task.schema_version,
-        updated_at=utc_now(),
-        metadata={} if metadata is None else cast(StorageMetadata, dict(metadata)),
-    )
-    store.set_checkpoint(
-        job_id,
-        task_checkpoint_key(task, status=status),
-        encode_task_checkpoint(checkpoint),
     )
 
 
