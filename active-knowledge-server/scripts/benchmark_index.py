@@ -17,16 +17,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from active_knowledge_server.cli import run_full_index
+from active_knowledge_server.cli import _run_index_command
 from active_knowledge_server.config.loader import ConfigDict, resolve_config, set_nested
 from active_knowledge_server.connectors.source_docs import SourceDocsConnector
 from active_knowledge_server.connectors.workspace import WorkspaceConnector
 from active_knowledge_server.eval.index_benchmark import (
+    ProgressPhaseTimingCollector,
     parse_positive_int_csv,
     render_index_benchmark_markdown,
     summarize_index_benchmark_records,
 )
-from active_knowledge_server.indexing import CURRENT_SNAPSHOT_ID, IncrementalIndexPipeline
 from active_knowledge_server.storage.sqlite_store import (
     checkpoint_sqlite_database,
     configured_sqlite_paths,
@@ -325,12 +325,18 @@ def run_sample(
             "when sources do not change."
         )
 
+    progress = ProgressPhaseTimingCollector()
     rss_before = current_rss_bytes()
     cpu_before = time.process_time()
     wall_before = time.perf_counter()
-    result_payload = execute_index_run(resolved=resolved, args=args)
+    result_payload = execute_index_run(
+        resolved=resolved,
+        args=args,
+        progress_callback=progress.observe,
+    )
     wall_seconds = time.perf_counter() - wall_before
     cpu_seconds = time.process_time() - cpu_before
+    progress_snapshot = progress.finish()
     rss_after = current_rss_bytes()
     metadata_path = metadata_path_for_target(resolved, args.target)
     checkpoint = maybe_checkpoint_sqlite_database(
@@ -340,9 +346,11 @@ def run_sample(
     counts = collect_storage_counts(resolved, args.target)
     warning_code_counts = collect_warning_code_counts(result_payload)
     writer_metadata = extract_result_metadata_mapping(result_payload, "writer")
+    task_stats = extract_result_task_stats(result_payload)
+    job_payload = extract_result_job_mapping(result_payload)
 
     return {
-        "schema_version": "index_benchmark_record.v1",
+        "schema_version": "index_benchmark_record.v2",
         "executed_at": utc_now(),
         "config_path": None if args.config is None else str(args.config),
         "mode": args.mode,
@@ -402,10 +410,16 @@ def run_sample(
         "warning_count": len(result_payload.get("warnings", [])),
         "warning_codes": sorted(warning_code_counts),
         "warning_code_counts": warning_code_counts,
+        "job": job_payload,
         "plan_summary": result_payload.get("plan"),
         "timings": extract_result_metadata_mapping(result_payload, "timings"),
+        "phase_timings": progress_snapshot.phase_timings,
+        "phase_event_counts": progress_snapshot.phase_event_counts,
+        "progress_event_count": progress_snapshot.event_count,
+        "observed_phases": list(progress_snapshot.observed_phases),
         "diagnostics": extract_result_metadata_mapping(result_payload, "diagnostics"),
         "apply_batches": extract_result_metadata_mapping(result_payload, "apply_batches"),
+        "task_stats": task_stats,
         "object_counts": counts,
         "storage_files": collect_storage_file_sizes(metadata_path),
         "dataset": dataset,
@@ -481,17 +495,29 @@ def resolve_benchmark_config(
     return resolve_config(config_path=args.config, cli_overrides=overrides, cwd=Path.cwd())
 
 
-def execute_index_run(*, resolved: Any, args: argparse.Namespace) -> dict[str, object]:
-    if args.mode == "incremental" and args.target == "local":
-        pipeline = IncrementalIndexPipeline(resolved.model, cwd=Path.cwd())
-        return pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source=args.source).to_dict()
-    operation_mode = "baseline_publish" if args.target == "baseline" else "normal"
-    return run_full_index(
+def execute_index_run(
+    *,
+    resolved: Any,
+    args: argparse.Namespace,
+    progress_callback: Any | None = None,
+) -> dict[str, object]:
+    command_payload = _run_index_command(
         resolved,
+        summary={},
+        mode=args.mode,
         target=args.target,
         source=args.source,
-        operation_mode=operation_mode,
+        resume_policy=_disabled_resume_policy(),
+        progress_callback=progress_callback,
     )
+    result = command_payload.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("benchmark index command must return an object result payload")
+    result_payload = dict(result)
+    job = command_payload.get("job")
+    if isinstance(job, dict):
+        result_payload["job"] = dict(job)
+    return result_payload
 
 
 def collect_dataset_summary(args: argparse.Namespace) -> dict[str, object]:
@@ -573,6 +599,27 @@ def extract_result_metadata_mapping(
         return {}
     value = metadata.get(key)
     return dict(value) if isinstance(value, dict) else {}
+
+
+def extract_result_job_mapping(result_payload: dict[str, object]) -> dict[str, object]:
+    value = result_payload.get("job")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def extract_result_task_stats(result_payload: dict[str, object]) -> dict[str, object]:
+    task_stats = extract_result_metadata_mapping(result_payload, "tasks")
+    if task_stats:
+        return task_stats
+    job = extract_result_job_mapping(result_payload)
+    keys = ("tasks_total", "tasks_applied", "tasks_skipped", "tasks_failed")
+    derived = {
+        key.replace("tasks_", ""): job.get(key)
+        for key in keys
+        if isinstance(job.get(key), int)
+    }
+    if "replayed" not in derived:
+        derived["replayed"] = 0
+    return derived
 
 
 def collect_storage_file_sizes(metadata_path: Path) -> dict[str, int]:
@@ -665,6 +712,18 @@ def remove_tree(path: Path) -> None:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _disabled_resume_policy() -> dict[str, object]:
+    return {
+        "schema_version": "index_resume_policy.v1",
+        "mode": "disabled",
+        "resume": None,
+        "resume_job_id": None,
+        "planned_job_id": None,
+        "resume_enabled": False,
+        "restart_requested": False,
+    }
 
 
 if __name__ == "__main__":

@@ -1671,6 +1671,7 @@ int health_replay_probe(void)
     )
 
     assert result.result_status == "ready"
+    assert result.metadata["tasks"]["replayed"] == 1
     assert resumed_pipeline.load_state() == plan.current_state
     reader = metadata_adapter.reader()
     scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")

@@ -45,6 +45,7 @@ RESUMABLE_INDEX_JOB_STATUSES: Final[tuple[JobStatus, ...]] = (
 )
 INDEX_JOB_LOCK_ID: Final = "index:overlay"
 INDEX_TASK_CHECKPOINT_SCHEMA_VERSION: Final = "index_task_checkpoint.v1"
+INDEX_TASK_ATTEMPT_SCHEMA_VERSION: Final = "index_task_attempt.v1"
 _JOB_STATUS_TRANSITIONS: Final[dict[JobStatus, tuple[JobStatus, ...]]] = {
     "pending": ("discovering", "failed"),
     "discovering": ("parsing", "failed", "partial_ready"),
@@ -120,6 +121,30 @@ class IndexTaskCheckpoint:
             "input_hash": self.input_hash,
             "task_schema_version": self.task_schema_version,
             "updated_at": self.updated_at,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class IndexTaskAttempt:
+    """One persisted task attempt marker used for replay diagnostics."""
+
+    schema_version: str
+    task_key: str
+    phase: str
+    input_hash: str
+    task_schema_version: str
+    started_at: str
+    metadata: StorageMetadata = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "task_key": self.task_key,
+            "phase": self.phase,
+            "input_hash": self.input_hash,
+            "task_schema_version": self.task_schema_version,
+            "started_at": self.started_at,
             "metadata": dict(self.metadata),
         }
 
@@ -724,6 +749,50 @@ def task_checkpoint_key(
     return f"task:{status}:{task_key}"
 
 
+def task_attempt_key(task: IndexTask | str) -> str:
+    """Return the job_checkpoint key for one task attempt marker."""
+
+    task_key = task.task_key if isinstance(task, IndexTask) else str(task)
+    return f"task:attempt:{task_key}"
+
+
+def record_task_attempt(
+    store: SQLiteJobStore,
+    job_id: str,
+    task: IndexTask,
+    *,
+    metadata: Mapping[str, Any] | None = None,
+) -> None:
+    """Record that a task execution attempt started before any durable commit."""
+
+    attempt = IndexTaskAttempt(
+        schema_version=INDEX_TASK_ATTEMPT_SCHEMA_VERSION,
+        task_key=task.task_key,
+        phase=task.phase,
+        input_hash=task.input_hash,
+        task_schema_version=task.schema_version,
+        started_at=utc_now(),
+        metadata={} if metadata is None else cast(StorageMetadata, dict(metadata)),
+    )
+    store.set_checkpoint(job_id, task_attempt_key(task), encode_task_attempt(attempt))
+
+
+def task_has_attempt_record(
+    checkpoints: Mapping[str, str],
+    task: IndexTask,
+) -> bool:
+    """Return True when a matching pre-commit task attempt marker exists."""
+
+    payload = decode_task_attempt(checkpoints.get(task_attempt_key(task)))
+    return (
+        payload is not None
+        and payload.task_key == task.task_key
+        and payload.phase == task.phase
+        and payload.input_hash == task.input_hash
+        and payload.task_schema_version == task.schema_version
+    )
+
+
 def record_task_collected_checkpoint(
     store: SQLiteJobStore,
     job_id: str,
@@ -877,6 +946,41 @@ def decode_task_checkpoint(value: str | None) -> IndexTaskCheckpoint | None:
         input_hash=cast(str, input_hash),
         task_schema_version=cast(str, task_schema_version),
         updated_at=cast(str, updated_at),
+        metadata=decode_metadata(json.dumps(metadata if isinstance(metadata, Mapping) else {})),
+    )
+
+
+def encode_task_attempt(attempt: IndexTaskAttempt) -> str:
+    return json.dumps(attempt.to_dict(), ensure_ascii=True, sort_keys=True)
+
+
+def decode_task_attempt(value: str | None) -> IndexTaskAttempt | None:
+    if value is None:
+        return None
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    task_key = payload.get("task_key")
+    phase = payload.get("phase")
+    input_hash = payload.get("input_hash")
+    task_schema_version = payload.get("task_schema_version")
+    started_at = payload.get("started_at")
+    if not all(
+        isinstance(item, str)
+        for item in (task_key, phase, input_hash, task_schema_version, started_at)
+    ):
+        return None
+    metadata = payload.get("metadata")
+    return IndexTaskAttempt(
+        schema_version=str(payload.get("schema_version", "")),
+        task_key=cast(str, task_key),
+        phase=cast(str, phase),
+        input_hash=cast(str, input_hash),
+        task_schema_version=cast(str, task_schema_version),
+        started_at=cast(str, started_at),
         metadata=decode_metadata(json.dumps(metadata if isinstance(metadata, Mapping) else {})),
     )
 

@@ -38,8 +38,10 @@ from active_knowledge_server.indexing.jobs import (
     JobStateTransitionError,
     SQLiteJobStore,
     decode_task_checkpoint,
+    record_task_attempt,
     record_task_applied_checkpoint,
     task_checkpoint_key,
+    task_has_attempt_record,
 )
 from active_knowledge_server.indexing.profile import (
     PROFILE_COLLECTOR_SCHEMA_VERSION,
@@ -884,6 +886,9 @@ class IncrementalIndexPipeline:
         )
         skipped_task_keys = frozenset(task.task_key for task in skipped_tasks)
         tasks_to_run = tuple(task for task in tasks if task.task_key not in skipped_task_keys)
+        replayed_task_keys = frozenset(
+            task.task_key for task in tasks_to_run if task_has_attempt_record(checkpoints, task)
+        )
         task_counts = _index_task_counts(tasks)
         job_reporter = (
             None
@@ -911,7 +916,8 @@ class IncrementalIndexPipeline:
         )
         global_total = progress_totals["global_total"]
         global_done = 0
-        task_stats = {"applied": 0, "skipped": 0, "failed": 0}
+        task_stats = {"applied": 0, "skipped": 0, "failed": 0, "replayed": 0}
+        started_task_keys: set[str] = set()
         phase_done = {
             "code_apply": 0,
             "doc_apply": 0,
@@ -972,6 +978,26 @@ class IncrementalIndexPipeline:
                 task_stats["applied"] += 1
             if job_reporter is not None and update_stats:
                 job_reporter.task_applied(task_key)
+
+        def mark_task_started(task_key: str) -> None:
+            if task_key in started_task_keys:
+                return
+            started_task_keys.add(task_key)
+            task = _find_index_task(tasks, task_key)
+            if task is None:
+                return
+            if task.task_key in replayed_task_keys:
+                task_stats["replayed"] += 1
+            if run_context is not None:
+                record_task_attempt(
+                    run_context.job_store,
+                    run_context.job_id,
+                    task,
+                    metadata={
+                        "job_id": run_context.job_id,
+                        "plan_signature": signature.digest,
+                    },
+                )
 
         def mark_task_skipped(task: IndexTask) -> None:
             nonlocal global_done
@@ -1038,6 +1064,7 @@ class IncrementalIndexPipeline:
                 "applied": task_stats["applied"],
                 "skipped": task_stats["skipped"],
                 "failed": task_stats["failed"],
+                "replayed": task_stats["replayed"],
             },
         }
 
@@ -1165,10 +1192,13 @@ class IncrementalIndexPipeline:
                     on_batch_open=(
                         None
                         if job_reporter is None
-                        else lambda item: job_reporter.begin_task(
-                            item.task_key,
-                            phase=item.phase,
-                        )
+                        else lambda item: (
+                            mark_task_started(item.task_key),
+                            job_reporter.begin_task(
+                                item.task_key,
+                                phase=item.phase,
+                            ),
+                        )[-1]
                     ),
                 )
                 for batch_result in metadata_batch_results:
@@ -1181,6 +1211,7 @@ class IncrementalIndexPipeline:
                         strict=False,
                     ):
                         if job_reporter is not None and item is not batch.items[0]:
+                            mark_task_started(item.task_key)
                             job_reporter.begin_task(item.task_key, phase=batch.phase)
                         code_apply_done += 1
                         global_done += 1
@@ -1437,10 +1468,13 @@ class IncrementalIndexPipeline:
                     on_batch_open=(
                         None
                         if job_reporter is None
-                        else lambda item: job_reporter.begin_task(
-                            item.task_key,
-                            phase=item.phase,
-                        )
+                        else lambda item: (
+                            mark_task_started(item.task_key),
+                            job_reporter.begin_task(
+                                item.task_key,
+                                phase=item.phase,
+                            ),
+                        )[-1]
                     ),
                 )
                 for batch_result in metadata_batch_results:
@@ -1453,6 +1487,7 @@ class IncrementalIndexPipeline:
                         strict=False,
                     ):
                         if job_reporter is not None and item is not batch.items[0]:
+                            mark_task_started(item.task_key)
                             job_reporter.begin_task(item.task_key, phase=batch.phase)
                         doc_apply_done += 1
                         global_done += 1
@@ -1494,10 +1529,13 @@ class IncrementalIndexPipeline:
                     on_batch_open=(
                         None
                         if job_reporter is None
-                        else lambda item: job_reporter.begin_task(
-                            item.task_key,
-                            phase=item.phase,
-                        )
+                        else lambda item: (
+                            mark_task_started(item.task_key),
+                            job_reporter.begin_task(
+                                item.task_key,
+                                phase=item.phase,
+                            ),
+                        )[-1]
                     ),
                 )
                 for batch_result in vector_batch_results:
@@ -1510,6 +1548,7 @@ class IncrementalIndexPipeline:
                         strict=False,
                     ):
                         if job_reporter is not None and item is not batch.items[0]:
+                            mark_task_started(item.task_key)
                             job_reporter.begin_task(item.task_key, phase=batch.phase)
                         vector_apply_done += 1
                         global_done += 1
@@ -1588,6 +1627,7 @@ class IncrementalIndexPipeline:
             task_key = "profile:relations"
             if not task_is_skipped(task_key):
                 if job_reporter is not None:
+                    mark_task_started(task_key)
                     job_reporter.begin_task(task_key, phase="profile_relations")
                 try:
                     profile_started_at = time.perf_counter()
@@ -1646,6 +1686,7 @@ class IncrementalIndexPipeline:
             task_key = "workspace:map"
             if not task_is_skipped(task_key):
                 if job_reporter is not None:
+                    mark_task_started(task_key)
                     job_reporter.begin_task(task_key, phase="workspace_map")
                 try:
                     workspace_map_started_at = time.perf_counter()
@@ -1696,6 +1737,7 @@ class IncrementalIndexPipeline:
         result_metadata["tasks"]["applied"] = task_stats["applied"]
         result_metadata["tasks"]["skipped"] = task_stats["skipped"]
         result_metadata["tasks"]["failed"] = task_stats["failed"]
+        result_metadata["tasks"]["replayed"] = task_stats["replayed"]
 
         emit(
             phase="done",

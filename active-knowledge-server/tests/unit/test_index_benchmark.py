@@ -6,11 +6,13 @@ from pathlib import Path
 import pytest
 
 from active_knowledge_server.eval.index_benchmark import (
+    ProgressPhaseTimingCollector,
     load_index_benchmark_records,
     parse_positive_int_csv,
     render_index_benchmark_markdown,
     summarize_index_benchmark_records,
 )
+from active_knowledge_server.indexing.progress import IndexProgressEvent
 
 
 def _record(
@@ -23,18 +25,27 @@ def _record(
     commit_interval_ms: int,
     wall_seconds: float,
     rss_delta_bytes: int,
+    resumed: bool = False,
+    resume_mode: str = "disabled",
     warning_codes: tuple[str, ...] = (),
     journal_mode: str = "delete",
     metadata_db_bytes: int = 1_000,
     metadata_wal_bytes: int = 0,
+    replayed_tasks: int = 0,
 ) -> dict[str, object]:
     return {
-        "schema_version": "index_benchmark_record.v1",
+        "schema_version": "index_benchmark_record.v2",
         "mode": "incremental",
         "target": "local",
         "source": "all",
         "cache_mode": "cold",
         "workers_requested": workers,
+        "job": {
+            "resumed": resumed,
+            "resume_policy": {
+                "mode": resume_mode,
+            },
+        },
         "parallel": {
             "mode": parallel_mode,
         },
@@ -44,6 +55,19 @@ def _record(
         "rss_delta_bytes": rss_delta_bytes,
         "warning_count": len(warning_codes),
         "warning_codes": list(warning_codes),
+        "phase_timings": {
+            "discover": 0.5,
+            "code_collect": wall_seconds / 3.0,
+            "code_apply": wall_seconds / 4.0,
+            "workspace_map": 0.1,
+        },
+        "task_stats": {
+            "total": 10,
+            "applied": 8,
+            "skipped": 2 if resumed else 0,
+            "failed": 0,
+            "replayed": replayed_tasks,
+        },
         "writer": {
             "batch_size": batch_size,
             "max_files_per_transaction": (
@@ -93,6 +117,22 @@ def test_parse_positive_int_csv_rejects_non_positive_values() -> None:
         parse_positive_int_csv("0,64", default=(64,))
 
 
+def test_progress_phase_timing_collector_aggregates_contiguous_phase_time() -> None:
+    collector = ProgressPhaseTimingCollector()
+
+    collector.observe(IndexProgressEvent(phase="discover"), observed_at=10.0)
+    collector.observe(IndexProgressEvent(phase="code_collect"), observed_at=12.0)
+    collector.observe(IndexProgressEvent(phase="code_collect"), observed_at=15.5)
+    collector.observe(IndexProgressEvent(phase="code_apply"), observed_at=18.0)
+    snapshot = collector.finish(observed_at=20.0)
+
+    assert snapshot.phase_timings["discover"] == pytest.approx(2.0)
+    assert snapshot.phase_timings["code_collect"] == pytest.approx(6.0)
+    assert snapshot.phase_timings["code_apply"] == pytest.approx(2.0)
+    assert snapshot.phase_event_counts["code_collect"] == 2
+    assert snapshot.event_count == 4
+
+
 def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() -> None:
     records = [
         _record(
@@ -134,6 +174,7 @@ def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() 
     assert report.recommendations
     recommendation = report.recommendations[0]
     assert recommendation.key.workers_requested == "4"
+    assert recommendation.key.resume_kind == "fresh"
     assert recommendation.key.parallel_mode == "thread"
     assert recommendation.key.writer_batch_size == 100
     assert recommendation.key.writer_max_files_per_transaction == 100
@@ -183,11 +224,41 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
 
     assert "# Index Benchmark Report" in markdown
     assert (
-        "workers=4, parallel_mode=thread, batch_size=100, "
+        "resume=fresh/disabled, workers=4, parallel_mode=thread, batch_size=100, "
         "max_files_per_transaction=100, max_records_per_transaction=2048, "
         "commit_interval_ms=500"
     ) in markdown
     assert "wal_larger_than_db" in markdown
+
+
+def test_render_index_benchmark_markdown_includes_resume_summary() -> None:
+    report = summarize_index_benchmark_records(
+        [
+            _record(
+                workers=4,
+                batch_size=100,
+                commit_interval_ms=500,
+                wall_seconds=10.0,
+                rss_delta_bytes=150,
+            ),
+            _record(
+                workers=4,
+                batch_size=100,
+                commit_interval_ms=500,
+                wall_seconds=3.0,
+                rss_delta_bytes=120,
+                resumed=True,
+                resume_mode="auto",
+                replayed_tasks=1,
+            ),
+        ]
+    )
+
+    markdown = render_index_benchmark_markdown(report)
+
+    assert "## Resume Summary" in markdown
+    assert "1.0 replayed tasks" not in markdown
+    assert "12.50% of applied tasks" in markdown
 
 
 def test_summarize_index_benchmark_records_backfills_legacy_writer_limits() -> None:

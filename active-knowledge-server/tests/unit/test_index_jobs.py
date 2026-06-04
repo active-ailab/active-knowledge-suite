@@ -12,13 +12,17 @@ from active_knowledge_server.indexing.jobs import (
     JobLockConflictError,
     JobStateTransitionError,
     SQLiteJobStore,
+    decode_task_attempt,
     decode_task_checkpoint,
     get_task_state,
     list_task_states,
     parse_timestamp,
+    record_task_attempt,
     record_task_applied_checkpoint,
     record_task_collected_checkpoint,
     set_task_state,
+    task_attempt_key,
+    task_has_attempt_record,
     task_checkpoint_key,
     task_has_applied_checkpoint,
 )
@@ -117,6 +121,30 @@ def test_find_resumable_index_job_requires_matching_signature(tmp_path: Path) ->
         )
         is None
     )
+
+
+def test_task_attempt_record_round_trips_and_matches_task(tmp_path: Path) -> None:
+    store = build_store(tmp_path)
+    job = store.create_job(job_id="job-index")
+    task = IndexTask(
+        task_key="code:apply:src/main.c",
+        phase="code_apply",
+        source_kind="code",
+        operation="apply",
+        relative_path="src/main.c",
+        input_hash="hash-1",
+        schema_version="task.v1",
+        required=True,
+    )
+
+    record_task_attempt(store, job.job_id, task)
+
+    raw = store.get_checkpoint(job.job_id, task_attempt_key(task))
+    assert raw is not None
+    decoded = decode_task_attempt(raw)
+    assert decoded is not None
+    assert decoded.task_key == task.task_key
+    assert task_has_attempt_record(store.get_checkpoints(job.job_id), task) is True
 
 
 def test_job_state_machine_rejects_invalid_transition(tmp_path: Path) -> None:
