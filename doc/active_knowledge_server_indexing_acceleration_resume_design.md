@@ -33,10 +33,10 @@
 | 并行 collect | code/doc 都使用 `parallel_map_ordered`，有稳定排序、异常包装和 bounded in-flight。 | `parallel.py:62-162`、`code_indexer.py:263-273`、`doc_indexer.py:299-309` |
 | 增量过滤 | code collect 支持 `include_paths`，少量变更不再必须整仓解析。 | `pipeline.py:639-644`、`code_indexer.py:182-205` |
 | 单写事务 | SQLite writer 有 `transaction()`，chunk/entity FTS 与元数据在同一事务内同步。 | `sqlite_store.py:2216-2259` |
-| 写入批量配置 | 有 `indexing.writer.batch_size` 和 `commit_interval_ms`，默认 `64/1000ms`。 | `config/schema.py:237-241`、`defaults.py:127-129` |
+| 写入批量配置 | 有 `indexing.writer.batch_size`、`max_files_per_transaction`、`max_records_per_transaction` 和 `commit_interval_ms`，默认 `64/64/2048/1000ms`。 | `config/schema.py:237-244`、`defaults.py:127-134` |
 | 向量批量写入 | LanceDB writer 支持 `upsert_vectors`，并在同一 metadata transaction 写 vector refs。 | `lancedb_store.py:355-396` |
 | job 存储雏形 | 有 `job`、`job_checkpoint`、`job_lock` 表和轻量 `IndexJobRunner`。 | `jobs.py:89-240`、`sqlite_store.py:484-517` |
-| 性能基准入口 | benchmark 支持 workers、writer batch、commit interval、SQLite pragma 组合扫跑。 | `scripts/benchmark_index.py:64-124` |
+| 性能基准入口 | benchmark 支持 workers、writer batch、transaction 边界、commit interval、SQLite pragma 组合扫跑。 | `scripts/benchmark_index.py:64-124` |
 
 ### 2.2 关键缺口
 

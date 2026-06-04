@@ -76,6 +76,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional comma-separated writer batch sizes to sweep.",
     )
     parser.add_argument(
+        "--writer-max-files-per-transaction",
+        help="Optional comma-separated writer max-files-per-transaction values to sweep.",
+    )
+    parser.add_argument(
+        "--writer-max-records-per-transaction",
+        help="Optional comma-separated writer max-records-per-transaction values to sweep.",
+    )
+    parser.add_argument(
         "--writer-commit-intervals-ms",
         help="Optional comma-separated writer commit interval values to sweep.",
     )
@@ -139,11 +147,21 @@ def main(argv: list[str] | None = None) -> int:
         worker="auto",
         workdir=Path(".active-kb-benchmark-probe").resolve(),
         writer_batch_size=None,
+        writer_max_files_per_transaction=None,
+        writer_max_records_per_transaction=None,
         writer_commit_interval_ms=None,
     )
     writer_batch_sizes = parse_positive_int_csv(
         args.writer_batch_sizes,
         default=(probe_resolved.model.indexing.writer.batch_size,),
+    )
+    writer_max_files_per_transaction_values = parse_positive_int_csv(
+        args.writer_max_files_per_transaction,
+        default=(probe_resolved.model.indexing.writer.max_files_per_transaction,),
+    )
+    writer_max_records_per_transaction_values = parse_positive_int_csv(
+        args.writer_max_records_per_transaction,
+        default=(probe_resolved.model.indexing.writer.max_records_per_transaction,),
     )
     writer_commit_intervals_ms = parse_positive_int_csv(
         args.writer_commit_intervals_ms,
@@ -158,31 +176,44 @@ def main(argv: list[str] | None = None) -> int:
         bench_root = Path(bench_root_value)
         for cache_mode in cache_modes:
             for writer_batch_size in writer_batch_sizes:
-                for writer_commit_interval_ms in writer_commit_intervals_ms:
-                    for worker in workers:
-                        scenario_workdir = bench_root / (
-                            f"{args.mode}-{args.target}-{cache_mode}"
-                            f"-w{worker}-b{writer_batch_size}-c{writer_commit_interval_ms}"
-                        )
-                        hot_workdir = scenario_workdir / "hot"
-                        for sample_index in range(max(args.repeat, 1)):
-                            if cache_mode == "cold":
-                                workdir = scenario_workdir / f"sample-{sample_index}"
-                            else:
-                                workdir = hot_workdir
-                            record = run_sample(
-                                args=args,
-                                worker=worker,
-                                writer_batch_size=writer_batch_size,
-                                writer_commit_interval_ms=writer_commit_interval_ms,
-                                cache_mode=cache_mode,
-                                sample_index=sample_index,
-                                workdir=workdir,
-                                dataset=dataset,
-                                git_commit=git_commit,
-                            )
-                            records.append(record)
-                            emit_record(record, output_path=args.output)
+                for writer_max_files_per_transaction in writer_max_files_per_transaction_values:
+                    for (
+                        writer_max_records_per_transaction
+                    ) in writer_max_records_per_transaction_values:
+                        for writer_commit_interval_ms in writer_commit_intervals_ms:
+                            for worker in workers:
+                                scenario_workdir = bench_root / (
+                                    f"{args.mode}-{args.target}-{cache_mode}"
+                                    f"-w{worker}-b{writer_batch_size}"
+                                    f"-mf{writer_max_files_per_transaction}"
+                                    f"-mr{writer_max_records_per_transaction}"
+                                    f"-c{writer_commit_interval_ms}"
+                                )
+                                hot_workdir = scenario_workdir / "hot"
+                                for sample_index in range(max(args.repeat, 1)):
+                                    if cache_mode == "cold":
+                                        workdir = scenario_workdir / f"sample-{sample_index}"
+                                    else:
+                                        workdir = hot_workdir
+                                    record = run_sample(
+                                        args=args,
+                                        worker=worker,
+                                        writer_batch_size=writer_batch_size,
+                                        writer_max_files_per_transaction=(
+                                            writer_max_files_per_transaction
+                                        ),
+                                        writer_max_records_per_transaction=(
+                                            writer_max_records_per_transaction
+                                        ),
+                                        writer_commit_interval_ms=writer_commit_interval_ms,
+                                        cache_mode=cache_mode,
+                                        sample_index=sample_index,
+                                        workdir=workdir,
+                                        dataset=dataset,
+                                        git_commit=git_commit,
+                                    )
+                                    records.append(record)
+                                    emit_record(record, output_path=args.output)
 
     if args.summary_output is not None:
         report = summarize_index_benchmark_records(records)
@@ -265,6 +296,8 @@ def run_sample(
     args: argparse.Namespace,
     worker: int | str,
     writer_batch_size: int,
+    writer_max_files_per_transaction: int,
+    writer_max_records_per_transaction: int,
     writer_commit_interval_ms: int,
     cache_mode: str,
     sample_index: int,
@@ -281,6 +314,8 @@ def run_sample(
         worker=worker,
         workdir=workdir,
         writer_batch_size=writer_batch_size,
+        writer_max_files_per_transaction=writer_max_files_per_transaction,
+        writer_max_records_per_transaction=writer_max_records_per_transaction,
         writer_commit_interval_ms=writer_commit_interval_ms,
     )
     notes: list[str] = []
@@ -304,6 +339,7 @@ def run_sample(
     )
     counts = collect_storage_counts(resolved, args.target)
     warning_code_counts = collect_warning_code_counts(result_payload)
+    writer_metadata = extract_result_metadata_mapping(result_payload, "writer")
 
     return {
         "schema_version": "index_benchmark_record.v1",
@@ -316,8 +352,27 @@ def run_sample(
         "sample_index": sample_index,
         "workers_requested": worker,
         "writer": {
-            "batch_size": resolved.model.indexing.writer.batch_size,
-            "commit_interval_ms": resolved.model.indexing.writer.commit_interval_ms,
+            "batch_size": int(
+                writer_metadata.get("batch_size", resolved.model.indexing.writer.batch_size)
+            ),
+            "max_files_per_transaction": int(
+                writer_metadata.get(
+                    "max_files_per_transaction",
+                    resolved.model.indexing.writer.max_files_per_transaction,
+                )
+            ),
+            "max_records_per_transaction": int(
+                writer_metadata.get(
+                    "max_records_per_transaction",
+                    resolved.model.indexing.writer.max_records_per_transaction,
+                )
+            ),
+            "commit_interval_ms": int(
+                writer_metadata.get(
+                    "commit_interval_ms",
+                    resolved.model.indexing.writer.commit_interval_ms,
+                )
+            ),
         },
         "parallel": {
             "mode": resolved.model.indexing.parallel.mode,
@@ -350,6 +405,7 @@ def run_sample(
         "plan_summary": result_payload.get("plan"),
         "timings": extract_result_metadata_mapping(result_payload, "timings"),
         "diagnostics": extract_result_metadata_mapping(result_payload, "diagnostics"),
+        "apply_batches": extract_result_metadata_mapping(result_payload, "apply_batches"),
         "object_counts": counts,
         "storage_files": collect_storage_file_sizes(metadata_path),
         "dataset": dataset,
@@ -369,6 +425,8 @@ def resolve_benchmark_config(
     worker: int | str,
     workdir: Path,
     writer_batch_size: int | None,
+    writer_max_files_per_transaction: int | None,
+    writer_max_records_per_transaction: int | None,
     writer_commit_interval_ms: int | None,
 ):
     overrides: ConfigDict = {}
@@ -390,6 +448,18 @@ def resolve_benchmark_config(
     )
     if writer_batch_size is not None:
         set_nested(overrides, ("indexing", "writer", "batch_size"), writer_batch_size)
+    if writer_max_files_per_transaction is not None:
+        set_nested(
+            overrides,
+            ("indexing", "writer", "max_files_per_transaction"),
+            writer_max_files_per_transaction,
+        )
+    if writer_max_records_per_transaction is not None:
+        set_nested(
+            overrides,
+            ("indexing", "writer", "max_records_per_transaction"),
+            writer_max_records_per_transaction,
+        )
     if writer_commit_interval_ms is not None:
         set_nested(
             overrides,
@@ -430,6 +500,8 @@ def collect_dataset_summary(args: argparse.Namespace) -> dict[str, object]:
         worker="auto",
         workdir=Path(".active-kb-benchmark-probe").resolve(),
         writer_batch_size=None,
+        writer_max_files_per_transaction=None,
+        writer_max_records_per_transaction=None,
         writer_commit_interval_ms=None,
     )
     workspace_inventory = WorkspaceConnector.from_config(resolved.model, cwd=Path.cwd()).scan()

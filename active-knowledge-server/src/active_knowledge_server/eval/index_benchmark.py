@@ -79,6 +79,8 @@ class IndexBenchmarkScenarioKey:
     workers_requested: str
     parallel_mode: str
     writer_batch_size: int
+    writer_max_files_per_transaction: int
+    writer_max_records_per_transaction: int
     writer_commit_interval_ms: int
     sqlite_journal_mode: str
     sqlite_synchronous: str
@@ -93,6 +95,8 @@ class IndexBenchmarkScenarioKey:
             "workers_requested": self.workers_requested,
             "parallel_mode": self.parallel_mode,
             "writer_batch_size": self.writer_batch_size,
+            "writer_max_files_per_transaction": self.writer_max_files_per_transaction,
+            "writer_max_records_per_transaction": self.writer_max_records_per_transaction,
             "writer_commit_interval_ms": self.writer_commit_interval_ms,
             "sqlite_journal_mode": self.sqlite_journal_mode,
             "sqlite_synchronous": self.sqlite_synchronous,
@@ -268,6 +272,8 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
                 f"workers={scenario.workers_requested}, "
                 f"parallel_mode={scenario.parallel_mode}, "
                 f"batch_size={scenario.writer_batch_size}, "
+                f"max_files_per_transaction={scenario.writer_max_files_per_transaction}, "
+                f"max_records_per_transaction={scenario.writer_max_records_per_transaction}, "
                 f"commit_interval_ms={scenario.writer_commit_interval_ms}, "
                 f"sqlite={scenario.sqlite_journal_mode}/{scenario.sqlite_synchronous}: "
                 f"{recommendation.rationale}"
@@ -298,7 +304,10 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
         lines.append(
             "| "
             f"w={scenario.workers_requested}, m={scenario.parallel_mode}, "
-            f"b={scenario.writer_batch_size}, c={scenario.writer_commit_interval_ms}, {scenario.cache_mode}, "
+            f"b={scenario.writer_batch_size}, "
+            f"mf={scenario.writer_max_files_per_transaction}, "
+            f"mr={scenario.writer_max_records_per_transaction}, "
+            f"c={scenario.writer_commit_interval_ms}, {scenario.cache_mode}, "
             f"{scenario.sqlite_journal_mode}/{scenario.sqlite_synchronous}"
             " | "
             f"{summary.wall_seconds.p50:.3f}"
@@ -333,6 +342,10 @@ def _scenario_key_from_record(record: dict[str, object]) -> IndexBenchmarkScenar
         workers_requested=str(record.get("workers_requested", "unknown")),
         parallel_mode=str(_mapping(record.get("parallel")).get("mode", "thread")),
         writer_batch_size=int(writer.get("batch_size", 0)),
+        writer_max_files_per_transaction=int(
+            writer.get("max_files_per_transaction", writer.get("batch_size", 0))
+        ),
+        writer_max_records_per_transaction=int(writer.get("max_records_per_transaction", 0)),
         writer_commit_interval_ms=int(writer.get("commit_interval_ms", 0)),
         sqlite_journal_mode=str(configured_sqlite.get("journal_mode", "unknown")),
         sqlite_synchronous=str(configured_sqlite.get("synchronous", "unknown")),
@@ -365,6 +378,8 @@ def _reference_keys_by_family(
                 _worker_order(item.workers_requested),
                 item.parallel_mode,
                 item.writer_batch_size,
+                _optional_positive_sort_key(item.writer_max_files_per_transaction),
+                _optional_positive_sort_key(item.writer_max_records_per_transaction),
                 item.writer_commit_interval_ms,
             ),
         )
@@ -506,6 +521,8 @@ def _recommend_family_scenario(
             _worker_order(item.key.workers_requested),
             item.key.parallel_mode,
             item.key.writer_batch_size,
+            _optional_positive_sort_key(item.key.writer_max_files_per_transaction),
+            _optional_positive_sort_key(item.key.writer_max_records_per_transaction),
             item.key.writer_commit_interval_ms,
             item.wall_seconds.p50,
         ),
@@ -546,6 +563,10 @@ def _optional_int(value: object) -> int | None:
     return int(value)
 
 
+def _optional_positive_sort_key(value: int) -> int:
+    return value if value > 0 else 2**31 - 1
+
+
 def _worker_order(value: str) -> tuple[int, str]:
     return (0, value) if value.isdigit() else (1, value)
 
@@ -559,6 +580,8 @@ def _scenario_sort_tuple(key: IndexBenchmarkScenarioKey) -> tuple[object, ...]:
         key.parallel_mode,
         _worker_order(key.workers_requested),
         key.writer_batch_size,
+        _optional_positive_sort_key(key.writer_max_files_per_transaction),
+        _optional_positive_sort_key(key.writer_max_records_per_transaction),
         key.writer_commit_interval_ms,
         key.sqlite_journal_mode,
         key.sqlite_synchronous,

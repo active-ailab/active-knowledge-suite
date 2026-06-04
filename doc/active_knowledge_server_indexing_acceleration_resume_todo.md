@@ -614,7 +614,7 @@ TODO：
 
 ### AR3-02 配置化 apply batch 边界
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`CONTRACT`、`IMPL`、`TEST`
 - 依赖：`AR3-01`
@@ -622,10 +622,17 @@ TODO：
 
 TODO：
 
-- [ ] 新增 `indexing.writer.max_files_per_transaction`。
-- [ ] 新增 `indexing.writer.max_records_per_transaction`。
-- [ ] 默认值保守设置，允许 `1` 回退到近似旧行为。
-- [ ] benchmark 记录实际 batch 配置。
+- [x] 新增 `indexing.writer.max_files_per_transaction`。
+- [x] 新增 `indexing.writer.max_records_per_transaction`。
+- [x] 默认值保守设置，允许 `1` 回退到近似旧行为。
+- [x] benchmark 记录实际 batch 配置。
+
+完成记录：
+
+- `config/schema.py`、`config/defaults.py` 已暴露 `max_files_per_transaction` / `max_records_per_transaction`，默认值保持 `64 / 2048`，并允许设置为 `1` 快速回退到近似单文件 apply。
+- `scripts/benchmark_index.py` 新增 writer transaction 边界 sweep 参数，并把实际 writer 配置与 `apply_batches` metadata 一并写入 benchmark JSONL。
+- `eval/index_benchmark.py` 将 writer transaction 边界纳入 scenario key、Markdown 汇总和推荐逻辑，避免 benchmark 只按 `batch_size` / `commit_interval_ms` 归并。
+- 示例配置与单测已同步覆盖新字段和兼容回填逻辑。
 
 验收标准：
 

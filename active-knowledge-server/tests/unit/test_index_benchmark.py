@@ -18,6 +18,8 @@ def _record(
     workers: int | str,
     parallel_mode: str = "thread",
     batch_size: int,
+    max_files_per_transaction: int | None = None,
+    max_records_per_transaction: int | None = None,
     commit_interval_ms: int,
     wall_seconds: float,
     rss_delta_bytes: int,
@@ -44,6 +46,14 @@ def _record(
         "warning_codes": list(warning_codes),
         "writer": {
             "batch_size": batch_size,
+            "max_files_per_transaction": (
+                batch_size if max_files_per_transaction is None else max_files_per_transaction
+            ),
+            "max_records_per_transaction": (
+                2048
+                if max_records_per_transaction is None
+                else max_records_per_transaction
+            ),
             "commit_interval_ms": commit_interval_ms,
         },
         "sqlite": {
@@ -126,6 +136,8 @@ def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() 
     assert recommendation.key.workers_requested == "4"
     assert recommendation.key.parallel_mode == "thread"
     assert recommendation.key.writer_batch_size == 100
+    assert recommendation.key.writer_max_files_per_transaction == 100
+    assert recommendation.key.writer_max_records_per_transaction == 2048
     assert recommendation.key.writer_commit_interval_ms == 500
 
     by_workers = {
@@ -170,8 +182,33 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
     markdown = render_index_benchmark_markdown(report)
 
     assert "# Index Benchmark Report" in markdown
-    assert "workers=4, parallel_mode=thread, batch_size=100, commit_interval_ms=500" in markdown
+    assert (
+        "workers=4, parallel_mode=thread, batch_size=100, "
+        "max_files_per_transaction=100, max_records_per_transaction=2048, "
+        "commit_interval_ms=500"
+    ) in markdown
     assert "wal_larger_than_db" in markdown
+
+
+def test_summarize_index_benchmark_records_backfills_legacy_writer_limits() -> None:
+    legacy = _record(
+        workers=1,
+        batch_size=64,
+        commit_interval_ms=1000,
+        wall_seconds=10.0,
+        rss_delta_bytes=100,
+    )
+    writer = legacy["writer"]
+    assert isinstance(writer, dict)
+    del writer["max_files_per_transaction"]
+    del writer["max_records_per_transaction"]
+
+    report = summarize_index_benchmark_records([legacy])
+
+    summary = report.scenario_summaries[0]
+    assert summary.key.writer_batch_size == 64
+    assert summary.key.writer_max_files_per_transaction == 64
+    assert summary.key.writer_max_records_per_transaction == 0
 
 
 def test_load_index_benchmark_records_reads_jsonl(tmp_path: Path) -> None:
@@ -205,3 +242,5 @@ def test_load_index_benchmark_records_reads_jsonl(tmp_path: Path) -> None:
     assert len(records) == 2
     assert records[0]["workers_requested"] == 1
     assert records[1]["writer"]["batch_size"] == 100
+    assert records[1]["writer"]["max_files_per_transaction"] == 100
+    assert records[1]["writer"]["max_records_per_transaction"] == 2048
