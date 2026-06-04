@@ -103,6 +103,8 @@ def test_index_writer_config_requires_positive_values() -> None:
     config = validate_config_dict(good, source="unit test config")
 
     assert config.indexing.writer.batch_size == 64
+    assert config.indexing.writer.max_files_per_transaction == 64
+    assert config.indexing.writer.max_records_per_transaction == 2048
     assert config.indexing.writer.commit_interval_ms == 1000
     assert config.indexing.parallel.mode == "thread"
     assert config.storage.sqlite.journal_mode == "delete"
@@ -117,10 +119,41 @@ def test_index_writer_config_requires_positive_values() -> None:
     with pytest.raises(ValueError, match="indexing.writer.batch_size"):
         validate_config_dict(bad, source="unit test config")
 
+    bad_files = default_config()
+    indexing = bad_files["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["writer"] = {
+        "batch_size": 1,
+        "max_files_per_transaction": 0,
+        "max_records_per_transaction": 2048,
+        "commit_interval_ms": 1000,
+    }
+
+    with pytest.raises(ValueError, match="indexing.writer.max_files_per_transaction"):
+        validate_config_dict(bad_files, source="unit test config")
+
+    bad_records = default_config()
+    indexing = bad_records["indexing"]
+    assert isinstance(indexing, dict)
+    indexing["writer"] = {
+        "batch_size": 1,
+        "max_files_per_transaction": 1,
+        "max_records_per_transaction": 0,
+        "commit_interval_ms": 1000,
+    }
+
+    with pytest.raises(ValueError, match="indexing.writer.max_records_per_transaction"):
+        validate_config_dict(bad_records, source="unit test config")
+
     bad_interval = default_config()
     indexing = bad_interval["indexing"]
     assert isinstance(indexing, dict)
-    indexing["writer"] = {"batch_size": 1, "commit_interval_ms": 0}
+    indexing["writer"] = {
+        "batch_size": 1,
+        "max_files_per_transaction": 1,
+        "max_records_per_transaction": 2048,
+        "commit_interval_ms": 0,
+    }
 
     with pytest.raises(ValueError, match="indexing.writer.commit_interval_ms"):
         validate_config_dict(bad_interval, source="unit test config")

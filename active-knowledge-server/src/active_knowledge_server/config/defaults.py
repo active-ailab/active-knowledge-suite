@@ -129,6 +129,8 @@ DEFAULT_CONFIG: Final[dict[str, object]] = {
         },
         "writer": {
             "batch_size": 64,
+            "max_files_per_transaction": 64,
+            "max_records_per_transaction": 2048,
             "commit_interval_ms": 1000,
         },
         "learned_cards": {

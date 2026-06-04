@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, cast
@@ -270,6 +270,59 @@ class _LiveObject:
     logical_object_id: str
     source_index: StorageSourceIndex
     record: ChunkRecord | EntityRecord | EvidenceRecord | RelationRecord
+
+
+@dataclass(frozen=True)
+class ApplyBatchItem:
+    """One deterministic incremental apply unit grouped into a writer batch."""
+
+    task_key: str
+    phase: str
+    source_kind: str
+    operation: str
+    relative_path: str
+    storage_relative_path: str | None = None
+    old_bundle: _ObjectBundle | None = None
+    new_bundle: _ObjectBundle | None = None
+    vector_writes: tuple[tuple[VectorRefRecord, tuple[float, ...]], ...] = ()
+    checkpoint_metadata: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def record_counts(self) -> Mapping[str, object]:
+        value = self.checkpoint_metadata.get("record_counts")
+        if isinstance(value, Mapping):
+            return value
+        return {}
+
+    @property
+    def record_total(self) -> int:
+        return _record_counts_total(self.record_counts)
+
+
+@dataclass(frozen=True)
+class ApplyBatch:
+    """One committed transaction-sized batch of incremental apply work."""
+
+    phase: str
+    items: tuple[ApplyBatchItem, ...]
+    max_files_per_transaction: int
+    max_records_per_transaction: int
+    commit_interval_ms: int
+
+    @property
+    def file_count(self) -> int:
+        return len(self.items)
+
+    @property
+    def record_count(self) -> int:
+        return sum(item.record_total for item in self.items)
+
+
+@dataclass(frozen=True)
+class _AppliedBatchResult:
+    batch: ApplyBatch
+    elapsed_seconds: float
+    item_elapsed_seconds: tuple[float, ...]
 
 
 _RUNNING_JOB_STATUS_ORDER: Final[tuple[JobStatus, ...]] = (
@@ -859,7 +912,6 @@ class IncrementalIndexPipeline:
             "profile_relations": 0,
             "workspace_map": 0,
         }
-        pending_vector_task_checkpoints: list[tuple[str, dict[str, object]]] = []
 
         def emit(
             *,
@@ -953,9 +1005,12 @@ class IncrementalIndexPipeline:
 
         warnings = list(plan.warnings)
         failed = False
+        writer_limits = _writer_apply_batch_limits(self._config)
         result_metadata: dict[str, object] = {
             "writer": {
                 "batch_size": self._config.indexing.writer.batch_size,
+                "max_files_per_transaction": writer_limits["max_files_per_transaction"],
+                "max_records_per_transaction": writer_limits["max_records_per_transaction"],
                 "commit_interval_ms": self._config.indexing.writer.commit_interval_ms,
             },
             "timings": {
@@ -967,6 +1022,7 @@ class IncrementalIndexPipeline:
             "diagnostics": {
                 "slowest_items": [],
             },
+            "apply_batches": _empty_apply_batch_metadata(writer_limits),
             "tasks": {
                 "total": task_counts["total"],
                 "by_phase": task_counts["by_phase"],
@@ -982,7 +1038,7 @@ class IncrementalIndexPipeline:
         if source in {"all", "code"} and (
             plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
         ):
-            current_task_key: str | None = None
+            failed_batch_items: tuple[ApplyBatchItem, ...] = ()
             try:
                 code_collect_base = global_done
 
@@ -1038,98 +1094,122 @@ class IncrementalIndexPipeline:
                 new_code_bundles = _code_bundles_by_path(code_indexed)
                 code_apply_done = phase_done["code_apply"]
                 code_apply_eta = SlidingWindowEtaEstimator()
+                code_apply_items: list[ApplyBatchItem] = []
                 for relative_path in plan.deleted_code_paths:
-                    current_task_key = f"code:delete:{relative_path}"
-                    if task_is_skipped(current_task_key):
+                    task_key = f"code:delete:{relative_path}"
+                    if task_is_skipped(task_key):
                         continue
-                    if job_reporter is not None:
-                        job_reporter.begin_task(current_task_key, phase="code_apply")
-                    apply_started_at = time.perf_counter()
-                    self._tombstone_deleted_path(
-                        reader,
-                        writer,
-                        relative_path=relative_path,
-                        snapshot_id=snapshot_id,
-                        reason="incremental_delete",
-                    )
-                    code_apply_done += 1
-                    global_done += 1
-                    elapsed_seconds = time.perf_counter() - apply_started_at
-                    _record_elapsed(
-                        result_metadata,
-                        timing_key="metadata_write_seconds",
-                        elapsed_seconds=elapsed_seconds,
-                        path=relative_path,
-                        stage="code_apply",
-                    )
-                    emit(
-                        phase="code_apply",
-                        stage_total=progress_totals["code_apply"],
-                        stage_done=code_apply_done,
-                        current_path=relative_path,
-                        message="Applying code changes",
-                        eta_seconds=code_apply_eta.observe(
-                            completed=code_apply_done,
-                            total=progress_totals["code_apply"],
-                        ),
-                    )
-                    mark_task_applied(
-                        current_task_key,
-                        checkpoint_metadata=_delete_checkpoint_metadata(
+                    code_apply_items.append(
+                        ApplyBatchItem(
+                            task_key=task_key,
+                            phase="code_apply",
                             source_kind="code",
+                            operation="delete",
                             relative_path=relative_path,
-                        ),
+                            old_bundle=_load_live_bundle(
+                                reader,
+                                relative_path=relative_path,
+                                snapshot_id=snapshot_id,
+                            ),
+                            checkpoint_metadata=_delete_checkpoint_metadata(
+                                source_kind="code",
+                                relative_path=relative_path,
+                            ),
+                        )
                     )
                 for relative_path in plan.changed_code_paths:
-                    current_task_key = f"code:apply:{relative_path}"
-                    if task_is_skipped(current_task_key):
+                    task_key = f"code:apply:{relative_path}"
+                    if task_is_skipped(task_key):
                         continue
                     bundle = new_code_bundles.get(relative_path)
                     if bundle is None:
                         continue
-                    if job_reporter is not None:
-                        job_reporter.begin_task(current_task_key, phase="code_apply")
-                    apply_started_at = time.perf_counter()
-                    self._apply_code_bundle(
-                        reader,
-                        writer,
-                        relative_path=relative_path,
-                        new_bundle=bundle,
-                        snapshot_id=snapshot_id,
+                    code_apply_items.append(
+                        ApplyBatchItem(
+                            task_key=task_key,
+                            phase="code_apply",
+                            source_kind="code",
+                            operation="apply",
+                            relative_path=relative_path,
+                            old_bundle=_load_live_bundle(
+                                reader,
+                                relative_path=relative_path,
+                                snapshot_id=snapshot_id,
+                            ),
+                            new_bundle=bundle,
+                            checkpoint_metadata=_bundle_checkpoint_metadata(
+                                bundle,
+                                source_kind="code",
+                                relative_path=relative_path,
+                                warnings=_warning_codes_for_path(
+                                    code_indexed.warnings,
+                                    relative_path,
+                                ),
+                            ),
+                        )
                     )
-                    code_apply_done += 1
-                    global_done += 1
-                    elapsed_seconds = time.perf_counter() - apply_started_at
-                    _record_elapsed(
+                code_apply_items.sort(key=lambda item: item.task_key)
+                failed_batch_items = tuple(code_apply_items)
+                for batch_result in self._apply_metadata_batches(
+                    reader,
+                    writer,
+                    snapshot_id=snapshot_id,
+                    items=code_apply_items,
+                    limits=writer_limits,
+                    on_batch_open=(
+                        None
+                        if job_reporter is None
+                        else lambda item: job_reporter.begin_task(
+                            item.task_key,
+                            phase=item.phase,
+                        )
+                    ),
+                ):
+                    batch = batch_result.batch
+                    failed_batch_items = batch.items
+                    _record_apply_batch(result_metadata, batch)
+                    batch_timing_total = 0.0
+                    for item, elapsed_seconds in zip(
+                        batch.items,
+                        batch_result.item_elapsed_seconds,
+                        strict=False,
+                    ):
+                        if job_reporter is not None and item is not batch.items[0]:
+                            job_reporter.begin_task(item.task_key, phase=batch.phase)
+                        code_apply_done += 1
+                        global_done += 1
+                        batch_timing_total += elapsed_seconds
+                        _record_elapsed(
+                            result_metadata,
+                            timing_key="metadata_write_seconds",
+                            elapsed_seconds=elapsed_seconds,
+                            path=item.relative_path,
+                            stage=batch.phase,
+                        )
+                        emit(
+                            phase="code_apply",
+                            stage_total=progress_totals["code_apply"],
+                            stage_done=code_apply_done,
+                            current_path=item.relative_path,
+                            message="Applying code changes",
+                            eta_seconds=code_apply_eta.observe(
+                                completed=code_apply_done,
+                                total=progress_totals["code_apply"],
+                            ),
+                        )
+                        mark_task_applied(
+                            item.task_key,
+                            checkpoint_metadata=item.checkpoint_metadata,
+                        )
+                    _add_timing(
                         result_metadata,
                         timing_key="metadata_write_seconds",
-                        elapsed_seconds=elapsed_seconds,
-                        path=relative_path,
-                        stage="code_apply",
-                    )
-                    emit(
-                        phase="code_apply",
-                        stage_total=progress_totals["code_apply"],
-                        stage_done=code_apply_done,
-                        current_path=relative_path,
-                        message="Applying code changes",
-                        eta_seconds=code_apply_eta.observe(
-                            completed=code_apply_done,
-                            total=progress_totals["code_apply"],
+                        elapsed_seconds=max(
+                            batch_result.elapsed_seconds - batch_timing_total,
+                            0.0,
                         ),
                     )
-                    mark_task_applied(
-                        current_task_key,
-                        checkpoint_metadata=_bundle_checkpoint_metadata(
-                            bundle,
-                            source_kind="code",
-                            relative_path=relative_path,
-                            warnings=_warning_codes_for_path(
-                                code_indexed.warnings,
-                                relative_path,
-                            ),
-                        ),
-                    )
+                    failed_batch_items = ()
                 if progress_totals["code_apply"] > 0:
                     emit(
                         phase="code_apply",
@@ -1141,8 +1221,8 @@ class IncrementalIndexPipeline:
             except IndexJobCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
-                if current_task_key is not None:
-                    mark_task_failed(current_task_key, exc)
+                for item in failed_batch_items:
+                    mark_task_failed(item.task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1162,60 +1242,40 @@ class IncrementalIndexPipeline:
         ):
             doc_apply_done = phase_done["doc_apply"]
             vector_apply_done = phase_done["vectors_apply"]
+            failed_doc_items: tuple[ApplyBatchItem, ...] = ()
+            failed_vector_items: tuple[ApplyBatchItem, ...] = ()
+            doc_apply_items: list[ApplyBatchItem] = []
             for relative_path in plan.deleted_doc_paths:
                 task_key = f"doc:delete:{relative_path}"
                 if task_is_skipped(task_key):
                     continue
-                if job_reporter is not None:
-                    job_reporter.begin_task(task_key, phase="doc_apply")
-                try:
-                    self._tombstone_deleted_path(
-                        reader,
-                        writer,
-                        relative_path=_doc_storage_relative_path(
-                            plan.source_docs_manifest,
-                            relative_path,
-                        ),
-                        snapshot_id=snapshot_id,
-                        reason="incremental_delete",
-                    )
-                except IndexJobCancelled:
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    failed = True
-                    warnings.append(
-                        IncrementalIndexWarning(
-                            code="index.doc_delete_failed",
-                            message=(
-                                "A deleted source document could not be tombstoned during "
-                                "incremental indexing."
-                            ),
-                            details={"path": relative_path, "error": str(exc)},
-                        )
-                    )
-                    mark_task_failed(task_key, exc)
-                else:
-                    doc_apply_done += 1
-                    global_done += 1
-                    emit(
+                storage_relative_path = _doc_storage_relative_path(
+                    plan.source_docs_manifest,
+                    relative_path,
+                )
+                doc_apply_items.append(
+                    ApplyBatchItem(
+                        task_key=task_key,
                         phase="doc_apply",
-                        stage_total=progress_totals["doc_apply"],
-                        stage_done=doc_apply_done,
-                        current_path=relative_path,
-                        message="Applying document changes",
-                    )
-                    mark_task_applied(
-                        task_key,
+                        source_kind="doc",
+                        operation="delete",
+                        relative_path=relative_path,
+                        storage_relative_path=storage_relative_path,
+                        old_bundle=_load_live_bundle(
+                            reader,
+                            relative_path=storage_relative_path,
+                            snapshot_id=snapshot_id,
+                        ),
                         checkpoint_metadata=_delete_checkpoint_metadata(
                             source_kind="doc",
                             relative_path=relative_path,
-                            storage_relative_path=_doc_storage_relative_path(
-                                plan.source_docs_manifest,
-                                relative_path,
-                            ),
+                            storage_relative_path=storage_relative_path,
                         ),
                     )
-
+                )
+            vector_apply_items: list[ApplyBatchItem] = []
+            doc_apply_eta = SlidingWindowEtaEstimator()
+            vector_apply_eta = SlidingWindowEtaEstimator()
             indexed_docs: IndexedDocuments | None = None
             if doc_paths_to_collect:
                 try:
@@ -1292,60 +1352,32 @@ class IncrementalIndexPipeline:
                     )
                     for record in indexed_docs.file_records
                 }
-                doc_apply_eta = SlidingWindowEtaEstimator()
-                vector_apply_eta = SlidingWindowEtaEstimator()
                 for relative_path in doc_paths_to_collect:
                     storage_relative_path = _doc_storage_relative_path(
                         plan.source_docs_manifest,
                         relative_path,
                     )
-                    current_doc_task_key: str | None = None
-                    try:
-                        new_bundle = indexed_by_path.get(storage_relative_path)
-                        if new_bundle is None:
-                            continue
-                        metadata_changed = (
-                            plan.reindex_all_docs or relative_path in plan.changed_doc_paths
-                        )
-                        if metadata_changed:
-                            current_doc_task_key = f"doc:apply:{relative_path}"
-                            if not task_is_skipped(current_doc_task_key):
-                                if job_reporter is not None:
-                                    job_reporter.begin_task(
-                                        current_doc_task_key,
-                                        phase="doc_apply",
-                                    )
-                                metadata_started_at = time.perf_counter()
-                                self._apply_doc_bundle(
-                                    reader,
-                                    writer,
-                                    relative_path=storage_relative_path,
-                                    new_bundle=new_bundle,
-                                    snapshot_id=snapshot_id,
-                                )
-                                doc_apply_done += 1
-                                global_done += 1
-                                elapsed_seconds = time.perf_counter() - metadata_started_at
-                                _record_elapsed(
-                                    result_metadata,
-                                    timing_key="metadata_write_seconds",
-                                    elapsed_seconds=elapsed_seconds,
-                                    path=storage_relative_path,
-                                    stage="doc_apply",
-                                )
-                                emit(
+                    new_bundle = indexed_by_path.get(storage_relative_path)
+                    if new_bundle is None:
+                        continue
+                    metadata_changed = plan.reindex_all_docs or relative_path in plan.changed_doc_paths
+                    if metadata_changed:
+                        task_key = f"doc:apply:{relative_path}"
+                        if not task_is_skipped(task_key):
+                            doc_apply_items.append(
+                                ApplyBatchItem(
+                                    task_key=task_key,
                                     phase="doc_apply",
-                                    stage_total=progress_totals["doc_apply"],
-                                    stage_done=doc_apply_done,
-                                    current_path=storage_relative_path,
-                                    message="Applying document changes",
-                                    eta_seconds=doc_apply_eta.observe(
-                                        completed=doc_apply_done,
-                                        total=progress_totals["doc_apply"],
+                                    source_kind="doc",
+                                    operation="apply",
+                                    relative_path=relative_path,
+                                    storage_relative_path=storage_relative_path,
+                                    old_bundle=_load_live_bundle(
+                                        reader,
+                                        relative_path=storage_relative_path,
+                                        snapshot_id=snapshot_id,
                                     ),
-                                )
-                                mark_task_applied(
-                                    current_doc_task_key,
+                                    new_bundle=new_bundle,
                                     checkpoint_metadata=_bundle_checkpoint_metadata(
                                         new_bundle,
                                         source_kind="doc",
@@ -1357,66 +1389,168 @@ class IncrementalIndexPipeline:
                                         ),
                                     ),
                                 )
-                        if plan.rebuild_vectors or metadata_changed:
-                            current_doc_task_key = f"vector:doc:{relative_path}"
-                            if task_is_skipped(current_doc_task_key):
-                                continue
-                            if job_reporter is not None:
-                                job_reporter.begin_task(
-                                    current_doc_task_key,
-                                    phase="vectors_apply",
-                                )
-                            vector_started_at = time.perf_counter()
-                            self._upsert_doc_vectors(
-                                vector_writer,
-                                indexed_docs,
-                                relative_path=storage_relative_path,
                             )
-                            pending_vector_task_checkpoints.append(
-                                (
-                                    current_doc_task_key,
-                                    _vector_checkpoint_metadata(
-                                        indexed_docs,
-                                        relative_path=relative_path,
-                                        storage_relative_path=storage_relative_path,
-                                    ),
-                                )
-                            )
-                            vector_apply_done += 1
-                            global_done += 1
-                            elapsed_seconds = time.perf_counter() - vector_started_at
-                            _record_elapsed(
-                                result_metadata,
-                                timing_key="vector_write_seconds",
-                                elapsed_seconds=elapsed_seconds,
-                                path=storage_relative_path,
-                                stage="vectors_apply",
-                            )
-                            emit(
+                    if plan.rebuild_vectors or metadata_changed:
+                        task_key = f"vector:doc:{relative_path}"
+                        if task_is_skipped(task_key):
+                            continue
+                        vector_apply_items.append(
+                            ApplyBatchItem(
+                                task_key=task_key,
                                 phase="vectors_apply",
-                                stage_total=progress_totals["vectors_apply"],
-                                stage_done=vector_apply_done,
-                                current_path=storage_relative_path,
-                                message="Applying document vectors",
-                                eta_seconds=vector_apply_eta.observe(
-                                    completed=vector_apply_done,
-                                    total=progress_totals["vectors_apply"],
+                                source_kind="vector",
+                                operation="doc",
+                                relative_path=relative_path,
+                                storage_relative_path=storage_relative_path,
+                                vector_writes=_vector_writes_for_path(
+                                    indexed_docs,
+                                    storage_relative_path=storage_relative_path,
+                                ),
+                                checkpoint_metadata=_vector_checkpoint_metadata(
+                                    indexed_docs,
+                                    relative_path=relative_path,
+                                    storage_relative_path=storage_relative_path,
                                 ),
                             )
-                            mark_task_applied(current_doc_task_key)
-                    except IndexJobCancelled:
-                        raise
-                    except Exception as exc:  # noqa: BLE001
-                        if current_doc_task_key is not None:
-                            mark_task_failed(current_doc_task_key, exc)
-                        failed = True
-                        warnings.append(
-                            IncrementalIndexWarning(
-                                code="index.doc_incremental_failed",
-                                message="A source document failed during incremental indexing.",
-                                details={"path": relative_path, "error": str(exc)},
-                            )
                         )
+            doc_apply_items.sort(key=lambda item: item.task_key)
+            vector_apply_items.sort(key=lambda item: item.task_key)
+            failed_doc_items = tuple(doc_apply_items)
+            failed_vector_items = tuple(vector_apply_items)
+            try:
+                for batch_result in self._apply_metadata_batches(
+                    reader,
+                    writer,
+                    snapshot_id=snapshot_id,
+                    items=doc_apply_items,
+                    limits=writer_limits,
+                    on_batch_open=(
+                        None
+                        if job_reporter is None
+                        else lambda item: job_reporter.begin_task(
+                            item.task_key,
+                            phase=item.phase,
+                        )
+                    ),
+                ):
+                    batch = batch_result.batch
+                    failed_doc_items = batch.items
+                    _record_apply_batch(result_metadata, batch)
+                    batch_timing_total = 0.0
+                    for item, elapsed_seconds in zip(
+                        batch.items,
+                        batch_result.item_elapsed_seconds,
+                        strict=False,
+                    ):
+                        if job_reporter is not None and item is not batch.items[0]:
+                            job_reporter.begin_task(item.task_key, phase=batch.phase)
+                        doc_apply_done += 1
+                        global_done += 1
+                        batch_timing_total += elapsed_seconds
+                        _record_elapsed(
+                            result_metadata,
+                            timing_key="metadata_write_seconds",
+                            elapsed_seconds=elapsed_seconds,
+                            path=item.storage_relative_path or item.relative_path,
+                            stage=batch.phase,
+                        )
+                        emit(
+                            phase="doc_apply",
+                            stage_total=progress_totals["doc_apply"],
+                            stage_done=doc_apply_done,
+                            current_path=item.storage_relative_path or item.relative_path,
+                            message="Applying document changes",
+                            eta_seconds=doc_apply_eta.observe(
+                                completed=doc_apply_done,
+                                total=progress_totals["doc_apply"],
+                            ),
+                        )
+                        mark_task_applied(
+                            item.task_key,
+                            checkpoint_metadata=item.checkpoint_metadata,
+                        )
+                    _add_timing(
+                        result_metadata,
+                        timing_key="metadata_write_seconds",
+                        elapsed_seconds=max(
+                            batch_result.elapsed_seconds - batch_timing_total,
+                            0.0,
+                        ),
+                    )
+                    failed_doc_items = ()
+                for batch_result in self._apply_vector_batches(
+                    vector_writer,
+                    items=vector_apply_items,
+                    limits=writer_limits,
+                    on_batch_open=(
+                        None
+                        if job_reporter is None
+                        else lambda item: job_reporter.begin_task(
+                            item.task_key,
+                            phase=item.phase,
+                        )
+                    ),
+                ):
+                    batch = batch_result.batch
+                    failed_vector_items = batch.items
+                    _record_apply_batch(result_metadata, batch)
+                    batch_timing_total = 0.0
+                    for item, elapsed_seconds in zip(
+                        batch.items,
+                        batch_result.item_elapsed_seconds,
+                        strict=False,
+                    ):
+                        if job_reporter is not None and item is not batch.items[0]:
+                            job_reporter.begin_task(item.task_key, phase=batch.phase)
+                        vector_apply_done += 1
+                        global_done += 1
+                        batch_timing_total += elapsed_seconds
+                        _record_elapsed(
+                            result_metadata,
+                            timing_key="vector_write_seconds",
+                            elapsed_seconds=elapsed_seconds,
+                            path=item.storage_relative_path or item.relative_path,
+                            stage=batch.phase,
+                        )
+                        emit(
+                            phase="vectors_apply",
+                            stage_total=progress_totals["vectors_apply"],
+                            stage_done=vector_apply_done,
+                            current_path=item.storage_relative_path or item.relative_path,
+                            message="Applying document vectors",
+                            eta_seconds=vector_apply_eta.observe(
+                                completed=vector_apply_done,
+                                total=progress_totals["vectors_apply"],
+                            ),
+                        )
+                        mark_task_applied(
+                            item.task_key,
+                            checkpoint_metadata=item.checkpoint_metadata,
+                        )
+                    _add_timing(
+                        result_metadata,
+                        timing_key="vector_write_seconds",
+                        elapsed_seconds=max(
+                            batch_result.elapsed_seconds - batch_timing_total,
+                            0.0,
+                        ),
+                    )
+                    failed_vector_items = ()
+            except IndexJobCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                for item in failed_doc_items:
+                    mark_task_failed(item.task_key, exc)
+                for item in failed_vector_items:
+                    mark_task_failed(item.task_key, exc)
+                failed = True
+                warnings.append(
+                    IncrementalIndexWarning(
+                        code="index.doc_incremental_failed",
+                        message="A source document failed during incremental indexing.",
+                        details={"error": str(exc)},
+                    )
+                )
             if progress_totals["doc_apply"] > 0:
                 emit(
                     phase="doc_apply",
@@ -1433,12 +1567,6 @@ class IncrementalIndexPipeline:
                     message="Flushing document vectors to overlay store",
                 )
             vector_writer.flush()
-            for task_key, checkpoint_metadata in pending_vector_task_checkpoints:
-                mark_task_applied(
-                    task_key,
-                    checkpoint_metadata=checkpoint_metadata,
-                    update_stats=False,
-                )
 
         if source in {"all", "code"} and plan.rebuild_profile_conditioned_relations:
             task_key = "profile:relations"
@@ -1568,6 +1696,175 @@ class IncrementalIndexPipeline:
             plan=plan,
             warnings=tuple(warnings),
             metadata=result_metadata,
+        )
+
+    def _apply_metadata_batches(
+        self,
+        reader: object,
+        writer: object,
+        *,
+        snapshot_id: str,
+        items: Sequence[ApplyBatchItem],
+        limits: Mapping[str, int],
+        on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
+    ) -> tuple[_AppliedBatchResult, ...]:
+        max_files = int(limits["max_files_per_transaction"])
+        max_records = int(limits["max_records_per_transaction"])
+        commit_interval_ms = int(limits["commit_interval_ms"])
+        if not items:
+            return ()
+
+        results: list[_AppliedBatchResult] = []
+        current_items: list[ApplyBatchItem] = []
+        current_item_timings: list[float] = []
+        current_records = 0
+        batch_started_at: float | None = None
+        transaction_cm: object | None = None
+
+        def open_batch(first_item: ApplyBatchItem) -> None:
+            nonlocal batch_started_at, transaction_cm
+            batch_started_at = time.perf_counter()
+            transaction_cm = writer.transaction()
+            transaction_cm.__enter__()
+            if on_batch_open is not None:
+                on_batch_open(first_item)
+
+        def close_batch() -> None:
+            nonlocal current_records, batch_started_at, transaction_cm
+            assert batch_started_at is not None
+            assert transaction_cm is not None
+            transaction_cm.__exit__(None, None, None)
+            elapsed_seconds = time.perf_counter() - batch_started_at
+            results.append(
+                _AppliedBatchResult(
+                    batch=ApplyBatch(
+                        phase=current_items[0].phase,
+                        items=tuple(current_items),
+                        max_files_per_transaction=max_files,
+                        max_records_per_transaction=max_records,
+                        commit_interval_ms=commit_interval_ms,
+                    ),
+                    elapsed_seconds=elapsed_seconds,
+                    item_elapsed_seconds=tuple(current_item_timings),
+                )
+            )
+            current_items.clear()
+            current_item_timings.clear()
+            current_records = 0
+            batch_started_at = None
+            transaction_cm = None
+
+        try:
+            for item in items:
+                item_records = max(1, item.record_total)
+                if current_items and (
+                    len(current_items) >= max_files
+                    or current_records + item_records > max_records
+                ):
+                    close_batch()
+                if transaction_cm is None:
+                    open_batch(item)
+                item_started_at = time.perf_counter()
+                self._apply_metadata_batch_item(
+                    reader,
+                    writer,
+                    snapshot_id=snapshot_id,
+                    item=item,
+                )
+                current_items.append(item)
+                current_item_timings.append(time.perf_counter() - item_started_at)
+                current_records += item_records
+                assert batch_started_at is not None
+                if (time.perf_counter() - batch_started_at) * 1000.0 >= commit_interval_ms:
+                    close_batch()
+            if transaction_cm is not None:
+                close_batch()
+        except Exception as exc:
+            if transaction_cm is not None:
+                transaction_cm.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+
+        return tuple(results)
+
+    def _apply_vector_batches(
+        self,
+        vector_writer: object,
+        *,
+        items: Sequence[ApplyBatchItem],
+        limits: Mapping[str, int],
+        on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
+    ) -> tuple[_AppliedBatchResult, ...]:
+        batches = _build_apply_batches(
+            items,
+            max_files_per_transaction=int(limits["max_files_per_transaction"]),
+            max_records_per_transaction=int(limits["max_records_per_transaction"]),
+            commit_interval_ms=int(limits["commit_interval_ms"]),
+        )
+        results: list[_AppliedBatchResult] = []
+        for batch in batches:
+            if on_batch_open is not None and batch.items:
+                on_batch_open(batch.items[0])
+            started_at = time.perf_counter()
+            self._apply_vector_batch(vector_writer, batch=batch)
+            elapsed_seconds = time.perf_counter() - started_at
+            per_item_elapsed = (
+                tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
+                if batch.items
+                else ()
+            )
+            results.append(
+                _AppliedBatchResult(
+                    batch=batch,
+                    elapsed_seconds=elapsed_seconds,
+                    item_elapsed_seconds=per_item_elapsed,
+                )
+            )
+        return tuple(results)
+
+    def _apply_metadata_batch_item(
+        self,
+        reader: object,
+        writer: object,
+        *,
+        snapshot_id: str,
+        item: ApplyBatchItem,
+    ) -> None:
+        if item.operation == "delete":
+            self._tombstone_deleted_path(
+                reader,
+                writer,
+                relative_path=item.storage_relative_path or item.relative_path,
+                snapshot_id=snapshot_id,
+                reason="incremental_delete",
+            )
+            return
+        if item.source_kind == "code":
+            assert item.new_bundle is not None
+            self._apply_code_bundle(
+                reader,
+                writer,
+                relative_path=item.relative_path,
+                new_bundle=item.new_bundle,
+                snapshot_id=snapshot_id,
+            )
+            return
+        if item.source_kind == "doc":
+            assert item.new_bundle is not None
+            self._apply_doc_bundle(
+                reader,
+                writer,
+                relative_path=item.storage_relative_path or item.relative_path,
+                new_bundle=item.new_bundle,
+                snapshot_id=snapshot_id,
+            )
+            return
+        raise ValueError(f"unsupported metadata apply batch item: {item.source_kind}:{item.operation}")
+
+    def _apply_vector_batch(self, vector_writer: object, *, batch: ApplyBatch) -> None:
+        vector_writer.upsert_vectors(
+            vector_write
+            for item in batch.items
+            for vector_write in item.vector_writes
         )
 
     def _apply_code_bundle(
@@ -2029,6 +2326,56 @@ def _resume_policy_metadata(
     }
 
 
+def _writer_apply_batch_limits(config: ActiveKnowledgeConfig) -> dict[str, int]:
+    return {
+        "max_files_per_transaction": config.indexing.writer.max_files_per_transaction,
+        "max_records_per_transaction": config.indexing.writer.max_records_per_transaction,
+        "commit_interval_ms": config.indexing.writer.commit_interval_ms,
+    }
+
+
+def _empty_apply_batch_metadata(limits: Mapping[str, int]) -> dict[str, object]:
+    return {
+        "configured": {
+            "max_files_per_transaction": int(limits["max_files_per_transaction"]),
+            "max_records_per_transaction": int(limits["max_records_per_transaction"]),
+            "commit_interval_ms": int(limits["commit_interval_ms"]),
+        },
+        "by_phase": {},
+    }
+
+
+def _record_apply_batch(
+    result_metadata: dict[str, object],
+    batch: ApplyBatch,
+) -> None:
+    apply_batches = result_metadata.get("apply_batches")
+    assert isinstance(apply_batches, dict)
+    by_phase = apply_batches.get("by_phase")
+    assert isinstance(by_phase, dict)
+    phase_stats = by_phase.get(batch.phase)
+    if not isinstance(phase_stats, dict):
+        phase_stats = {
+            "batches": 0,
+            "items": 0,
+            "records": 0,
+            "max_items_in_batch": 0,
+            "max_records_in_batch": 0,
+        }
+    phase_stats["batches"] = int(phase_stats.get("batches", 0)) + 1
+    phase_stats["items"] = int(phase_stats.get("items", 0)) + len(batch.items)
+    phase_stats["records"] = int(phase_stats.get("records", 0)) + batch.record_count
+    phase_stats["max_items_in_batch"] = max(
+        int(phase_stats.get("max_items_in_batch", 0)),
+        len(batch.items),
+    )
+    phase_stats["max_records_in_batch"] = max(
+        int(phase_stats.get("max_records_in_batch", 0)),
+        batch.record_count,
+    )
+    by_phase[batch.phase] = phase_stats
+
+
 def _delete_checkpoint_metadata(
     *,
     source_kind: Literal["code", "doc"],
@@ -2052,6 +2399,16 @@ def _delete_checkpoint_metadata(
     if storage_relative_path is not None:
         metadata["storage_relative_path"] = storage_relative_path
     return metadata
+
+
+def _record_counts_total(record_counts: Mapping[str, object]) -> int:
+    total = 0
+    for value in record_counts.values():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            total += value
+    return total
 
 
 def _bundle_checkpoint_metadata(
@@ -2087,15 +2444,9 @@ def _vector_checkpoint_metadata(
     relative_path: str,
     storage_relative_path: str,
 ) -> dict[str, object]:
-    chunk_paths = {
-        record.chunk_id: _chunk_relative_path(record) for record in indexed.chunk_records
-    }
-    writes = tuple(
-        write
-        for write in indexed.vector_writes
-        if chunk_paths.get(write.record.object_id) == storage_relative_path
-    )
-    embedding_models = sorted({write.record.embedding_model_version for write in writes})
+    writes = _vector_writes_for_path(indexed, storage_relative_path=storage_relative_path)
+    records = tuple(record for record, _embedding in writes)
+    embedding_models = sorted({record.embedding_model_version for record in records})
     return {
         "operation": "doc",
         "source_kind": "vector",
@@ -2103,16 +2454,31 @@ def _vector_checkpoint_metadata(
         "storage_relative_path": storage_relative_path,
         "record_counts": {
             "files": 0,
-            "chunks": len({write.record.object_id for write in writes}),
+            "chunks": len({record.object_id for record in records}),
             "entities": 0,
             "relations": 0,
             "evidence": 0,
             "vector_refs": len(writes),
         },
         "embedding_models": embedding_models,
-        "vector_ref_ids": [write.record.vector_ref_id for write in writes],
+        "vector_ref_ids": [record.vector_ref_id for record in records],
         "warning_codes": list(_warning_codes_for_path(indexed.warnings, storage_relative_path)),
     }
+
+
+def _vector_writes_for_path(
+    indexed: IndexedDocuments,
+    *,
+    storage_relative_path: str,
+) -> tuple[tuple[VectorRefRecord, tuple[float, ...]], ...]:
+    chunk_paths = {
+        record.chunk_id: _chunk_relative_path(record) for record in indexed.chunk_records
+    }
+    return tuple(
+        (write.record, write.embedding)
+        for write in indexed.vector_writes
+        if chunk_paths.get(write.record.object_id) == storage_relative_path
+    )
 
 
 def _warning_codes_for_path(warnings: Sequence[object], relative_path: str) -> tuple[str, ...]:
@@ -2580,6 +2946,63 @@ def _record_elapsed(
         }
     )
     diagnostics["slowest_items"] = list(_top_slowest_items(existing))
+
+
+def _add_timing(
+    result_metadata: dict[str, object],
+    *,
+    timing_key: str,
+    elapsed_seconds: float,
+) -> None:
+    if elapsed_seconds <= 0:
+        return
+    timings = result_metadata.get("timings")
+    assert isinstance(timings, dict)
+    timings[timing_key] = round(float(timings.get(timing_key, 0.0)) + elapsed_seconds, 6)
+
+
+def _build_apply_batches(
+    items: Sequence[ApplyBatchItem],
+    *,
+    max_files_per_transaction: int,
+    max_records_per_transaction: int,
+    commit_interval_ms: int,
+) -> tuple[ApplyBatch, ...]:
+    if not items:
+        return ()
+    batches: list[ApplyBatch] = []
+    current_items: list[ApplyBatchItem] = []
+    current_records = 0
+    for item in items:
+        item_records = max(1, item.record_total)
+        if current_items and (
+            len(current_items) >= max_files_per_transaction
+            or current_records + item_records > max_records_per_transaction
+        ):
+            batches.append(
+                ApplyBatch(
+                    phase=current_items[0].phase,
+                    items=tuple(current_items),
+                    max_files_per_transaction=max_files_per_transaction,
+                    max_records_per_transaction=max_records_per_transaction,
+                    commit_interval_ms=commit_interval_ms,
+                )
+            )
+            current_items = []
+            current_records = 0
+        current_items.append(item)
+        current_records += item_records
+    if current_items:
+        batches.append(
+            ApplyBatch(
+                phase=current_items[0].phase,
+                items=tuple(current_items),
+                max_files_per_transaction=max_files_per_transaction,
+                max_records_per_transaction=max_records_per_transaction,
+                commit_interval_ms=commit_interval_ms,
+            )
+        )
+    return tuple(batches)
 
 
 def _top_slowest_items(

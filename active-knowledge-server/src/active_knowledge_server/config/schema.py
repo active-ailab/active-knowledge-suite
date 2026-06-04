@@ -239,6 +239,8 @@ class IndexWriterConfig(ConfigModel):
     """Single-writer batching policy for index apply phases."""
 
     batch_size: int = Field(default=64, ge=1)
+    max_files_per_transaction: int = Field(default=64, ge=1)
+    max_records_per_transaction: int = Field(default=2048, ge=1)
     commit_interval_ms: int = Field(default=1000, ge=1)
 
 

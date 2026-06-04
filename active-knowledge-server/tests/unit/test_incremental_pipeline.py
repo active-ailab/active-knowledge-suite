@@ -33,7 +33,9 @@ from active_knowledge_server.indexing.jobs import (
     task_checkpoint_key,
 )
 from active_knowledge_server.indexing.pipeline import (
+    ApplyBatchItem,
     IndexRunContext,
+    _build_apply_batches,
     _format_discover_target,
     _format_source_docs_discover_message,
     _format_workspace_discover_message,
@@ -172,6 +174,44 @@ class FailingVectorAdapter:
 
     def close(self) -> None:
         return None
+
+
+def test_build_apply_batches_preserves_order_and_splits_on_limits() -> None:
+    items = tuple(
+        ApplyBatchItem(
+            task_key=f"code:apply:file-{index}.c",
+            phase="code_apply",
+            source_kind="code",
+            operation="apply",
+            relative_path=f"file-{index}.c",
+            checkpoint_metadata={
+                "record_counts": {
+                    "files": 1,
+                    "chunks": record_count,
+                    "entities": 0,
+                    "relations": 0,
+                    "evidence": 0,
+                    "vector_refs": 0,
+                }
+            },
+        )
+        for index, record_count in enumerate((1, 2, 1), start=1)
+    )
+
+    batches = _build_apply_batches(
+        items,
+        max_files_per_transaction=2,
+        max_records_per_transaction=5,
+        commit_interval_ms=1000,
+    )
+
+    assert [item.task_key for item in batches[0].items] == [
+        "code:apply:file-1.c",
+        "code:apply:file-2.c",
+    ]
+    assert [item.task_key for item in batches[1].items] == ["code:apply:file-3.c"]
+    assert batches[0].record_count == 5
+    assert batches[1].record_count == 2
 
 
 def resolve_model(tmp_path: Path, overrides: ConfigDict | None = None) -> ActiveKnowledgeConfig:
@@ -1717,6 +1757,75 @@ int health_apply_failure_probe(void)
     assert store.get_checkpoint(job.job_id, task_checkpoint_key(failed_task)) is None
 
 
+def test_incremental_pipeline_records_apply_batch_metadata_for_code_apply(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={
+            "indexing": {
+                "writer": {
+                    "max_files_per_transaction": 2,
+                    "max_records_per_transaction": 4096,
+                    "commit_interval_ms": 1000,
+                }
+            }
+        },
+    )
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    _metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+int health_batch_main(void)
+{
+    return 21;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_batch_main(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "bt.c").unlink()
+
+    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+
+    apply_batches = result.metadata["apply_batches"]
+    assert isinstance(apply_batches, dict)
+    by_phase = apply_batches["by_phase"]
+    assert isinstance(by_phase, dict)
+    code_stats = by_phase["code_apply"]
+    assert code_stats["batches"] == 2
+    assert code_stats["items"] == 3
+    assert code_stats["max_items_in_batch"] == 2
+    assert code_stats["records"] >= 3
+    assert code_stats["max_records_in_batch"] >= 1
+    assert result.metadata["writer"]["max_files_per_transaction"] == 2
+    assert result.metadata["writer"]["max_records_per_transaction"] == 4096
+    assert result.result_status == "ready"
+    vector_adapter.close()
+
+
+def test_incremental_pipeline_batch_and_single_apply_produce_same_logical_code_output(
+    tmp_path: Path,
+) -> None:
+    single_snapshot = _run_incremental_code_snapshot(tmp_path / "single", max_files_per_transaction=1)
+    batched_snapshot = _run_incremental_code_snapshot(tmp_path / "batched", max_files_per_transaction=2)
+
+    assert batched_snapshot == single_snapshot
+
+
 def test_incremental_pipeline_updates_job_context_metadata(tmp_path: Path) -> None:
     config = resolve_model(tmp_path)
     workspace_root = Path(config.project.workspace_root)
@@ -1847,6 +1956,111 @@ Open the sensor register and return a handle for runtime use.
 """,
         encoding="utf-8",
     )
+
+
+def _run_incremental_code_snapshot(
+    tmp_path: Path,
+    *,
+    max_files_per_transaction: int,
+) -> dict[str, object]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    config = resolve_model(
+        tmp_path,
+        overrides={
+            "indexing": {
+                "writer": {
+                    "max_files_per_transaction": max_files_per_transaction,
+                    "max_records_per_transaction": 4096,
+                    "commit_interval_ms": 1000,
+                }
+            }
+        },
+    )
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+int health_snapshot_main(void)
+{
+    return 34;
+}
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_snapshot_main(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "bt.c").unlink()
+
+    result = pipeline.run(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    assert result.result_status == "ready"
+
+    scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID)
+    reader = metadata_adapter.reader()
+    files = tuple(
+        sorted(
+            (record.relative_path, record.file_id)
+            for record in reader.iter_files(scope)
+            if record.relative_path.startswith("components/health/")
+        )
+    )
+    file_ids = {file_id for _path, file_id in files}
+    chunks = tuple(
+        sorted(
+            item.record.chunk_id
+            for item in reader.logical_chunks(scope)
+            if item.record.file_id in file_ids
+        )
+    )
+    entities = tuple(
+        sorted(
+            (item.record.entity_id, item.record.name)
+            for item in reader.logical_entities(scope)
+            if item.record.file_id in file_ids
+        )
+    )
+    entity_ids = {entity_id for entity_id, _name in entities}
+    relations = tuple(
+        sorted(
+            item.record.relation_id
+            for item in reader.logical_relations(scope)
+            if item.record.src_entity_id in entity_ids or item.record.dst_entity_id in entity_ids
+        )
+    )
+    evidence = tuple(
+        sorted(
+            item.record.evidence_id
+            for item in reader.logical_evidence(scope)
+            if item.record.file_id in file_ids
+        )
+    )
+    vectors = tuple(
+        sorted(
+            record.vector_ref_id
+            for record in reader.iter_vector_refs(scope)
+            if record.object_id in set(chunks)
+        )
+    )
+    vector_adapter.close()
+    return {
+        "files": files,
+        "chunks": chunks,
+        "entities": entities,
+        "relations": relations,
+        "evidence": evidence,
+        "vectors": vectors,
+    }
 
 
 def write_profile_fixture(
