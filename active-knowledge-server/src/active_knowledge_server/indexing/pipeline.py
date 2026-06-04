@@ -325,6 +325,12 @@ class _AppliedBatchResult:
     item_elapsed_seconds: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class _FailedApplyItem:
+    item: ApplyBatchItem
+    error: Exception
+
+
 _RUNNING_JOB_STATUS_ORDER: Final[tuple[JobStatus, ...]] = (
     "discovering",
     "parsing",
@@ -1038,7 +1044,6 @@ class IncrementalIndexPipeline:
         if source in {"all", "code"} and (
             plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
         ):
-            failed_batch_items: tuple[ApplyBatchItem, ...] = ()
             try:
                 code_collect_base = global_done
 
@@ -1149,8 +1154,7 @@ class IncrementalIndexPipeline:
                         )
                     )
                 code_apply_items.sort(key=lambda item: item.task_key)
-                failed_batch_items = tuple(code_apply_items)
-                for batch_result in self._apply_metadata_batches(
+                metadata_batch_results, failed_code_items = self._apply_metadata_batches(
                     reader,
                     writer,
                     snapshot_id=snapshot_id,
@@ -1164,9 +1168,9 @@ class IncrementalIndexPipeline:
                             phase=item.phase,
                         )
                     ),
-                ):
+                )
+                for batch_result in metadata_batch_results:
                     batch = batch_result.batch
-                    failed_batch_items = batch.items
                     _record_apply_batch(result_metadata, batch)
                     batch_timing_total = 0.0
                     for item, elapsed_seconds in zip(
@@ -1209,7 +1213,12 @@ class IncrementalIndexPipeline:
                             0.0,
                         ),
                     )
-                    failed_batch_items = ()
+                for failed_item in failed_code_items:
+                    mark_task_failed(failed_item.item.task_key, failed_item.error)
+                    failed = True
+                    warnings.append(
+                        _task_apply_failure_warning(failed_item.item, failed_item.error)
+                    )
                 if progress_totals["code_apply"] > 0:
                     emit(
                         phase="code_apply",
@@ -1221,8 +1230,6 @@ class IncrementalIndexPipeline:
             except IndexJobCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - surface as degraded incremental failure.
-                for item in failed_batch_items:
-                    mark_task_failed(item.task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1242,8 +1249,8 @@ class IncrementalIndexPipeline:
         ):
             doc_apply_done = phase_done["doc_apply"]
             vector_apply_done = phase_done["vectors_apply"]
-            failed_doc_items: tuple[ApplyBatchItem, ...] = ()
-            failed_vector_items: tuple[ApplyBatchItem, ...] = ()
+            failed_doc_items: tuple[_FailedApplyItem, ...] = ()
+            failed_vector_items: tuple[_FailedApplyItem, ...] = ()
             doc_apply_items: list[ApplyBatchItem] = []
             for relative_path in plan.deleted_doc_paths:
                 task_key = f"doc:delete:{relative_path}"
@@ -1360,7 +1367,9 @@ class IncrementalIndexPipeline:
                     new_bundle = indexed_by_path.get(storage_relative_path)
                     if new_bundle is None:
                         continue
-                    metadata_changed = plan.reindex_all_docs or relative_path in plan.changed_doc_paths
+                    metadata_changed = (
+                        plan.reindex_all_docs or relative_path in plan.changed_doc_paths
+                    )
                     if metadata_changed:
                         task_key = f"doc:apply:{relative_path}"
                         if not task_is_skipped(task_key):
@@ -1415,10 +1424,8 @@ class IncrementalIndexPipeline:
                         )
             doc_apply_items.sort(key=lambda item: item.task_key)
             vector_apply_items.sort(key=lambda item: item.task_key)
-            failed_doc_items = tuple(doc_apply_items)
-            failed_vector_items = tuple(vector_apply_items)
             try:
-                for batch_result in self._apply_metadata_batches(
+                metadata_batch_results, failed_doc_items = self._apply_metadata_batches(
                     reader,
                     writer,
                     snapshot_id=snapshot_id,
@@ -1432,9 +1439,9 @@ class IncrementalIndexPipeline:
                             phase=item.phase,
                         )
                     ),
-                ):
+                )
+                for batch_result in metadata_batch_results:
                     batch = batch_result.batch
-                    failed_doc_items = batch.items
                     _record_apply_batch(result_metadata, batch)
                     batch_timing_total = 0.0
                     for item, elapsed_seconds in zip(
@@ -1477,8 +1484,7 @@ class IncrementalIndexPipeline:
                             0.0,
                         ),
                     )
-                    failed_doc_items = ()
-                for batch_result in self._apply_vector_batches(
+                vector_batch_results, failed_vector_items = self._apply_vector_batches(
                     vector_writer,
                     items=vector_apply_items,
                     limits=writer_limits,
@@ -1490,9 +1496,9 @@ class IncrementalIndexPipeline:
                             phase=item.phase,
                         )
                     ),
-                ):
+                )
+                for batch_result in vector_batch_results:
                     batch = batch_result.batch
-                    failed_vector_items = batch.items
                     _record_apply_batch(result_metadata, batch)
                     batch_timing_total = 0.0
                     for item, elapsed_seconds in zip(
@@ -1535,14 +1541,21 @@ class IncrementalIndexPipeline:
                             0.0,
                         ),
                     )
-                    failed_vector_items = ()
+                for failed_item in failed_doc_items:
+                    mark_task_failed(failed_item.item.task_key, failed_item.error)
+                    failed = True
+                    warnings.append(
+                        _task_apply_failure_warning(failed_item.item, failed_item.error)
+                    )
+                for failed_item in failed_vector_items:
+                    mark_task_failed(failed_item.item.task_key, failed_item.error)
+                    failed = True
+                    warnings.append(
+                        _task_apply_failure_warning(failed_item.item, failed_item.error)
+                    )
             except IndexJobCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001
-                for item in failed_doc_items:
-                    mark_task_failed(item.task_key, exc)
-                for item in failed_vector_items:
-                    mark_task_failed(item.task_key, exc)
                 failed = True
                 warnings.append(
                     IncrementalIndexWarning(
@@ -1707,16 +1720,16 @@ class IncrementalIndexPipeline:
         items: Sequence[ApplyBatchItem],
         limits: Mapping[str, int],
         on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
-    ) -> tuple[_AppliedBatchResult, ...]:
+    ) -> tuple[tuple[_AppliedBatchResult, ...], tuple[_FailedApplyItem, ...]]:
         max_files = int(limits["max_files_per_transaction"])
         max_records = int(limits["max_records_per_transaction"])
         commit_interval_ms = int(limits["commit_interval_ms"])
         if not items:
-            return ()
+            return (), ()
 
         results: list[_AppliedBatchResult] = []
+        failed_items: list[_FailedApplyItem] = []
         current_items: list[ApplyBatchItem] = []
-        current_item_timings: list[float] = []
         current_records = 0
         batch_started_at: float | None = None
         transaction_cm: object | None = None
@@ -1729,30 +1742,40 @@ class IncrementalIndexPipeline:
             if on_batch_open is not None:
                 on_batch_open(first_item)
 
-        def close_batch() -> None:
+        def current_batch() -> ApplyBatch:
+            return ApplyBatch(
+                phase=current_items[0].phase,
+                items=tuple(current_items),
+                max_files_per_transaction=max_files,
+                max_records_per_transaction=max_records,
+                commit_interval_ms=commit_interval_ms,
+            )
+
+        def reset_batch_state() -> None:
             nonlocal current_records, batch_started_at, transaction_cm
+            current_items.clear()
+            current_records = 0
+            batch_started_at = None
+            transaction_cm = None
+
+        def close_batch() -> None:
             assert batch_started_at is not None
             assert transaction_cm is not None
             transaction_cm.__exit__(None, None, None)
             elapsed_seconds = time.perf_counter() - batch_started_at
+            per_item_elapsed = (
+                tuple(elapsed_seconds / len(current_items) for _ in current_items)
+                if current_items
+                else ()
+            )
             results.append(
                 _AppliedBatchResult(
-                    batch=ApplyBatch(
-                        phase=current_items[0].phase,
-                        items=tuple(current_items),
-                        max_files_per_transaction=max_files,
-                        max_records_per_transaction=max_records,
-                        commit_interval_ms=commit_interval_ms,
-                    ),
+                    batch=current_batch(),
                     elapsed_seconds=elapsed_seconds,
-                    item_elapsed_seconds=tuple(current_item_timings),
+                    item_elapsed_seconds=per_item_elapsed,
                 )
             )
-            current_items.clear()
-            current_item_timings.clear()
-            current_records = 0
-            batch_started_at = None
-            transaction_cm = None
+            reset_batch_state()
 
         try:
             for item in items:
@@ -1764,16 +1787,32 @@ class IncrementalIndexPipeline:
                     close_batch()
                 if transaction_cm is None:
                     open_batch(item)
-                item_started_at = time.perf_counter()
-                self._apply_metadata_batch_item(
-                    reader,
-                    writer,
-                    snapshot_id=snapshot_id,
-                    item=item,
-                )
                 current_items.append(item)
-                current_item_timings.append(time.perf_counter() - item_started_at)
                 current_records += item_records
+                try:
+                    self._apply_metadata_batch_item(
+                        reader,
+                        writer,
+                        snapshot_id=snapshot_id,
+                        item=item,
+                    )
+                except Exception as exc:
+                    assert transaction_cm is not None
+                    transaction_cm.__exit__(type(exc), exc, exc.__traceback__)
+                    degraded_results, degraded_failures = self._apply_batch_with_degradation(
+                        current_batch(),
+                        apply_batch=lambda batch: self._apply_one_metadata_batch(
+                            reader,
+                            writer,
+                            snapshot_id=snapshot_id,
+                            batch=batch,
+                            on_batch_open=on_batch_open,
+                        ),
+                    )
+                    results.extend(degraded_results)
+                    failed_items.extend(degraded_failures)
+                    reset_batch_state()
+                    continue
                 assert batch_started_at is not None
                 if (time.perf_counter() - batch_started_at) * 1000.0 >= commit_interval_ms:
                     close_batch()
@@ -1784,7 +1823,7 @@ class IncrementalIndexPipeline:
                 transaction_cm.__exit__(type(exc), exc, exc.__traceback__)
             raise
 
-        return tuple(results)
+        return tuple(results), tuple(failed_items)
 
     def _apply_vector_batches(
         self,
@@ -1793,7 +1832,7 @@ class IncrementalIndexPipeline:
         items: Sequence[ApplyBatchItem],
         limits: Mapping[str, int],
         on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
-    ) -> tuple[_AppliedBatchResult, ...]:
+    ) -> tuple[tuple[_AppliedBatchResult, ...], tuple[_FailedApplyItem, ...]]:
         batches = _build_apply_batches(
             items,
             max_files_per_transaction=int(limits["max_files_per_transaction"]),
@@ -1801,25 +1840,101 @@ class IncrementalIndexPipeline:
             commit_interval_ms=int(limits["commit_interval_ms"]),
         )
         results: list[_AppliedBatchResult] = []
+        failed_items: list[_FailedApplyItem] = []
         for batch in batches:
-            if on_batch_open is not None and batch.items:
-                on_batch_open(batch.items[0])
-            started_at = time.perf_counter()
-            self._apply_vector_batch(vector_writer, batch=batch)
-            elapsed_seconds = time.perf_counter() - started_at
-            per_item_elapsed = (
-                tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
-                if batch.items
-                else ()
+            degraded_results, degraded_failures = self._apply_batch_with_degradation(
+                batch,
+                apply_batch=lambda current_batch: self._apply_one_vector_batch(
+                    vector_writer,
+                    batch=current_batch,
+                    on_batch_open=on_batch_open,
+                ),
             )
-            results.append(
-                _AppliedBatchResult(
-                    batch=batch,
-                    elapsed_seconds=elapsed_seconds,
-                    item_elapsed_seconds=per_item_elapsed,
+            results.extend(degraded_results)
+            failed_items.extend(degraded_failures)
+        return tuple(results), tuple(failed_items)
+
+    def _apply_batch_with_degradation(
+        self,
+        batch: ApplyBatch,
+        *,
+        apply_batch: Callable[[ApplyBatch], _AppliedBatchResult],
+    ) -> tuple[tuple[_AppliedBatchResult, ...], tuple[_FailedApplyItem, ...]]:
+        try:
+            return (apply_batch(batch),), ()
+        except Exception as exc:
+            if len(batch.items) == 1:
+                return (), (_FailedApplyItem(item=batch.items[0], error=exc),)
+            midpoint = max(1, len(batch.items) // 2)
+            left_batch = replace(batch, items=batch.items[:midpoint])
+            right_batch = replace(batch, items=batch.items[midpoint:])
+            left_results, left_failures = self._apply_batch_with_degradation(
+                left_batch,
+                apply_batch=apply_batch,
+            )
+            right_results, right_failures = self._apply_batch_with_degradation(
+                right_batch,
+                apply_batch=apply_batch,
+            )
+            return (
+                left_results + right_results,
+                left_failures + right_failures,
+            )
+
+    def _apply_one_metadata_batch(
+        self,
+        reader: object,
+        writer: object,
+        *,
+        snapshot_id: str,
+        batch: ApplyBatch,
+        on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
+    ) -> _AppliedBatchResult:
+        if on_batch_open is not None and batch.items:
+            on_batch_open(batch.items[0])
+        started_at = time.perf_counter()
+        with writer.transaction():
+            for item in batch.items:
+                self._apply_metadata_batch_item(
+                    reader,
+                    writer,
+                    snapshot_id=snapshot_id,
+                    item=item,
                 )
-            )
-        return tuple(results)
+        elapsed_seconds = time.perf_counter() - started_at
+        per_item_elapsed = (
+            tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
+            if batch.items
+            else ()
+        )
+        return _AppliedBatchResult(
+            batch=batch,
+            elapsed_seconds=elapsed_seconds,
+            item_elapsed_seconds=per_item_elapsed,
+        )
+
+    def _apply_one_vector_batch(
+        self,
+        vector_writer: object,
+        *,
+        batch: ApplyBatch,
+        on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
+    ) -> _AppliedBatchResult:
+        if on_batch_open is not None and batch.items:
+            on_batch_open(batch.items[0])
+        started_at = time.perf_counter()
+        self._apply_vector_batch(vector_writer, batch=batch)
+        elapsed_seconds = time.perf_counter() - started_at
+        per_item_elapsed = (
+            tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
+            if batch.items
+            else ()
+        )
+        return _AppliedBatchResult(
+            batch=batch,
+            elapsed_seconds=elapsed_seconds,
+            item_elapsed_seconds=per_item_elapsed,
+        )
 
     def _apply_metadata_batch_item(
         self,
@@ -1858,7 +1973,9 @@ class IncrementalIndexPipeline:
                 snapshot_id=snapshot_id,
             )
             return
-        raise ValueError(f"unsupported metadata apply batch item: {item.source_kind}:{item.operation}")
+        raise ValueError(
+            f"unsupported metadata apply batch item: {item.source_kind}:{item.operation}"
+        )
 
     def _apply_vector_batch(self, vector_writer: object, *, batch: ApplyBatch) -> None:
         vector_writer.upsert_vectors(
@@ -2490,6 +2607,33 @@ def _warning_codes_for_path(warnings: Sequence[object], relative_path: str) -> t
         if code is not None
     }
     return tuple(sorted(codes))
+
+
+def _task_apply_failure_warning(
+    item: ApplyBatchItem,
+    error: Exception,
+) -> IncrementalIndexWarning:
+    code_by_phase = {
+        "code_apply": "index.code_apply_failed",
+        "doc_apply": "index.doc_apply_failed",
+        "vectors_apply": "index.vector_apply_failed",
+    }
+    message_by_phase = {
+        "code_apply": "One code apply task failed; other code tasks continued.",
+        "doc_apply": "One document apply task failed; other document tasks continued.",
+        "vectors_apply": "One vector apply task failed; other vector tasks continued.",
+    }
+    return IncrementalIndexWarning(
+        code=code_by_phase.get(item.phase, "index.apply_task_failed"),
+        message=message_by_phase.get(
+            item.phase,
+            "One incremental apply task failed; other tasks continued.",
+        ),
+        details={
+            "path": item.relative_path,
+            "error": str(error),
+        },
+    )
 
 
 def _find_index_task(tasks: Sequence[IndexTask], task_key: str) -> IndexTask | None:

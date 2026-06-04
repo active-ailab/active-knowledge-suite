@@ -81,6 +81,56 @@ class FailingCodeApplyPipeline(IncrementalIndexPipeline):
         raise RuntimeError("synthetic code apply failure")
 
 
+class SelectiveCodeApplyFailurePipeline(IncrementalIndexPipeline):
+    def __init__(self, *args: Any, failing_paths: set[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._failing_paths = set(failing_paths)
+
+    def _apply_code_bundle(
+        self,
+        reader: Any,
+        writer: Any,
+        *,
+        relative_path: str,
+        new_bundle: Any,
+        snapshot_id: str,
+    ) -> None:
+        if relative_path in self._failing_paths:
+            raise RuntimeError(f"synthetic code apply failure for {relative_path}")
+        super()._apply_code_bundle(
+            reader,
+            writer,
+            relative_path=relative_path,
+            new_bundle=new_bundle,
+            snapshot_id=snapshot_id,
+        )
+
+
+class SelectiveDocApplyFailurePipeline(IncrementalIndexPipeline):
+    def __init__(self, *args: Any, failing_paths: set[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._failing_paths = set(failing_paths)
+
+    def _apply_doc_bundle(
+        self,
+        reader: Any,
+        writer: Any,
+        *,
+        relative_path: str,
+        new_bundle: Any,
+        snapshot_id: str,
+    ) -> None:
+        if relative_path in self._failing_paths:
+            raise RuntimeError(f"synthetic doc apply failure for {relative_path}")
+        super()._apply_doc_bundle(
+            reader,
+            writer,
+            relative_path=relative_path,
+            new_bundle=new_bundle,
+            snapshot_id=snapshot_id,
+        )
+
+
 class InterruptBeforeCodeCheckpointPipeline(IncrementalIndexPipeline):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -174,6 +224,25 @@ class FailingVectorAdapter:
 
     def close(self) -> None:
         return None
+
+
+class SelectiveVectorApplyFailurePipeline(IncrementalIndexPipeline):
+    def __init__(self, *args: Any, failing_paths: set[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._failing_paths = set(failing_paths)
+
+    def _apply_vector_batch(self, vector_writer: object, *, batch: Any) -> None:
+        failing_path = next(
+            (
+                item.relative_path
+                for item in batch.items
+                if item.relative_path in self._failing_paths
+            ),
+            None,
+        )
+        if failing_path is not None:
+            raise RuntimeError(f"synthetic vector apply failure for {failing_path}")
+        super()._apply_vector_batch(vector_writer, batch=batch)
 
 
 def test_build_apply_batches_preserves_order_and_splits_on_limits() -> None:
@@ -888,6 +957,90 @@ def test_incremental_pipeline_does_not_checkpoint_failed_doc_vector_task(
     assert result.result_status == "partial_ready"
     assert result.metadata["tasks"]["failed"] == 1
     assert store.get_checkpoint(job.job_id, task_checkpoint_key(vector_task)) is None
+
+
+def test_incremental_pipeline_degrades_code_apply_batch_and_continues_other_tasks(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={
+            "indexing": {
+                "writer": {
+                    "max_files_per_transaction": 2,
+                    "max_records_per_transaction": 4096,
+                    "commit_interval_ms": 1000,
+                }
+            }
+        },
+    )
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "health.h").write_text(
+        """#ifndef HEALTH_H
+#define HEALTH_H
+
+int health_batch_good(void);
+
+#endif
+""",
+        encoding="utf-8",
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+int health_batch_bad(void)
+{
+    return 77;
+}
+""",
+        encoding="utf-8",
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(plan, config=config, mode="incremental", target="local")
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    good_task = tasks["code:apply:components/health/health.h"]
+    bad_task = tasks["code:apply:components/health/main.c"]
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    failing_pipeline = SelectiveCodeApplyFailurePipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        failing_paths={"components/health/main.c"},
+    )
+
+    result = failing_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "partial_ready"
+    assert result.metadata["tasks"]["applied"] >= 1
+    assert result.metadata["tasks"]["failed"] == 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(good_task)) is not None
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(bad_task)) is None
+    warning = next(
+        warning for warning in result.warnings if warning.code == "index.code_apply_failed"
+    )
+    assert warning.details == {
+        "path": "components/health/main.c",
+        "error": "synthetic code apply failure for components/health/main.c",
+    }
 
 
 def test_incremental_pipeline_returns_partial_ready_when_doc_increment_fails(
@@ -1697,6 +1850,109 @@ This update should receive a task checkpoint.
     )
 
 
+def test_incremental_pipeline_degrades_doc_apply_batch_and_continues_other_tasks(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={
+            "indexing": {
+                "writer": {
+                    "max_files_per_transaction": 2,
+                    "max_records_per_transaction": 4096,
+                    "commit_interval_ms": 1000,
+                }
+            }
+        },
+    )
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path, include_docs=True)
+    )
+    (docs_root / "api" / "actuator.md").write_text(
+        """---
+title: Actuator Runtime API
+authority_level: official
+version: 1.0.0
+module: actuator
+code_symbols:
+  - actuator_open
+tags:
+  - actuator
+---
+# Actuator Runtime API
+
+## actuator_open
+Open the actuator runtime channel.
+""",
+        encoding="utf-8",
+    )
+    (docs_root / "api" / "sensor.md").write_text(
+        """---
+title: Sensor Register API
+authority_level: official
+version: 1.3.0
+module: sensor
+code_symbols:
+  - sensor_open
+tags:
+  - sensor
+  - register
+---
+# Sensor Register API
+
+## sensor_open
+This update should fail only for the sensor doc task.
+""",
+        encoding="utf-8",
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(plan, config=config, mode="incremental", target="local")
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    good_task = tasks["doc:apply:api/actuator.md"]
+    bad_task = tasks["doc:apply:api/sensor.md"]
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    failing_pipeline = SelectiveDocApplyFailurePipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        failing_paths={"knowledge-sources/api/sensor.md"},
+    )
+
+    result = failing_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "partial_ready"
+    assert result.metadata["tasks"]["applied"] >= 1
+    assert result.metadata["tasks"]["failed"] == 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(good_task)) is not None
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(bad_task)) is None
+    warning = next(
+        warning for warning in result.warnings if warning.code == "index.doc_apply_failed"
+    )
+    assert warning.details == {
+        "path": "api/sensor.md",
+        "error": "synthetic doc apply failure for knowledge-sources/api/sensor.md",
+    }
+
+
 def test_incremental_pipeline_does_not_checkpoint_failed_code_apply(
     tmp_path: Path,
 ) -> None:
@@ -1817,11 +2073,120 @@ int health_batch_main(void);
     vector_adapter.close()
 
 
+def test_incremental_pipeline_degrades_vector_apply_batch_and_continues_other_tasks(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(
+        tmp_path,
+        overrides={
+            "indexing": {
+                "embeddings": {"model": "text-embedding-local-v2"},
+                "writer": {
+                    "max_files_per_transaction": 2,
+                    "max_records_per_transaction": 4096,
+                    "commit_interval_ms": 1000,
+                },
+            }
+        },
+    )
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path, include_docs=True)
+    )
+    (docs_root / "api" / "actuator.md").write_text(
+        """---
+title: Actuator Runtime API
+authority_level: official
+version: 1.0.0
+module: actuator
+code_symbols:
+  - actuator_open
+tags:
+  - actuator
+---
+# Actuator Runtime API
+
+## actuator_open
+Open the actuator runtime channel.
+""",
+        encoding="utf-8",
+    )
+    (docs_root / "api" / "sensor.md").write_text(
+        """---
+title: Sensor Register API
+authority_level: official
+version: 1.3.0
+module: sensor
+code_symbols:
+  - sensor_open
+tags:
+  - sensor
+  - register
+---
+# Sensor Register API
+
+## sensor_open
+This update should fail only for the sensor vector task.
+""",
+        encoding="utf-8",
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="docs")
+    signature = make_index_plan_signature(plan, config=config, mode="incremental", target="local")
+    tasks = {task.task_key: task for task in make_index_task_list(plan)}
+    good_task = tasks["vector:doc:api/actuator.md"]
+    bad_task = tasks["vector:doc:api/sensor.md"]
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+    failing_pipeline = SelectiveVectorApplyFailurePipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        failing_paths={"api/sensor.md"},
+    )
+
+    result = failing_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="docs",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "partial_ready"
+    assert result.metadata["tasks"]["failed"] == 1
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(good_task)) is not None
+    assert store.get_checkpoint(job.job_id, task_checkpoint_key(bad_task)) is None
+    warning = next(
+        warning for warning in result.warnings if warning.code == "index.vector_apply_failed"
+    )
+    assert warning.details == {
+        "path": "api/sensor.md",
+        "error": "synthetic vector apply failure for api/sensor.md",
+    }
+
+
 def test_incremental_pipeline_batch_and_single_apply_produce_same_logical_code_output(
     tmp_path: Path,
 ) -> None:
-    single_snapshot = _run_incremental_code_snapshot(tmp_path / "single", max_files_per_transaction=1)
-    batched_snapshot = _run_incremental_code_snapshot(tmp_path / "batched", max_files_per_transaction=2)
+    single_snapshot = _run_incremental_code_snapshot(
+        tmp_path / "single",
+        max_files_per_transaction=1,
+    )
+    batched_snapshot = _run_incremental_code_snapshot(
+        tmp_path / "batched",
+        max_files_per_transaction=2,
+    )
 
     assert batched_snapshot == single_snapshot
 

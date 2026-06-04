@@ -641,17 +641,30 @@ TODO：
 
 ### AR3-03 batch 失败降级
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR3-01`
 
 TODO：
 
-- [ ] batch apply 失败后自动二分或降级为单 task apply。
-- [ ] 单 task 失败写入 task failed，其他 task 继续。
-- [ ] warning details 只包含 path/error，不包含源码内容。
-- [ ] 失败 task 不写 applied checkpoint。
+- [x] batch apply 失败后自动二分或降级为单 task apply。
+- [x] 单 task 失败写入 task failed，其他 task 继续。
+- [x] warning details 只包含 path/error，不包含源码内容。
+- [x] 失败 task 不写 applied checkpoint。
+
+行业实践调研结论：
+
+- Spring Batch 的 chunk writer 失败默认回滚当前事务，配合 skip/fault-tolerant 配置可以把坏记录隔离出来、让其他记录继续；本项目对应保留“批事务先回滚，再二分到单 task 定位坏文件”的策略，避免把半批写入误记为成功。参考：https://docs.spring.io/spring-batch/reference/5.1/step/chunk-oriented-processing/controlling-rollback.html 与 https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/configuring-skip.html
+- Elasticsearch Bulk API 即使整体 `errors=true`，也会返回按提交顺序排列的 item 级结果；本项目对应在 batch 失败后收敛到 task 级 success/failure，而不是只给一个 phase 级笼统报错，便于 resume 时只重放失败项。参考：https://www.elastic.co/guide/en/elasticsearch/reference/8.19/docs-bulk.html
+- MongoDB `ordered: false` 的 bulk write 会在单条失败后继续处理剩余操作；本项目对应“单 task 失败不阻塞后续 batch/task”，最终 job 收口为 `partial_ready`，而不是整个 apply phase fail-fast。参考：https://www.mongodb.com/docs/manual/core/bulk-write-operations/index.html
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 为 metadata apply 和 vector apply 引入统一的 batch 降级路径：先按 `ApplyBatch` 执行，失败后递归二分，最终退到单 task apply。
+- 单 task 最终失败时，pipeline 会调用 `task_failed` 更新 job 进度统计，继续执行后续 task，并为失败项追加 `index.code_apply_failed` / `index.doc_apply_failed` / `index.vector_apply_failed` warning。
+- 新 warning 的 `details` 固定为 `{path, error}`，不再携带源码或文档正文；失败 task 也不会写 `task:applied:*` checkpoint，因此后续 `--resume auto` / retry 仍会重试该任务。
+- `tests/unit/test_incremental_pipeline.py` 新增 code/doc/vector 三类“同批一坏一好”的覆盖，验证好 task 仍会 applied、坏 task 无 applied checkpoint、最终结果为 `partial_ready`。
 
 验收标准：
 
