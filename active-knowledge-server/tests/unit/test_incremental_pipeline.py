@@ -34,6 +34,7 @@ from active_knowledge_server.indexing.jobs import (
 )
 from active_knowledge_server.indexing.pipeline import (
     ApplyBatchItem,
+    INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK,
     IndexRunContext,
     _build_apply_batches,
     _format_discover_target,
@@ -91,6 +92,7 @@ class SelectiveCodeApplyFailurePipeline(IncrementalIndexPipeline):
         reader: Any,
         writer: Any,
         *,
+        job_id: str | None = None,
         relative_path: str,
         new_bundle: Any,
         snapshot_id: str,
@@ -100,6 +102,7 @@ class SelectiveCodeApplyFailurePipeline(IncrementalIndexPipeline):
         super()._apply_code_bundle(
             reader,
             writer,
+            job_id=job_id,
             relative_path=relative_path,
             new_bundle=new_bundle,
             snapshot_id=snapshot_id,
@@ -116,6 +119,7 @@ class SelectiveDocApplyFailurePipeline(IncrementalIndexPipeline):
         reader: Any,
         writer: Any,
         *,
+        job_id: str | None = None,
         relative_path: str,
         new_bundle: Any,
         snapshot_id: str,
@@ -125,6 +129,7 @@ class SelectiveDocApplyFailurePipeline(IncrementalIndexPipeline):
         super()._apply_doc_bundle(
             reader,
             writer,
+            job_id=job_id,
             relative_path=relative_path,
             new_bundle=new_bundle,
             snapshot_id=snapshot_id,
@@ -141,6 +146,7 @@ class InterruptBeforeCodeCheckpointPipeline(IncrementalIndexPipeline):
         reader: Any,
         writer: Any,
         *,
+        job_id: str | None = None,
         relative_path: str,
         new_bundle: Any,
         snapshot_id: str,
@@ -148,6 +154,7 @@ class InterruptBeforeCodeCheckpointPipeline(IncrementalIndexPipeline):
         super()._apply_code_bundle(
             reader,
             writer,
+            job_id=job_id,
             relative_path=relative_path,
             new_bundle=new_bundle,
             snapshot_id=snapshot_id,
@@ -449,6 +456,16 @@ def overlay_count(path: Path, query: str, params: tuple[object, ...]) -> int:
     return int(row[0])
 
 
+def overlay_distinct_values(
+    path: Path,
+    query: str,
+    params: tuple[object, ...] = (),
+) -> tuple[object, ...]:
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(query, params).fetchall()
+    return tuple(row[0] for row in rows)
+
+
 def test_incremental_pipeline_plans_rebuilds_for_schema_and_embedding_changes(
     tmp_path: Path,
 ) -> None:
@@ -583,6 +600,10 @@ int health_bootstrap(void)
         ("chunk",),
     )
     assert replacement_count >= 1
+    assert overlay_distinct_values(
+        overlay_path,
+        "SELECT DISTINCT created_by_job FROM replacement",
+    ) == (INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK,)
 
     with sqlite3.connect(overlay_path) as connection:
         overlay_files = {
@@ -626,6 +647,11 @@ def test_incremental_pipeline_tombstones_deleted_baseline_files(tmp_path: Path) 
         ("file", deleted_file.file_id),
     )
     assert tombstone_count == 1
+    assert overlay_distinct_values(
+        overlay_path,
+        "SELECT DISTINCT created_by_job FROM tombstone WHERE object_type = ? AND object_id = ?",
+        ("file", deleted_file.file_id),
+    ) == (INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK,)
 
 
 def test_incremental_pipeline_rebuilds_profile_relations_when_dotconfig_changes(
@@ -1672,6 +1698,13 @@ def test_incremental_pipeline_checkpoints_successful_code_apply_and_delete(
     metadata_adapter, vector_adapter, pipeline, _indexed_code, _indexed_docs, _profiles = (
         seed_baseline(config, cwd=tmp_path)
     )
+    deleted_file_id = next(
+        record.file_id
+        for record in metadata_adapter.reader().iter_files(
+            QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
+        )
+        if record.relative_path == "components/health/bt.c"
+    )
     (workspace_root / "components" / "health" / "main.c").write_text(
         """#include "health.h"
 
@@ -1743,6 +1776,17 @@ int health_checkpointed(void)
     assert delete_checkpoint.metadata["operation"] == "delete"
     assert delete_checkpoint.metadata["relative_path"] == "components/health/bt.c"
     assert delete_checkpoint.metadata["record_counts"]["files"] == 1
+
+    overlay_path = Path(config.storage.overlay.path)
+    assert overlay_distinct_values(
+        overlay_path,
+        "SELECT DISTINCT created_by_job FROM replacement",
+    ) == (job.job_id,)
+    assert overlay_distinct_values(
+        overlay_path,
+        "SELECT DISTINCT created_by_job FROM tombstone WHERE object_type = ? AND object_id = ?",
+        ("file", deleted_file_id),
+    ) == (job.job_id,)
 
 
 def test_incremental_pipeline_checkpoints_successful_doc_apply_and_delete(

@@ -88,6 +88,7 @@ from active_knowledge_server.storage.sqlite_store import (
 
 INCREMENTAL_INDEX_STATE_SCHEMA_VERSION: Final = "incremental_index_state.v1"
 INCREMENTAL_INDEX_RESULT_SCHEMA_VERSION: Final = "incremental_index_result.v1"
+INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK: Final = "job:incremental_index"
 _PROFILE_RELATION_TYPES: Final = {"enabled_by", "disabled_by", "unknown_by"}
 _CODE_SOURCE_ID: Final = "workspace"
 
@@ -1157,6 +1158,7 @@ class IncrementalIndexPipeline:
                 metadata_batch_results, failed_code_items = self._apply_metadata_batches(
                     reader,
                     writer,
+                    job_id=None if run_context is None else run_context.job_id,
                     snapshot_id=snapshot_id,
                     items=code_apply_items,
                     limits=writer_limits,
@@ -1428,6 +1430,7 @@ class IncrementalIndexPipeline:
                 metadata_batch_results, failed_doc_items = self._apply_metadata_batches(
                     reader,
                     writer,
+                    job_id=None if run_context is None else run_context.job_id,
                     snapshot_id=snapshot_id,
                     items=doc_apply_items,
                     limits=writer_limits,
@@ -1597,6 +1600,7 @@ class IncrementalIndexPipeline:
                     self._rebuild_profile_conditioned_relations(
                         reader=reader,
                         writer=writer,
+                        job_id=None if run_context is None else run_context.job_id,
                         snapshot_id=snapshot_id,
                         collected_profiles=plan.collected_profiles,
                         changed_profile_ids=set(plan.changed_profile_ids),
@@ -1716,6 +1720,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None,
         snapshot_id: str,
         items: Sequence[ApplyBatchItem],
         limits: Mapping[str, int],
@@ -1793,6 +1798,7 @@ class IncrementalIndexPipeline:
                     self._apply_metadata_batch_item(
                         reader,
                         writer,
+                        job_id=job_id,
                         snapshot_id=snapshot_id,
                         item=item,
                     )
@@ -1804,6 +1810,7 @@ class IncrementalIndexPipeline:
                         apply_batch=lambda batch: self._apply_one_metadata_batch(
                             reader,
                             writer,
+                            job_id=job_id,
                             snapshot_id=snapshot_id,
                             batch=batch,
                             on_batch_open=on_batch_open,
@@ -1886,6 +1893,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None,
         snapshot_id: str,
         batch: ApplyBatch,
         on_batch_open: Callable[[ApplyBatchItem], None] | None = None,
@@ -1898,6 +1906,7 @@ class IncrementalIndexPipeline:
                 self._apply_metadata_batch_item(
                     reader,
                     writer,
+                    job_id=job_id,
                     snapshot_id=snapshot_id,
                     item=item,
                 )
@@ -1941,6 +1950,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None,
         snapshot_id: str,
         item: ApplyBatchItem,
     ) -> None:
@@ -1948,6 +1958,7 @@ class IncrementalIndexPipeline:
             self._tombstone_deleted_path(
                 reader,
                 writer,
+                job_id=job_id,
                 relative_path=item.storage_relative_path or item.relative_path,
                 snapshot_id=snapshot_id,
                 reason="incremental_delete",
@@ -1958,6 +1969,7 @@ class IncrementalIndexPipeline:
             self._apply_code_bundle(
                 reader,
                 writer,
+                job_id=job_id,
                 relative_path=item.relative_path,
                 new_bundle=item.new_bundle,
                 snapshot_id=snapshot_id,
@@ -1968,6 +1980,7 @@ class IncrementalIndexPipeline:
             self._apply_doc_bundle(
                 reader,
                 writer,
+                job_id=job_id,
                 relative_path=item.storage_relative_path or item.relative_path,
                 new_bundle=item.new_bundle,
                 snapshot_id=snapshot_id,
@@ -1989,6 +2002,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None = None,
         relative_path: str,
         new_bundle: _ObjectBundle,
         snapshot_id: str,
@@ -1998,6 +2012,7 @@ class IncrementalIndexPipeline:
             if old_bundle is not None:
                 self._diff_and_mark_stale(
                     writer,
+                    job_id=job_id,
                     old_bundle=old_bundle,
                     new_bundle=new_bundle,
                     snapshot_id=snapshot_id,
@@ -2014,6 +2029,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None = None,
         relative_path: str,
         new_bundle: _ObjectBundle,
         snapshot_id: str,
@@ -2023,6 +2039,7 @@ class IncrementalIndexPipeline:
             if old_bundle is not None:
                 self._diff_and_mark_stale(
                     writer,
+                    job_id=job_id,
                     old_bundle=old_bundle,
                     new_bundle=new_bundle,
                     snapshot_id=snapshot_id,
@@ -2054,6 +2071,7 @@ class IncrementalIndexPipeline:
         reader: object,
         writer: object,
         *,
+        job_id: str | None = None,
         relative_path: str,
         snapshot_id: str,
         reason: str,
@@ -2066,7 +2084,7 @@ class IncrementalIndexPipeline:
                 bundle.file_record.file_id,
                 scope=QueryScope(snapshot_id=snapshot_id),
                 reason=reason,
-                created_by_job="job:incremental_index",
+                created_by_job=_resolve_created_by_job(job_id),
             )
 
     def _rebuild_profile_conditioned_relations(
@@ -2074,6 +2092,7 @@ class IncrementalIndexPipeline:
         *,
         reader: object,
         writer: object,
+        job_id: str | None = None,
         snapshot_id: str,
         collected_profiles: CollectedProfiles,
         changed_profile_ids: set[str],
@@ -2119,6 +2138,7 @@ class IncrementalIndexPipeline:
                 continue
             self._tombstone_object(
                 writer,
+                job_id=job_id,
                 object_type="relation",
                 object_id=relation.relation_id,
                 scope=QueryScope(
@@ -2136,11 +2156,13 @@ class IncrementalIndexPipeline:
         self,
         writer: object,
         *,
+        job_id: str | None = None,
         old_bundle: _ObjectBundle,
         new_bundle: _ObjectBundle,
         snapshot_id: str,
         reason: str,
     ) -> None:
+        created_by_job = _resolve_created_by_job(job_id)
         chunk_replacements = _matched_chunk_replacements(old_bundle.chunks, new_bundle.chunks)
         entity_replacements = _matched_entity_replacements(old_bundle.entities, new_bundle.entities)
         relation_replacements = _matched_relation_replacements(
@@ -2165,7 +2187,7 @@ class IncrementalIndexPipeline:
                         source_scope=old_chunk.source_scope,
                     ),
                     reason=reason,
-                    created_by_job="job:incremental_index",
+                    created_by_job=created_by_job,
                     baseline_id=old_chunk.chunk_id,
                 )
             if old_chunk.chunk_id not in new_chunk_ids:
@@ -2177,7 +2199,7 @@ class IncrementalIndexPipeline:
                         source_scope=old_chunk.source_scope,
                     ),
                     reason=reason,
-                    created_by_job="job:incremental_index",
+                    created_by_job=created_by_job,
                 )
 
         for old_entity in old_bundle.entities:
@@ -2193,12 +2215,13 @@ class IncrementalIndexPipeline:
                         source_scope=old_entity.source_scope,
                     ),
                     reason=reason,
-                    created_by_job="job:incremental_index",
+                    created_by_job=created_by_job,
                     baseline_id=old_entity.entity_id,
                 )
             if old_entity.entity_id not in new_entity_ids:
                 self._tombstone_object(
                     writer,
+                    job_id=job_id,
                     object_type="entity",
                     object_id=old_entity.entity_id,
                     scope=QueryScope(
@@ -2223,12 +2246,13 @@ class IncrementalIndexPipeline:
                         source_scope=old_relation.source_scope,
                     ),
                     reason=reason,
-                    created_by_job="job:incremental_index",
+                    created_by_job=created_by_job,
                     baseline_id=old_relation.relation_id,
                 )
             if old_relation.relation_id not in new_relation_ids:
                 self._tombstone_object(
                     writer,
+                    job_id=job_id,
                     object_type="relation",
                     object_id=old_relation.relation_id,
                     scope=QueryScope(
@@ -2244,6 +2268,7 @@ class IncrementalIndexPipeline:
         self,
         writer: object,
         *,
+        job_id: str | None = None,
         object_type: str,
         object_id: str,
         scope: QueryScope,
@@ -2261,7 +2286,7 @@ class IncrementalIndexPipeline:
                 object_type=cast(StorageObjectType, object_type),
                 object_id=object_id,
                 reason=reason,
-                created_by_job="job:incremental_index",
+                created_by_job=_resolve_created_by_job(job_id),
                 snapshot_id=scope.snapshot_id,
                 profile_id=scope.profile_id,
                 source_scope=scope.source_scope,
@@ -2279,6 +2304,12 @@ def _decode_str_map(value: object) -> dict[str, str]:
         for key, item in value.items()
         if isinstance(key, str) and item is not None
     }
+
+
+def _resolve_created_by_job(job_id: str | None) -> str:
+    if isinstance(job_id, str) and job_id:
+        return job_id
+    return INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK
 
 
 def _diff_maps(

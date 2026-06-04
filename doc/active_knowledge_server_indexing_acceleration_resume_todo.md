@@ -673,17 +673,29 @@ TODO：
 
 ### AR3-04 `created_by_job` 改真实 job id
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR1-03`
 
 TODO：
 
-- [ ] `_tombstone_deleted_path`、`_diff_and_mark_stale`、`_tombstone_object` 接收 `job_id`。
-- [ ] tombstone/replacement 的 `created_by_job` 从 `job:incremental_index` 改为真实 `job_id`。
-- [ ] 无 job context 时保留兼容 fallback。
-- [ ] 测试覆盖审计字段。
+- [x] `_tombstone_deleted_path`、`_diff_and_mark_stale`、`_tombstone_object` 接收 `job_id`。
+- [x] tombstone/replacement 的 `created_by_job` 从 `job:incremental_index` 改为真实 `job_id`。
+- [x] 无 job context 时保留兼容 fallback。
+- [x] 测试覆盖审计字段。
+
+行业实践调研结论：
+
+- Algolia 的异步索引写操作会返回唯一 `taskId`，并要求后续等待、串联依赖和排障都围绕这个真实任务 ID 进行；本项目对应不再把 overlay 审计写成固定 phase 常量，而是把 tombstone/replacement 挂到真实 `job_id`。参考：https://www.algolia.com/doc/guides/sending-and-managing-data/send-and-update-your-data/in-depth/index-operations-are-asynchronous/ 与 https://www.algolia.com/doc/api-reference/api-methods/wait-task
+- Elasticsearch 的 reindex 管理 API 明确要求任务在迁移后仍保留原始 task ID，避免调用方看到重复或断裂的执行链；本项目对应让一次 incremental run 的所有补偿写入共享同一个 `job_id`，方便恢复、清理和追责。参考：https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-list-reindex
+- Azure AI Search 会按单次 indexer run 保留 execution history、开始结束时间、错误和 warning；本项目对应支持按一个真实 `job_id` 反查这次增量构建产生的 tombstone/replacement，而不是只能看到“某类操作产生过变更”。参考：https://learn.microsoft.com/en-us/azure/search/search-monitor-indexers
+
+完成记录：
+
+- `active_knowledge_server/indexing/pipeline.py` 已把 `job_id` 透传到 `_tombstone_deleted_path`、`_diff_and_mark_stale`、`_tombstone_object` 与 profile relation rebuild 路径，tombstone/replacement 现在优先写入真实 `run_context.job_id`。
+- 新增集中 fallback 常量，未提供 job context 时仍回退到 `job:incremental_index`，保证旧调用与无作业上下文场景兼容。
+- `tests/unit/test_incremental_pipeline.py` 已覆盖两类审计断言：有 job context 时 replacement / tombstone 的 `created_by_job` 等于真实 `job_id`；无 job context 时保持 fallback 值。
 
 验收标准：
 
