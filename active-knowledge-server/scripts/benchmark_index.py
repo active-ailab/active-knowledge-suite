@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
+import math
 import os
 import platform
 import shutil
@@ -17,7 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from active_knowledge_server.cli import _run_index_command
+from active_knowledge_server.cli import IndexCommandInterrupted, _run_index_command, main as cli_main
 from active_knowledge_server.config.loader import ConfigDict, resolve_config, set_nested
 from active_knowledge_server.connectors.source_docs import SourceDocsConnector
 from active_knowledge_server.connectors.workspace import WorkspaceConnector
@@ -136,12 +139,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="markdown",
         help="Summary output format when --summary-output is set.",
     )
+    parser.add_argument(
+        "--interrupt-after-task-percent",
+        help=(
+            "Optional comma-separated task completion percentages for controlled "
+            "crash/resume samples, for example 30,70,90. When set, the benchmark "
+            "runs one fresh baseline sample plus one crash/resume sample per "
+            "percentage."
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     workers = parse_workers(args.workers)
+    interrupt_after_task_percent = parse_interrupt_after_task_percent_csv(
+        args.interrupt_after_task_percent
+    )
+    validate_interrupt_benchmark_args(
+        args,
+        interrupt_after_task_percent=interrupt_after_task_percent,
+    )
     probe_resolved = resolve_benchmark_config(
         args=args,
         worker="auto",
@@ -191,29 +210,77 @@ def main(argv: list[str] | None = None) -> int:
                                 )
                                 hot_workdir = scenario_workdir / "hot"
                                 for sample_index in range(max(args.repeat, 1)):
-                                    if cache_mode == "cold":
-                                        workdir = scenario_workdir / f"sample-{sample_index}"
+                                    if interrupt_after_task_percent:
+                                        sample_root = scenario_workdir / f"sample-{sample_index}"
+                                        fresh_record = run_sample(
+                                            args=args,
+                                            worker=worker,
+                                            writer_batch_size=writer_batch_size,
+                                            writer_max_files_per_transaction=(
+                                                writer_max_files_per_transaction
+                                            ),
+                                            writer_max_records_per_transaction=(
+                                                writer_max_records_per_transaction
+                                            ),
+                                            writer_commit_interval_ms=writer_commit_interval_ms,
+                                            cache_mode=cache_mode,
+                                            sample_index=sample_index,
+                                            workdir=sample_root / "fresh",
+                                            dataset=dataset,
+                                            git_commit=git_commit,
+                                        )
+                                        records.append(fresh_record)
+                                        emit_record(fresh_record, output_path=args.output)
+                                        for task_percent in interrupt_after_task_percent:
+                                            resumed_record = run_crash_resume_sample(
+                                                args=args,
+                                                worker=worker,
+                                                writer_batch_size=writer_batch_size,
+                                                writer_max_files_per_transaction=(
+                                                    writer_max_files_per_transaction
+                                                ),
+                                                writer_max_records_per_transaction=(
+                                                    writer_max_records_per_transaction
+                                                ),
+                                                writer_commit_interval_ms=(
+                                                    writer_commit_interval_ms
+                                                ),
+                                                cache_mode=cache_mode,
+                                                sample_index=sample_index,
+                                                workdir=sample_root / f"resume-{task_percent}",
+                                                dataset=dataset,
+                                                git_commit=git_commit,
+                                                interrupt_after_task_percent=task_percent,
+                                                fresh_reference_wall_seconds=float(
+                                                    fresh_record["wall_seconds"]
+                                                ),
+                                            )
+                                            records.append(resumed_record)
+                                            emit_record(resumed_record, output_path=args.output)
                                     else:
-                                        workdir = hot_workdir
-                                    record = run_sample(
-                                        args=args,
-                                        worker=worker,
-                                        writer_batch_size=writer_batch_size,
-                                        writer_max_files_per_transaction=(
-                                            writer_max_files_per_transaction
-                                        ),
-                                        writer_max_records_per_transaction=(
-                                            writer_max_records_per_transaction
-                                        ),
-                                        writer_commit_interval_ms=writer_commit_interval_ms,
-                                        cache_mode=cache_mode,
-                                        sample_index=sample_index,
-                                        workdir=workdir,
-                                        dataset=dataset,
-                                        git_commit=git_commit,
-                                    )
-                                    records.append(record)
-                                    emit_record(record, output_path=args.output)
+                                        if cache_mode == "cold":
+                                            workdir = scenario_workdir / f"sample-{sample_index}"
+                                        else:
+                                            workdir = hot_workdir
+                                        record = run_sample(
+                                            args=args,
+                                            worker=worker,
+                                            writer_batch_size=writer_batch_size,
+                                            writer_max_files_per_transaction=(
+                                                writer_max_files_per_transaction
+                                            ),
+                                            writer_max_records_per_transaction=(
+                                                writer_max_records_per_transaction
+                                            ),
+                                            writer_commit_interval_ms=writer_commit_interval_ms,
+                                            cache_mode=cache_mode,
+                                            sample_index=sample_index,
+                                            workdir=workdir,
+                                            dataset=dataset,
+                                            git_commit=git_commit,
+                                        )
+                                        records.append(record)
+                                        emit_record(record, output_path=args.output)
 
     if args.summary_output is not None:
         report = summarize_index_benchmark_records(records)
@@ -325,112 +392,126 @@ def run_sample(
             "when sources do not change."
         )
 
-    progress = ProgressPhaseTimingCollector()
-    rss_before = current_rss_bytes()
-    cpu_before = time.process_time()
-    wall_before = time.perf_counter()
-    result_payload = execute_index_run(
+    measurement = measure_index_run(
         resolved=resolved,
         args=args,
-        progress_callback=progress.observe,
+        progress_callback=None,
+        resume_policy=_disabled_resume_policy(),
     )
-    wall_seconds = time.perf_counter() - wall_before
-    cpu_seconds = time.process_time() - cpu_before
-    progress_snapshot = progress.finish()
-    rss_after = current_rss_bytes()
     metadata_path = metadata_path_for_target(resolved, args.target)
     checkpoint = maybe_checkpoint_sqlite_database(
         metadata_path,
         checkpoint_mode=args.sqlite_checkpoint_mode,
     )
     counts = collect_storage_counts(resolved, args.target)
-    warning_code_counts = collect_warning_code_counts(result_payload)
-    writer_metadata = extract_result_metadata_mapping(result_payload, "writer")
-    task_stats = extract_result_task_stats(result_payload)
-    job_payload = extract_result_job_mapping(result_payload)
+    return build_record(
+        args=args,
+        resolved=resolved,
+        worker=worker,
+        cache_mode=cache_mode,
+        sample_index=sample_index,
+        workdir=workdir,
+        dataset=dataset,
+        git_commit=git_commit,
+        notes=notes,
+        measurement=measurement,
+        object_counts=counts,
+        sqlite_checkpoint=checkpoint,
+        interrupt_summary=empty_interrupt_summary(),
+        validate_summary=empty_validate_summary(),
+    )
 
-    return {
-        "schema_version": "index_benchmark_record.v2",
-        "executed_at": utc_now(),
-        "config_path": None if args.config is None else str(args.config),
-        "mode": args.mode,
-        "target": args.target,
-        "source": args.source,
-        "cache_mode": cache_mode,
-        "sample_index": sample_index,
-        "workers_requested": worker,
-        "writer": {
-            "batch_size": int(
-                writer_metadata.get("batch_size", resolved.model.indexing.writer.batch_size)
-            ),
-            "max_files_per_transaction": int(
-                writer_metadata.get(
-                    "max_files_per_transaction",
-                    resolved.model.indexing.writer.max_files_per_transaction,
-                )
-            ),
-            "max_records_per_transaction": int(
-                writer_metadata.get(
-                    "max_records_per_transaction",
-                    resolved.model.indexing.writer.max_records_per_transaction,
-                )
-            ),
-            "commit_interval_ms": int(
-                writer_metadata.get(
-                    "commit_interval_ms",
-                    resolved.model.indexing.writer.commit_interval_ms,
-                )
-            ),
-        },
-        "parallel": {
-            "mode": resolved.model.indexing.parallel.mode,
-        },
-        "sqlite": {
-            "configured": {
-                "journal_mode": resolved.model.storage.sqlite.journal_mode,
-                "synchronous": resolved.model.storage.sqlite.synchronous,
-                "wal_autocheckpoint_pages": (
-                    resolved.model.storage.sqlite.wal_autocheckpoint_pages
-                ),
-                "assume_local_filesystem": resolved.model.storage.sqlite.assume_local_filesystem,
-            },
-            "actual": read_sqlite_runtime_settings(
-                metadata_path,
-                pragma_profile=sqlite_pragma_profile_from_config(resolved.model),
-            ),
-            "checkpoint": checkpoint,
-        },
-        "workdir": str(workdir),
-        "result_status": str(result_payload.get("result_status", "unknown")),
-        "wall_seconds": round(wall_seconds, 6),
-        "cpu_seconds": round(cpu_seconds, 6),
-        "rss_before_bytes": rss_before,
-        "rss_after_bytes": rss_after,
-        "rss_delta_bytes": max(rss_after - rss_before, 0),
-        "warning_count": len(result_payload.get("warnings", [])),
-        "warning_codes": sorted(warning_code_counts),
-        "warning_code_counts": warning_code_counts,
-        "job": job_payload,
-        "plan_summary": result_payload.get("plan"),
-        "timings": extract_result_metadata_mapping(result_payload, "timings"),
-        "phase_timings": progress_snapshot.phase_timings,
-        "phase_event_counts": progress_snapshot.phase_event_counts,
-        "progress_event_count": progress_snapshot.event_count,
-        "observed_phases": list(progress_snapshot.observed_phases),
-        "diagnostics": extract_result_metadata_mapping(result_payload, "diagnostics"),
-        "apply_batches": extract_result_metadata_mapping(result_payload, "apply_batches"),
-        "task_stats": task_stats,
-        "object_counts": counts,
-        "storage_files": collect_storage_file_sizes(metadata_path),
-        "dataset": dataset,
-        "machine": {
-            "platform": platform.platform(),
-            "python": platform.python_version(),
-            "cpu_count": os.cpu_count() or 1,
-        },
-        "git_commit": git_commit,
-        "notes": notes,
-    }
+
+def run_crash_resume_sample(
+    *,
+    args: argparse.Namespace,
+    worker: int | str,
+    writer_batch_size: int,
+    writer_max_files_per_transaction: int,
+    writer_max_records_per_transaction: int,
+    writer_commit_interval_ms: int,
+    cache_mode: str,
+    sample_index: int,
+    workdir: Path,
+    dataset: dict[str, object],
+    git_commit: str | None,
+    interrupt_after_task_percent: int,
+    fresh_reference_wall_seconds: float,
+) -> dict[str, object]:
+    if workdir.exists():
+        remove_tree(workdir)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    resolved = resolve_benchmark_config(
+        args=args,
+        worker=worker,
+        workdir=workdir,
+        writer_batch_size=writer_batch_size,
+        writer_max_files_per_transaction=writer_max_files_per_transaction,
+        writer_max_records_per_transaction=writer_max_records_per_transaction,
+        writer_commit_interval_ms=writer_commit_interval_ms,
+    )
+    job_id = (
+        "bench-index-resume-"
+        f"{sample_index}-w{worker}-b{writer_batch_size}"
+        f"-mf{writer_max_files_per_transaction}"
+        f"-mr{writer_max_records_per_transaction}"
+        f"-c{writer_commit_interval_ms}"
+        f"-p{interrupt_after_task_percent}"
+    )
+    interrupted = measure_index_run(
+        resolved=resolved,
+        args=args,
+        progress_callback=None,
+        resume_policy=_no_resume_policy(job_id),
+        interrupt_after_task_percent=interrupt_after_task_percent,
+    )
+    if not interrupted.interrupted:
+        raise RuntimeError(
+            "crash/resume benchmark expected an interrupted first run, "
+            f"but scenario completed normally at {interrupt_after_task_percent}%"
+        )
+    resumed = measure_index_run(
+        resolved=resolved,
+        args=args,
+        progress_callback=None,
+        resume_policy=_auto_resume_policy(),
+    )
+    validate_payload = run_validate_command(args=args, workdir=workdir)
+    metadata_path = metadata_path_for_target(resolved, args.target)
+    checkpoint = maybe_checkpoint_sqlite_database(
+        metadata_path,
+        checkpoint_mode=args.sqlite_checkpoint_mode,
+    )
+    counts = collect_storage_counts(resolved, args.target)
+    notes = [
+        (
+            f"Interrupted after approximately {interrupt_after_task_percent}% of applied tasks "
+            "and resumed via --resume auto."
+        )
+    ]
+    interrupt_summary = build_interrupt_summary(
+        interrupt_after_task_percent=interrupt_after_task_percent,
+        fresh_reference_wall_seconds=fresh_reference_wall_seconds,
+        interrupted=interrupted,
+        resumed=resumed,
+    )
+    return build_record(
+        args=args,
+        resolved=resolved,
+        worker=worker,
+        cache_mode=cache_mode,
+        sample_index=sample_index,
+        workdir=workdir,
+        dataset=dataset,
+        git_commit=git_commit,
+        notes=notes,
+        measurement=resumed,
+        object_counts=counts,
+        sqlite_checkpoint=checkpoint,
+        interrupt_summary=interrupt_summary,
+        validate_summary=validate_payload,
+    )
 
 
 def resolve_benchmark_config(
@@ -444,7 +525,56 @@ def resolve_benchmark_config(
     writer_commit_interval_ms: int | None,
 ):
     overrides: ConfigDict = {}
+    baseline_dir = workdir / "baseline"
+    local_dir = workdir / "local"
     set_nested(overrides, ("runtime", "workdir"), str(workdir))
+    set_nested(overrides, ("runtime", "baseline_dir"), str(baseline_dir))
+    set_nested(overrides, ("runtime", "local_dir"), str(local_dir))
+    set_nested(
+        overrides,
+        ("storage", "baseline", "manifest"),
+        str(baseline_dir / "manifest.json"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "metadata", "path"),
+        str(baseline_dir / "db" / "metadata.db"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "overlay", "path"),
+        str(local_dir / "db" / "overlay.db"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "jobs", "path"),
+        str(local_dir / "db" / "jobs.db"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "vector", "path"),
+        str(baseline_dir / "vectors" / "lancedb"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "vector_delta", "path"),
+        str(local_dir / "vectors" / "lancedb-delta"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "artifacts_root"),
+        str(baseline_dir / "artifacts"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "local_artifacts_root"),
+        str(local_dir / "artifacts"),
+    )
+    set_nested(
+        overrides,
+        ("storage", "cache_root"),
+        str(local_dir / "cache"),
+    )
     if args.workspace is not None:
         set_nested(overrides, ("project", "workspace_root"), str(args.workspace))
     if args.source_docs_root is not None:
@@ -500,6 +630,7 @@ def execute_index_run(
     resolved: Any,
     args: argparse.Namespace,
     progress_callback: Any | None = None,
+    resume_policy: dict[str, object] | None = None,
 ) -> dict[str, object]:
     command_payload = _run_index_command(
         resolved,
@@ -507,17 +638,10 @@ def execute_index_run(
         mode=args.mode,
         target=args.target,
         source=args.source,
-        resume_policy=_disabled_resume_policy(),
+        resume_policy=_disabled_resume_policy() if resume_policy is None else resume_policy,
         progress_callback=progress_callback,
     )
-    result = command_payload.get("result")
-    if not isinstance(result, dict):
-        raise ValueError("benchmark index command must return an object result payload")
-    result_payload = dict(result)
-    job = command_payload.get("job")
-    if isinstance(job, dict):
-        result_payload["job"] = dict(job)
-    return result_payload
+    return dict(command_payload)
 
 
 def collect_dataset_summary(args: argparse.Namespace) -> dict[str, object]:
@@ -724,6 +848,417 @@ def _disabled_resume_policy() -> dict[str, object]:
         "resume_enabled": False,
         "restart_requested": False,
     }
+
+
+def _auto_resume_policy() -> dict[str, object]:
+    return {
+        "schema_version": "index_resume_policy.v1",
+        "mode": "auto",
+        "resume": "auto",
+        "resume_job_id": None,
+        "planned_job_id": None,
+        "resume_enabled": True,
+        "restart_requested": False,
+    }
+
+
+def _no_resume_policy(job_id: str) -> dict[str, object]:
+    return {
+        **_disabled_resume_policy(),
+        "planned_job_id": job_id,
+    }
+
+
+def parse_interrupt_after_task_percent_csv(raw: str | None) -> tuple[int, ...]:
+    if raw is None or not raw.strip():
+        return ()
+    values: list[int] = []
+    seen: set[int] = set()
+    for item in raw.split(","):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        value = int(candidate)
+        if value <= 0 or value >= 100:
+            raise ValueError("interrupt-after-task-percent values must be between 1 and 99")
+        if value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    if not values:
+        raise ValueError("at least one interrupt-after-task-percent value is required")
+    return tuple(values)
+
+
+def validate_interrupt_benchmark_args(
+    args: argparse.Namespace,
+    *,
+    interrupt_after_task_percent: tuple[int, ...],
+) -> None:
+    if not interrupt_after_task_percent:
+        return
+    if args.mode != "incremental":
+        raise ValueError("crash/resume benchmark only supports --mode incremental")
+    if args.target != "local":
+        raise ValueError("crash/resume benchmark only supports --target local")
+    if args.cache_mode != "cold":
+        raise ValueError("crash/resume benchmark requires --cache-mode cold")
+
+
+@contextlib.contextmanager
+def interrupt_after_task_percent_context(percent: int):
+    import active_knowledge_server.indexing.pipeline as pipeline_module
+
+    original = pipeline_module.record_task_applied_checkpoint
+    state: dict[str, object] = {
+        "applied_count": 0,
+        "threshold": None,
+        "triggered": False,
+    }
+
+    def _wrapped(store, job_id, task, *, metadata=None):
+        result = original(store, job_id, task, metadata=metadata)
+        if bool(state["triggered"]):
+            return result
+        applied_count = int(state["applied_count"]) + 1
+        state["applied_count"] = applied_count
+        threshold = state.get("threshold")
+        if threshold is None:
+            job = store.get_job(job_id)
+            tasks_total = 0 if job is None else int(job.metadata.get("tasks_total", 0))
+            threshold = max(1, math.ceil(tasks_total * (percent / 100.0)))
+            state["threshold"] = threshold
+        if applied_count >= int(threshold):
+            state["triggered"] = True
+            raise KeyboardInterrupt(
+                f"benchmark interrupt after {percent}% of applied tasks"
+            )
+        return result
+
+    pipeline_module.record_task_applied_checkpoint = _wrapped
+    try:
+        yield state
+    finally:
+        pipeline_module.record_task_applied_checkpoint = original
+
+
+def measure_index_run(
+    *,
+    resolved: Any,
+    args: argparse.Namespace,
+    progress_callback: Any | None,
+    resume_policy: dict[str, object],
+    interrupt_after_task_percent: int | None = None,
+) -> IndexRunMeasurement:
+    progress = ProgressPhaseTimingCollector()
+    if progress_callback is None:
+        callback = progress.observe
+    else:
+        def callback(event) -> None:
+            progress.observe(event)
+            progress_callback(event)
+    rss_before = current_rss_bytes()
+    cpu_before = time.process_time()
+    wall_before = time.perf_counter()
+    interrupted = False
+    try:
+        if interrupt_after_task_percent is None:
+            command_payload = execute_index_run(
+                resolved=resolved,
+                args=args,
+                progress_callback=callback,
+                resume_policy=resume_policy,
+            )
+        else:
+            with interrupt_after_task_percent_context(interrupt_after_task_percent):
+                command_payload = execute_index_run(
+                    resolved=resolved,
+                    args=args,
+                    progress_callback=callback,
+                    resume_policy=resume_policy,
+                )
+    except IndexCommandInterrupted as exc:
+        command_payload = dict(exc.payload)
+        interrupted = True
+    wall_seconds = time.perf_counter() - wall_before
+    cpu_seconds = time.process_time() - cpu_before
+    progress_snapshot = progress.finish()
+    rss_after = current_rss_bytes()
+    return IndexRunMeasurement(
+        command_payload=command_payload,
+        interrupted=interrupted,
+        wall_seconds=wall_seconds,
+        cpu_seconds=cpu_seconds,
+        rss_before_bytes=rss_before,
+        rss_after_bytes=rss_after,
+        progress_snapshot=progress_snapshot,
+    )
+
+
+def build_record(
+    *,
+    args: argparse.Namespace,
+    resolved: Any,
+    worker: int | str,
+    cache_mode: str,
+    sample_index: int,
+    workdir: Path,
+    dataset: dict[str, object],
+    git_commit: str | None,
+    notes: list[str],
+    measurement: IndexRunMeasurement,
+    object_counts: dict[str, int],
+    sqlite_checkpoint: dict[str, object] | None,
+    interrupt_summary: dict[str, object],
+    validate_summary: dict[str, object],
+) -> dict[str, object]:
+    result_payload = extract_result_mapping(measurement.command_payload)
+    warning_code_counts = collect_warning_code_counts(result_payload)
+    writer_metadata = extract_result_metadata_mapping(result_payload, "writer")
+    task_stats = extract_result_task_stats(result_payload)
+    job_payload = extract_result_job_mapping(result_payload)
+    metadata_path = metadata_path_for_target(resolved, args.target)
+    return {
+        "schema_version": "index_benchmark_record.v3",
+        "executed_at": utc_now(),
+        "config_path": None if args.config is None else str(args.config),
+        "mode": args.mode,
+        "target": args.target,
+        "source": args.source,
+        "cache_mode": cache_mode,
+        "sample_index": sample_index,
+        "workers_requested": worker,
+        "writer": {
+            "batch_size": int(
+                writer_metadata.get("batch_size", resolved.model.indexing.writer.batch_size)
+            ),
+            "max_files_per_transaction": int(
+                writer_metadata.get(
+                    "max_files_per_transaction",
+                    resolved.model.indexing.writer.max_files_per_transaction,
+                )
+            ),
+            "max_records_per_transaction": int(
+                writer_metadata.get(
+                    "max_records_per_transaction",
+                    resolved.model.indexing.writer.max_records_per_transaction,
+                )
+            ),
+            "commit_interval_ms": int(
+                writer_metadata.get(
+                    "commit_interval_ms",
+                    resolved.model.indexing.writer.commit_interval_ms,
+                )
+            ),
+        },
+        "parallel": {
+            "mode": resolved.model.indexing.parallel.mode,
+        },
+        "sqlite": {
+            "configured": {
+                "journal_mode": resolved.model.storage.sqlite.journal_mode,
+                "synchronous": resolved.model.storage.sqlite.synchronous,
+                "wal_autocheckpoint_pages": (
+                    resolved.model.storage.sqlite.wal_autocheckpoint_pages
+                ),
+                "assume_local_filesystem": resolved.model.storage.sqlite.assume_local_filesystem,
+            },
+            "actual": read_sqlite_runtime_settings(
+                metadata_path,
+                pragma_profile=sqlite_pragma_profile_from_config(resolved.model),
+            ),
+            "checkpoint": sqlite_checkpoint,
+        },
+        "workdir": str(workdir),
+        "result_status": str(
+            result_payload.get("result_status", measurement.command_payload.get("status", "unknown"))
+        ),
+        "wall_seconds": round(measurement.wall_seconds, 6),
+        "cpu_seconds": round(measurement.cpu_seconds, 6),
+        "rss_before_bytes": measurement.rss_before_bytes,
+        "rss_after_bytes": measurement.rss_after_bytes,
+        "rss_delta_bytes": max(measurement.rss_after_bytes - measurement.rss_before_bytes, 0),
+        "warning_count": len(result_payload.get("warnings", [])),
+        "warning_codes": sorted(warning_code_counts),
+        "warning_code_counts": warning_code_counts,
+        "job": job_payload,
+        "plan_summary": result_payload.get("plan"),
+        "timings": extract_result_metadata_mapping(result_payload, "timings"),
+        "phase_timings": measurement.progress_snapshot.phase_timings,
+        "phase_event_counts": measurement.progress_snapshot.phase_event_counts,
+        "progress_event_count": measurement.progress_snapshot.event_count,
+        "observed_phases": list(measurement.progress_snapshot.observed_phases),
+        "diagnostics": extract_result_metadata_mapping(result_payload, "diagnostics"),
+        "apply_batches": extract_result_metadata_mapping(result_payload, "apply_batches"),
+        "task_stats": task_stats,
+        "interrupt": interrupt_summary,
+        "validate": validate_summary,
+        "object_counts": object_counts,
+        "storage_files": collect_storage_file_sizes(metadata_path),
+        "dataset": dataset,
+        "machine": {
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "cpu_count": os.cpu_count() or 1,
+        },
+        "git_commit": git_commit,
+        "notes": notes,
+    }
+
+
+def extract_result_mapping(command_payload: dict[str, object]) -> dict[str, object]:
+    result = command_payload.get("result")
+    if not isinstance(result, dict):
+        return {}
+    result_payload = dict(result)
+    job = command_payload.get("job")
+    if isinstance(job, dict):
+        result_payload["job"] = dict(job)
+    return result_payload
+
+
+def empty_interrupt_summary() -> dict[str, object]:
+    return {
+        "after_task_percent": None,
+        "interrupted_wall_seconds": None,
+        "resume_wall_seconds": None,
+        "total_wall_seconds": None,
+        "expected_remaining_fraction": None,
+        "expected_remaining_wall_seconds": None,
+        "resume_vs_expected_remaining_ratio": None,
+        "interrupted_status": None,
+    }
+
+
+def build_interrupt_summary(
+    *,
+    interrupt_after_task_percent: int,
+    fresh_reference_wall_seconds: float,
+    interrupted: IndexRunMeasurement,
+    resumed: IndexRunMeasurement,
+) -> dict[str, object]:
+    remaining_fraction = max(0.0, (100.0 - float(interrupt_after_task_percent)) / 100.0)
+    expected_remaining_wall_seconds = fresh_reference_wall_seconds * remaining_fraction
+    ratio = None
+    if expected_remaining_wall_seconds > 0:
+        ratio = resumed.wall_seconds / expected_remaining_wall_seconds
+    return {
+        "after_task_percent": interrupt_after_task_percent,
+        "interrupted_wall_seconds": round(interrupted.wall_seconds, 6),
+        "resume_wall_seconds": round(resumed.wall_seconds, 6),
+        "total_wall_seconds": round(interrupted.wall_seconds + resumed.wall_seconds, 6),
+        "expected_remaining_fraction": round(remaining_fraction, 4),
+        "expected_remaining_wall_seconds": round(expected_remaining_wall_seconds, 6),
+        "resume_vs_expected_remaining_ratio": (
+            None if ratio is None else round(ratio, 4)
+        ),
+        "interrupted_status": str(interrupted.command_payload.get("status", "unknown")),
+    }
+
+
+def empty_validate_summary() -> dict[str, object]:
+    return {
+        "ran": False,
+        "exit_code": None,
+        "status": "not_run",
+        "warning_count": 0,
+        "blocked_warning_count": 0,
+        "error_check_count": 0,
+        "storage_status": None,
+        "index_result_status": None,
+    }
+
+
+def run_validate_command(
+    *,
+    args: argparse.Namespace,
+    workdir: Path,
+) -> dict[str, object]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli_main(
+            [
+                "validate",
+                *build_cli_common_args(args=args, workdir=workdir),
+                "--strict",
+                "--format",
+                "json",
+            ]
+        )
+    payload = json.loads(stdout.getvalue())
+    warnings = payload.get("warnings", [])
+    checks = payload.get("checks", [])
+    storage_report = payload.get("storage_report", {})
+    index_status = payload.get("index", {})
+    return {
+        "ran": True,
+        "exit_code": exit_code,
+        "status": str(payload.get("status", "unknown")),
+        "warning_count": len(warnings) if isinstance(warnings, list) else 0,
+        "blocked_warning_count": (
+            sum(
+                1
+                for item in warnings
+                if isinstance(item, dict) and str(item.get("level")) == "blocked"
+            )
+            if isinstance(warnings, list)
+            else 0
+        ),
+        "error_check_count": (
+            sum(
+                1
+                for item in checks
+                if isinstance(item, dict) and str(item.get("level")) == "error"
+            )
+            if isinstance(checks, list)
+            else 0
+        ),
+        "storage_status": (
+            str(storage_report.get("status", "unknown"))
+            if isinstance(storage_report, dict)
+            else "unknown"
+        ),
+        "index_result_status": (
+            str(index_status.get("result_status", "unknown"))
+            if isinstance(index_status, dict)
+            else "unknown"
+        ),
+    }
+
+
+def build_cli_common_args(*, args: argparse.Namespace, workdir: Path) -> list[str]:
+    argv = ["--workdir", str(workdir)]
+    if args.config is not None:
+        argv.extend(["--config", str(args.config)])
+    if args.workspace is not None:
+        argv.extend(["--workspace", str(args.workspace)])
+    if args.source_docs_root is not None:
+        argv.extend(["--source-docs-root", str(args.source_docs_root)])
+    if args.profile is not None:
+        argv.extend(["--profile", args.profile])
+    return argv
+
+
+class IndexRunMeasurement:
+    def __init__(
+        self,
+        *,
+        command_payload: dict[str, object],
+        interrupted: bool,
+        wall_seconds: float,
+        cpu_seconds: float,
+        rss_before_bytes: int,
+        rss_after_bytes: int,
+        progress_snapshot,
+    ) -> None:
+        self.command_payload = command_payload
+        self.interrupted = interrupted
+        self.wall_seconds = wall_seconds
+        self.cpu_seconds = cpu_seconds
+        self.rss_before_bytes = rss_before_bytes
+        self.rss_after_bytes = rss_after_bytes
+        self.progress_snapshot = progress_snapshot
 
 
 if __name__ == "__main__":

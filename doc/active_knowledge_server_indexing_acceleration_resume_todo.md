@@ -747,17 +747,54 @@ TODO：
 
 ### AR4-02 crash/resume benchmark
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P1`
 - 类型：`OPS`、`TEST`
 - 依赖：`AR2-05`
 
 TODO：
 
-- [ ] benchmark 增加 `--interrupt-after-task-percent` 或专用 crash harness。
+- [x] benchmark 增加 `--interrupt-after-task-percent` crash/resume harness。
 - [ ] 跑 30%、70%、90% 中断点恢复耗时。
-- [ ] 记录 replay task 数、skipped task 数、validate 结果。
-- [ ] 输出恢复收益报告。
+- [x] 记录 replay task 数、skipped task 数、validate 结果。
+- [x] 输出恢复收益报告。
+
+行业实践调研结论：
+
+- Spring Batch 官方建议先“测真实作业，再决定是否引入更复杂并行/恢复策略”；本项目对应优先用真实工程仓 `ZeppOS` 跑 crash/resume benchmark，而不是只看 synthetic fixture。参考：https://docs.spring.io/spring-batch/reference/scalability.html
+- Spring Batch restart 语义区分“已完成 step 直接跳过”和“需要重跑的未完成 step”；本项目对应在报告里显式记录 `tasks_skipped` 与 `tasks_replayed`，避免只看总耗时误判恢复质量。参考：https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/restart.html
+- Spark Structured Streaming 的 checkpoint 恢复依赖同一 checkpoint 身份，并要求把恢复后耗时与剩余工作量一起看；本项目对应在 crash/resume 报告中增加 `interrupt.after_task_percent`、`expected_remaining_wall_seconds` 与 `resume_vs_expected_remaining_ratio`。参考：https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+- Flink checkpoint 调优文档强调 checkpoint 时延会受真实背压/大状态影响，不能只看“能恢复”，还要看恢复/检查点开销是否吞噬吞吐；本项目对应把 `resume/remainder ratio`、`replay_overhead` 和 `validate_status` 一起进报告。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/large_state_tuning/
+
+完成记录：
+
+- `active-knowledge-server/scripts/benchmark_index.py` 新增 `--interrupt-after-task-percent 30,70,90`，在同一 scenario 下会先跑 fresh baseline，再对每个中断百分比跑“受控中断 + `--resume auto` 恢复 + `validate --strict --format json`”。
+- benchmark 现会把 sample workdir 的 `runtime.baseline_dir/local_dir` 与 `storage.{metadata,overlay,jobs,vector,vector_delta,artifacts_root,local_artifacts_root,cache_root}` 全部重定向到 bench root，避免误写默认 `.active-kb`。
+- benchmark JSONL 升级为 `index_benchmark_record.v3`：新增 `interrupt`（中断百分比、中断耗时、恢复耗时、理论剩余耗时、`resume_vs_expected_remaining_ratio`）和 `validate`（`status`、`warning_count`、`error_check_count`、`storage_status`、`index_result_status`）字段。
+- `active-knowledge-server/src/active_knowledge_server/eval/index_benchmark.py` 会把不同中断百分比当成独立 scenario 汇总，并在 Markdown `Resume Summary` 中展示 `Interrupt`、`Expected remaining`、`Resume/remaining`、`Replay overhead`、`Validate`。
+- `active-knowledge-server/tests/unit/test_index_benchmark.py` 已覆盖新的中断百分比分组、恢复摘要渲染和 validate 状态展示。
+- `ZeppOS` 真实工程 smoke 方案已验证可生成真实 task 规模：
+  - 复制真实仓代表性模块子集（例如 `components/gui` + `configs` + `build/.config`）到临时 workspace 后，fresh 样本可生成约 `815` 个 task。
+  - 更大的代表性子集（`components/gui` + `components/hal` + `components/fs` + `application` + `core` + `configs`）可生成约 `1395` 个 task。
+  - 更接近整仓的代表性子集（`components` + `core` + `application` + `configs`）可生成约 `4263` 个 task。
+  - 这些 smoke 证明 harness 已经接入真实工程；30/70/90 的完整耗时结果仍需单独长跑回填。
+
+推荐实测命令：
+
+- 真实工程代表性模块子集：
+  - `rm -rf /tmp/zeppos-bench-workspace && mkdir -p /tmp/zeppos-bench-workspace/components /tmp/zeppos-bench-workspace/build/out_hub`
+  - `cp -a /home/gangan/ZeppOS/components/gui /tmp/zeppos-bench-workspace/components/`
+  - `cp -a /home/gangan/ZeppOS/configs /tmp/zeppos-bench-workspace/`
+  - `cp -a /home/gangan/ZeppOS/build/.config /tmp/zeppos-bench-workspace/build/`
+  - `cp -a /home/gangan/ZeppOS/build/out_hub/.config /tmp/zeppos-bench-workspace/build/out_hub/`
+  - `cd active-knowledge-server && uv run python scripts/benchmark_index.py --config ../examples/local-single-user.yaml --workspace /tmp/zeppos-bench-workspace --source code --workers auto --repeat 1 --cache-mode cold --interrupt-after-task-percent 30,70,90 --bench-root /tmp/active-kb-ar4-02-zeppos --output /tmp/active-kb-ar4-02-zeppos/records.jsonl --summary-output /tmp/active-kb-ar4-02-zeppos/report.md`
+- 更接近整仓的长跑方案：
+  - `cd active-knowledge-server && uv run python scripts/benchmark_index.py --config ../examples/local-single-user.yaml --workspace /home/gangan/ZeppOS --source code --workers auto --repeat 1 --cache-mode cold --interrupt-after-task-percent 30,70,90 --bench-root /tmp/active-kb-ar4-02-zeppos-full --output /tmp/active-kb-ar4-02-zeppos-full/records.jsonl --summary-output /tmp/active-kb-ar4-02-zeppos-full/report.md`
+
+下一步建议：
+
+- 先用 `components/gui + configs + build/.config` 这组约 `815` task 的真实子集跑通 30/70/90，确认 `Resume/remaining` 在 70% 点接近 `1.0x` 且 `validate_status=ok`。
+- 通过后再把同一命令切到更大的 `ZeppOS` 代表性子集，最后再决定是否需要整仓全量长跑作为 release gate 数据。
 
 验收标准：
 

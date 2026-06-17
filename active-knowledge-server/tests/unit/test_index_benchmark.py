@@ -32,9 +32,11 @@ def _record(
     metadata_db_bytes: int = 1_000,
     metadata_wal_bytes: int = 0,
     replayed_tasks: int = 0,
+    interrupt_after_task_percent: int | None = None,
+    validate_status: str = "not_run",
 ) -> dict[str, object]:
     return {
-        "schema_version": "index_benchmark_record.v2",
+        "schema_version": "index_benchmark_record.v3",
         "mode": "incremental",
         "target": "local",
         "source": "all",
@@ -67,6 +69,15 @@ def _record(
             "skipped": 2 if resumed else 0,
             "failed": 0,
             "replayed": replayed_tasks,
+        },
+        "interrupt": {
+            "after_task_percent": interrupt_after_task_percent,
+            "expected_remaining_wall_seconds": None,
+            "resume_vs_expected_remaining_ratio": None,
+        },
+        "validate": {
+            "ran": validate_status != "not_run",
+            "status": validate_status,
         },
         "writer": {
             "batch_size": batch_size,
@@ -175,6 +186,7 @@ def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() 
     recommendation = report.recommendations[0]
     assert recommendation.key.workers_requested == "4"
     assert recommendation.key.resume_kind == "fresh"
+    assert recommendation.key.interrupt_after_task_percent is None
     assert recommendation.key.parallel_mode == "thread"
     assert recommendation.key.writer_batch_size == 100
     assert recommendation.key.writer_max_files_per_transaction == 100
@@ -224,7 +236,7 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
 
     assert "# Index Benchmark Report" in markdown
     assert (
-        "resume=fresh/disabled, workers=4, parallel_mode=thread, batch_size=100, "
+        "resume=fresh/disabled, interrupt=-, workers=4, parallel_mode=thread, batch_size=100, "
         "max_files_per_transaction=100, max_records_per_transaction=2048, "
         "commit_interval_ms=500"
     ) in markdown
@@ -250,6 +262,8 @@ def test_render_index_benchmark_markdown_includes_resume_summary() -> None:
                 resumed=True,
                 resume_mode="auto",
                 replayed_tasks=1,
+                interrupt_after_task_percent=70,
+                validate_status="ok",
             ),
         ]
     )
@@ -257,8 +271,54 @@ def test_render_index_benchmark_markdown_includes_resume_summary() -> None:
     markdown = render_index_benchmark_markdown(report)
 
     assert "## Resume Summary" in markdown
+    assert "70%" in markdown
+    assert "1.00x" in markdown
+    assert "ok (1)" in markdown
     assert "1.0 replayed tasks" not in markdown
     assert "12.50% of applied tasks" in markdown
+
+
+def test_summarize_index_benchmark_records_keeps_distinct_interrupt_percent_scenarios() -> None:
+    report = summarize_index_benchmark_records(
+        [
+            _record(
+                workers=4,
+                batch_size=100,
+                commit_interval_ms=500,
+                wall_seconds=10.0,
+                rss_delta_bytes=150,
+            ),
+            _record(
+                workers=4,
+                batch_size=100,
+                commit_interval_ms=500,
+                wall_seconds=7.0,
+                rss_delta_bytes=120,
+                resumed=True,
+                resume_mode="auto",
+                interrupt_after_task_percent=30,
+                validate_status="ok",
+            ),
+            _record(
+                workers=4,
+                batch_size=100,
+                commit_interval_ms=500,
+                wall_seconds=3.0,
+                rss_delta_bytes=120,
+                resumed=True,
+                resume_mode="auto",
+                interrupt_after_task_percent=70,
+                validate_status="ok",
+            ),
+        ]
+    )
+
+    resumed_summaries = [
+        summary for summary in report.scenario_summaries if summary.key.resume_kind == "resumed"
+    ]
+    assert len(resumed_summaries) == 2
+    assert {summary.key.interrupt_after_task_percent for summary in resumed_summaries} == {30, 70}
+    assert len(report.resume_comparisons) == 2
 
 
 def test_summarize_index_benchmark_records_backfills_legacy_writer_limits() -> None:

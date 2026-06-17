@@ -164,6 +164,7 @@ class IndexBenchmarkScenarioKey:
     cache_mode: str
     resume_kind: str
     resume_mode: str
+    interrupt_after_task_percent: int | None
     workers_requested: str
     parallel_mode: str
     writer_batch_size: int
@@ -182,6 +183,7 @@ class IndexBenchmarkScenarioKey:
             "cache_mode": self.cache_mode,
             "resume_kind": self.resume_kind,
             "resume_mode": self.resume_mode,
+            "interrupt_after_task_percent": self.interrupt_after_task_percent,
             "workers_requested": self.workers_requested,
             "parallel_mode": self.parallel_mode,
             "writer_batch_size": self.writer_batch_size,
@@ -203,6 +205,7 @@ class IndexBenchmarkScenarioSummary:
     cpu_seconds: MetricSummary
     rss_delta_bytes: MetricSummary
     result_status_counts: dict[str, int]
+    validate_status_counts: dict[str, int]
     warning_code_counts: dict[str, int]
     max_warning_count: int
     phase_timings: dict[str, MetricSummary]
@@ -221,6 +224,7 @@ class IndexBenchmarkScenarioSummary:
             "cpu_seconds": self.cpu_seconds.to_dict(),
             "rss_delta_bytes": self.rss_delta_bytes.to_dict(),
             "result_status_counts": dict(self.result_status_counts),
+            "validate_status_counts": dict(self.validate_status_counts),
             "warning_code_counts": dict(self.warning_code_counts),
             "max_warning_count": self.max_warning_count,
             "phase_timings": {
@@ -272,7 +276,7 @@ class IndexBenchmarkReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "index_benchmark_report.v2",
+            "schema_version": "index_benchmark_report.v3",
             "dataset": self.dataset,
             "machine": self.machine,
             "git_commit": self.git_commit,
@@ -372,6 +376,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             lines.append(
                 "- "
                 f"resume={scenario.resume_kind}/{scenario.resume_mode}, "
+                f"interrupt={_interrupt_label(scenario.interrupt_after_task_percent)}, "
                 f"workers={scenario.workers_requested}, "
                 f"parallel_mode={scenario.parallel_mode}, "
                 f"batch_size={scenario.writer_batch_size}, "
@@ -404,6 +409,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
         lines.append(
             "| "
             f"{scenario.resume_kind}/{scenario.resume_mode}, "
+            f"i={_interrupt_label(scenario.interrupt_after_task_percent)}, "
             f"w={scenario.workers_requested}, m={scenario.parallel_mode}, "
             f"b={scenario.writer_batch_size}, "
             f"mf={scenario.writer_max_files_per_transaction}, "
@@ -432,8 +438,8 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
                 "",
                 "## Resume Summary",
                 "",
-                "| Scenario | Fresh p50 wall (s) | Resumed p50 wall (s) | Resumed tasks p50 (a/s/r) | Replay overhead |",
-                "| --- | ---: | ---: | --- | --- |",
+                "| Scenario | Interrupt | Fresh p50 wall (s) | Resumed p50 wall (s) | Expected remaining (s) | Resume/remaining | Resumed tasks p50 (a/s/r) | Replay overhead | Validate |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
             ]
         )
         for item in report.resume_comparisons:
@@ -441,13 +447,21 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
                 "| "
                 f"{item['scenario']}"
                 " | "
+                f"{item['interrupt_after_task_percent']}%"
+                " | "
                 f"{float(item['fresh_wall_p50']):.3f}"
                 " | "
                 f"{float(item['resumed_wall_p50']):.3f}"
                 " | "
+                f"{float(item['expected_remaining_wall_p50']):.3f}"
+                " | "
+                f"{item['resume_vs_remaining']}"
+                " | "
                 f"{item['resumed_task_stats']}"
                 " | "
                 f"{item['replay_overhead']}"
+                " | "
+                f"{item['validate_status']}"
                 " |"
             )
 
@@ -471,6 +485,9 @@ def _scenario_key_from_record(record: dict[str, object]) -> IndexBenchmarkScenar
         cache_mode=str(record.get("cache_mode", "unknown")),
         resume_kind="resumed" if bool(job.get("resumed", False)) else "fresh",
         resume_mode=str(resume_policy.get("mode", "disabled")),
+        interrupt_after_task_percent=_optional_int(
+            _mapping(record.get("interrupt")).get("after_task_percent")
+        ),
         workers_requested=str(record.get("workers_requested", "unknown")),
         parallel_mode=str(_mapping(record.get("parallel")).get("mode", "thread")),
         writer_batch_size=int(writer.get("batch_size", 0)),
@@ -495,6 +512,7 @@ def _family_key_for_scenario(key: IndexBenchmarkScenarioKey) -> tuple[object, ..
         key.cache_mode,
         key.resume_kind,
         key.resume_mode,
+        key.interrupt_after_task_percent,
         key.parallel_mode,
     )
 
@@ -538,6 +556,9 @@ def _build_scenario_summary(
         tuple(float(record.get("rss_delta_bytes", 0.0)) for record in reference_samples)
     )
     result_status_counts = Counter(str(record.get("result_status", "unknown")) for record in samples)
+    validate_status_counts = Counter(
+        str(_mapping(record.get("validate")).get("status", "not_run")) for record in samples
+    )
     warning_code_counts = Counter()
     max_warning_count = 0
     phase_timings = _metric_summaries_by_key(samples, "phase_timings")
@@ -571,6 +592,7 @@ def _build_scenario_summary(
     risk_flags = _risk_flags_for_summary(
         key,
         result_status_counts=result_status_counts,
+        validate_status_counts=validate_status_counts,
         warning_code_counts=warning_code_counts,
         max_warning_count=max_warning_count,
         metadata_db_bytes_max=metadata_db_bytes_max,
@@ -585,6 +607,7 @@ def _build_scenario_summary(
         cpu_seconds=cpu_summary,
         rss_delta_bytes=rss_summary,
         result_status_counts=dict(sorted(result_status_counts.items())),
+        validate_status_counts=dict(sorted(validate_status_counts.items())),
         warning_code_counts=dict(sorted(warning_code_counts.items())),
         max_warning_count=max_warning_count,
         phase_timings=phase_timings,
@@ -602,6 +625,7 @@ def _risk_flags_for_summary(
     key: IndexBenchmarkScenarioKey,
     *,
     result_status_counts: Counter[str],
+    validate_status_counts: Counter[str],
     warning_code_counts: Counter[str],
     max_warning_count: int,
     metadata_db_bytes_max: int,
@@ -615,6 +639,10 @@ def _risk_flags_for_summary(
         risks.append("failed_result")
     if result_status_counts.get("blocked", 0) > 0:
         risks.append("blocked_result")
+    if sum(
+        count for status, count in validate_status_counts.items() if status not in {"ok", "not_run"}
+    ) > 0:
+        risks.append("validate_failed")
     if max_warning_count > 0:
         risks.append("warnings_present")
     if any("lock" in code for code in warning_code_counts):
@@ -636,6 +664,7 @@ def _recommend_family_scenario(
     hard_risks = {
         "failed_result",
         "blocked_result",
+        "validate_failed",
         "sqlite_lock_warning",
         "vector_write_warning",
         "memory_gt_2x_reference",
@@ -723,20 +752,30 @@ def _build_resume_comparisons(
     scenarios: tuple[IndexBenchmarkScenarioSummary, ...],
 ) -> tuple[dict[str, object], ...]:
     fresh_by_key: dict[tuple[object, ...], IndexBenchmarkScenarioSummary] = {}
-    resumed_by_key: dict[tuple[object, ...], IndexBenchmarkScenarioSummary] = {}
+    resumed_summaries: list[IndexBenchmarkScenarioSummary] = []
     for summary in scenarios:
-        key = _resume_comparison_key(summary.key)
-        if summary.key.resume_kind == "resumed":
-            resumed_by_key[key] = summary
-        elif summary.key.resume_kind == "fresh":
-            fresh_by_key[key] = summary
+        family_key = _resume_family_key(summary.key)
+        if summary.key.resume_kind == "fresh":
+            fresh_by_key[family_key] = summary
+        elif summary.key.resume_kind == "resumed":
+            resumed_summaries.append(summary)
     comparisons: list[dict[str, object]] = []
-    for key in sorted(set(fresh_by_key).intersection(resumed_by_key)):
-        fresh = fresh_by_key[key]
-        resumed = resumed_by_key[key]
+    for resumed in sorted(resumed_summaries, key=lambda item: _scenario_sort_tuple(item.key)):
+        interrupt_percent = resumed.key.interrupt_after_task_percent
+        fresh = fresh_by_key.get(_resume_family_key(resumed.key))
+        if fresh is None:
+            continue
         replayed = resumed.task_stats.get("replayed")
         applied = resumed.task_stats.get("applied")
         skipped = resumed.task_stats.get("skipped")
+        expected_remaining_wall = fresh.wall_seconds.p50
+        if interrupt_percent is not None:
+            expected_remaining_wall = fresh.wall_seconds.p50 * (
+                max(0.0, 100.0 - float(interrupt_percent)) / 100.0
+            )
+        resume_vs_remaining = "-"
+        if expected_remaining_wall > 0:
+            resume_vs_remaining = f"{resumed.wall_seconds.p50 / expected_remaining_wall:.2f}x"
         replay_overhead = "-"
         if replayed is not None and applied is not None and applied.p50 > 0:
             replay_overhead = f"{replayed.p50 / applied.p50:.2%} of applied tasks"
@@ -745,14 +784,18 @@ def _build_resume_comparisons(
         comparisons.append(
             {
                 "scenario": _resume_comparison_label(resumed.key),
+                "interrupt_after_task_percent": 0 if interrupt_percent is None else interrupt_percent,
                 "fresh_wall_p50": fresh.wall_seconds.p50,
                 "resumed_wall_p50": resumed.wall_seconds.p50,
+                "expected_remaining_wall_p50": expected_remaining_wall,
+                "resume_vs_remaining": resume_vs_remaining,
                 "resumed_task_stats": (
                     f"{0.0 if applied is None else applied.p50:.1f}/"
                     f"{0.0 if skipped is None else skipped.p50:.1f}/"
                     f"{0.0 if replayed is None else replayed.p50:.1f}"
                 ),
                 "replay_overhead": replay_overhead,
+                "validate_status": _validate_status_summary(resumed.validate_status_counts),
             }
         )
     return tuple(comparisons)
@@ -801,7 +844,7 @@ def _phase_sort_key(value: str) -> tuple[int, str]:
         return (len(BENCHMARK_PHASE_ORDER), value)
 
 
-def _resume_comparison_key(key: IndexBenchmarkScenarioKey) -> tuple[object, ...]:
+def _resume_family_key(key: IndexBenchmarkScenarioKey) -> tuple[object, ...]:
     return (
         key.mode,
         key.target,
@@ -836,6 +879,7 @@ def _scenario_sort_tuple(key: IndexBenchmarkScenarioKey) -> tuple[object, ...]:
         key.cache_mode,
         key.resume_kind,
         key.resume_mode,
+        -1 if key.interrupt_after_task_percent is None else key.interrupt_after_task_percent,
         key.parallel_mode,
         _worker_order(key.workers_requested),
         key.writer_batch_size,
@@ -856,3 +900,16 @@ def _percentile(samples: tuple[float, ...], quantile: float) -> float:
     upper = min(lower + 1, len(samples) - 1)
     fraction = position - lower
     return samples[lower] + (samples[upper] - samples[lower]) * fraction
+
+
+def _interrupt_label(value: int | None) -> str:
+    return "-" if value is None else f"{value}%"
+
+
+def _validate_status_summary(counts: dict[str, int]) -> str:
+    if not counts:
+        return "not_run"
+    if len(counts) == 1:
+        status, count = next(iter(sorted(counts.items())))
+        return f"{status} ({count})"
+    return ", ".join(f"{status} ({count})" for status, count in sorted(counts.items()))
