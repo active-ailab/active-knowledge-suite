@@ -857,16 +857,45 @@ TODO：
 
 ### AR4-04 发布文档与本地手测脚本
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P1`
 - 类型：`DOC`、`TEST`
 - 依赖：`AR4-03`
 
 TODO：
 
-- [ ] 更新 `active_knowledge_server_local_full_integration_test.md`，加入 resume 测试流程。
-- [ ] 增加手测命令：启动 index、Ctrl+C、重跑、观察 `resumed=true`。
-- [ ] 增加 CI/本地慢测说明，避免 crash 测试默认拖慢普通单测。
+- [x] 更新 `active_knowledge_server_local_full_integration_test.md`，加入 resume 测试流程。
+- [x] 增加手测命令：启动 index、Ctrl+C、重跑、观察 `resumed=true`。
+- [x] 增加 CI/本地慢测说明，避免 crash 测试默认拖慢普通单测。
+
+行业实践调研结论：
+
+- Spring Batch 官方建议先测真实作业，再决定是否继续引入更复杂的并行或恢复策略；本项目对应在发布文档里默认推荐真实工程 `/home/gangan/ZeppOS`，而不是只给 synthetic fixture。参考：https://docs.spring.io/spring-batch/reference/scalability.html
+- Spring Batch restart 语义里，已经成功完成的 step 在重启时应被跳过，只重跑未完成部分；本项目对应要求手测结果明确看到 `resumed=true` 和 `tasks_skipped > 0`，而不是只看“第二次也成功了”。参考：https://docs.spring.io/spring-batch/reference/step/chunk-oriented-processing/restart.html
+- Spark Structured Streaming 从同一 checkpoint 恢复时要求输入源和状态边界保持稳定；本项目对应把手测文档固定在“同一 workspace + 同一 workdir + 同一 job/checkpoint 身份”下复跑，不建议中途改 workspace 或切换 schema。参考：https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+- Flink 的恢复模型强调 checkpoint 间隔需要在“运行期开销”和“故障后重放量”之间取平衡；本项目对应把 crash/resume smoke 保持为独立慢测，而不是默认塞进所有单测。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/stateful-stream-processing/
+
+完成记录：
+
+- [`doc/active_knowledge_server_local_full_integration_test.md`](./active_knowledge_server_local_full_integration_test.md) 新增 `2.1 可恢复索引 smoke`：补齐隔离 workdir 变量、真实 `ZeppOS` 手测命令、`Ctrl+C -> --resume auto` 的复现步骤，以及 `resumed=true` / `tasks_skipped > 0` 的验收方法。
+- 新增 [`active-knowledge-server/scripts/manual_resume_smoke.py`](../active-knowledge-server/scripts/manual_resume_smoke.py)：自动执行“一次受控中断 + 一次 resume + validate/status 校验”，默认输出 `index_resume_smoke_report.v1` JSON 报告，适合作为本地 slow smoke 或独立 CI lane。
+- 文档已明确这类 crash/resume 验收不要进入默认 `pytest`，而应通过单独脚本运行，避免拖慢普通单测与日常开发回路。
+
+推荐实测命令：
+
+- 真实工程手工复现：
+  - 先按 [`active_knowledge_server_local_full_integration_test.md`](./active_knowledge_server_local_full_integration_test.md) 的 `2.1 可恢复索引 smoke` 生成隔离 `RESUME_CONFIG=/tmp/active-kb-ar4-04-resume-smoke/resume-smoke.yaml`
+  - `cd active-knowledge-server && uv run active-kb index --config /tmp/active-kb-ar4-04-resume-smoke/resume-smoke.yaml --incremental --source code --no-resume --job-id index:manual-resume-smoke --format json | tee /tmp/active-kb-ar4-04-resume-smoke/first-run.json`
+  - 在出现 applied task 后按 `Ctrl+C`
+  - `cd active-knowledge-server && uv run active-kb index --config /tmp/active-kb-ar4-04-resume-smoke/resume-smoke.yaml --incremental --source code --resume auto --format json | tee /tmp/active-kb-ar4-04-resume-smoke/resume-run.json`
+- 真实工程自动 smoke：
+  - `cd active-knowledge-server && uv run python scripts/manual_resume_smoke.py --config ../examples/local-single-user.yaml --workspace /home/gangan/ZeppOS --workdir /tmp/active-kb-ar4-04-resume-smoke --source code --job-id index:manual-resume-smoke --clean --output /tmp/active-kb-ar4-04-resume-smoke/report.json`
+
+CI/本地慢测说明：
+
+- 默认单测继续只覆盖 `tests/unit/` 里的快速契约，不把真实 workspace crash/resume 验收塞进 `pytest` 默认路径。
+- 本地开发建议把 `manual_resume_smoke.py`、`check_resume_consistency.py` 和 `benchmark_index.py --interrupt-after-task-percent ...` 视为独立 slow smoke，按需单独执行。
+- 如果后续需要接 CI，建议新增单独 job 或 nightly lane，使用真实 `ZeppOS` 或代表性子集，并把产物落到 `/tmp/active-kb-*` 一类隔离 workdir。
 
 验收标准：
 

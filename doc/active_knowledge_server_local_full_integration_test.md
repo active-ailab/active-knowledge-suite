@@ -41,6 +41,18 @@ mkdir -p \
   "$BASELINE_ARTIFACTS/release"
 ```
 
+如果你要补 `AR4-04` 的断点续建手测，建议再准备一组隔离变量，避免污染日常 `.active-kb/`：
+
+```bash
+RESUME_WORKSPACE=/home/gangan/ZeppOS
+RESUME_WORKDIR=/tmp/active-kb-ar4-04-resume-smoke
+RESUME_ARTIFACTS="$RESUME_WORKDIR/artifacts"
+RESUME_CONFIG="$RESUME_WORKDIR/resume-smoke.yaml"
+RESUME_JOB_ID="index:manual-resume-smoke"
+
+mkdir -p "$RESUME_ARTIFACTS"
+```
+
 ## 2. Phase A：真实本地工程闭环
 
 这一阶段只验证当前配置下的真实 workspace、真实 workdir、真实 MCP wiring。
@@ -96,6 +108,112 @@ uv run active-kb serve \
   --transport stdio \
   --format json | tee "$LOCAL_ARTIFACTS/mcp/server-plan.json"
 ```
+
+### 2.1 可恢复索引 smoke
+
+这一步是可选慢测，目标不是覆盖全部索引功能，而是验证“真实工程 + 真实 SQLite jobs/checkpoint + 中断后重跑”这条恢复链路。
+
+- 建议优先对真实工程 `/home/gangan/ZeppOS` 做 smoke，而不是只跑 synthetic fixture。
+- 这一步不要塞进默认 `pytest` 或普通单测；它依赖真实 workspace、真实 I/O 和一次受控中断，更适合本地手测或单独 slow lane。
+- 为了不影响日常索引数据，推荐单独使用 `RESUME_WORKDIR=/tmp/...`。
+
+如果要严格按人工手测复现 `Ctrl+C -> 重跑 -> resumed=true`，直接执行下面两条命令：
+
+```bash
+rm -rf "$RESUME_WORKDIR"
+mkdir -p "$RESUME_ARTIFACTS"
+export CONFIG RESUME_WORKSPACE RESUME_WORKDIR RESUME_CONFIG
+
+uv run python - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+from active_knowledge_server.config.loader import set_nested
+
+config_path = Path(os.environ["CONFIG"])
+resume_config = Path(os.environ["RESUME_CONFIG"])
+resume_workdir = Path(os.environ["RESUME_WORKDIR"])
+baseline_dir = resume_workdir / "baseline"
+local_dir = resume_workdir / "local"
+payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+set_nested(payload, ("runtime", "workdir"), str(resume_workdir))
+set_nested(payload, ("runtime", "baseline_dir"), str(baseline_dir))
+set_nested(payload, ("runtime", "local_dir"), str(local_dir))
+set_nested(payload, ("project", "workspace_root"), os.environ["RESUME_WORKSPACE"])
+set_nested(payload, ("storage", "baseline", "manifest"), str(baseline_dir / "manifest.json"))
+set_nested(payload, ("storage", "metadata", "path"), str(baseline_dir / "db" / "metadata.db"))
+set_nested(payload, ("storage", "overlay", "path"), str(local_dir / "db" / "overlay.db"))
+set_nested(payload, ("storage", "jobs", "path"), str(local_dir / "db" / "jobs.db"))
+set_nested(payload, ("storage", "vector", "path"), str(baseline_dir / "vectors" / "lancedb"))
+set_nested(payload, ("storage", "vector_delta", "path"), str(local_dir / "vectors" / "lancedb-delta"))
+set_nested(payload, ("storage", "artifacts_root"), str(baseline_dir / "artifacts"))
+set_nested(payload, ("storage", "local_artifacts_root"), str(local_dir / "artifacts"))
+set_nested(payload, ("storage", "cache_root"), str(local_dir / "cache"))
+
+resume_config.write_text(
+    yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+    encoding="utf-8",
+)
+print(resume_config)
+PY
+
+uv run active-kb index \
+  --config "$RESUME_CONFIG" \
+  --incremental \
+  --source code \
+  --no-resume \
+  --job-id "$RESUME_JOB_ID" \
+  --format json | tee "$RESUME_ARTIFACTS/first-run.json"
+```
+
+看到 stderr 已经出现至少一个 applied task 或明显进入 apply 阶段后，按一次 `Ctrl+C` 中断。随后立刻重跑：
+
+```bash
+uv run active-kb index \
+  --config "$RESUME_CONFIG" \
+  --incremental \
+  --source code \
+  --resume auto \
+  --format json | tee "$RESUME_ARTIFACTS/resume-run.json"
+
+uv run python - <<'PY'
+import json
+from pathlib import Path
+
+payload = json.loads(Path("/tmp/active-kb-ar4-04-resume-smoke/artifacts/resume-run.json").read_text())
+job = payload["job"]
+assert payload["status"] == "ok", payload
+assert job["resumed"] is True, job
+assert (job["tasks_skipped"] or 0) > 0, job
+print(json.dumps({
+    "status": payload["status"],
+    "job_id": job["job_id"],
+    "resumed": job["resumed"],
+    "tasks_skipped": job["tasks_skipped"],
+}, ensure_ascii=False, indent=2))
+PY
+```
+
+如果你不想手工卡时机，可以直接跑仓库自带的 smoke harness。它会在首个 applied checkpoint 之后自动发送 `SIGTERM`，然后执行 `--resume auto`、`validate --strict` 和 `status` 检查：
+
+```bash
+uv run python scripts/manual_resume_smoke.py \
+  --config "$CONFIG" \
+  --workspace "$RESUME_WORKSPACE" \
+  --workdir "$RESUME_WORKDIR" \
+  --source code \
+  --job-id "$RESUME_JOB_ID" \
+  --clean \
+  --output "$RESUME_ARTIFACTS/report.json"
+```
+
+通过标准：
+
+- 第一轮命令返回 `130`，并留下 `job_id` 对应的 interrupted job/checkpoint。
+- 第二轮 JSON 满足 `status=ok`、`job.resumed=true`、`job.tasks_skipped > 0`。
+- `uv run active-kb validate --config "$RESUME_CONFIG" --strict --format json` 返回 `status=ok`。
 
 上面的 `serve --format json` 只验证 runtime wiring，不会阻塞当前终端。接着补一段 live query smoke，直接调用与 MCP 同一套 tool handler：
 
