@@ -802,17 +802,54 @@ TODO：
 
 ### AR4-03 恢复一致性验收
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P1`
 - 类型：`TEST`
 - 依赖：`AR2-05`、`AR3-03`
 
 TODO：
 
-- [ ] 一次性完整跑与 crash/resume 跑比较逻辑对象集合。
-- [ ] 比较 file/chunk/entity/relation/evidence/vector_ref。
-- [ ] 运行 `validate --strict --format json`。
-- [ ] 运行 `status --format json` 检查 job/task 统计。
+- [x] 新增可复用验收 harness：`active-knowledge-server/scripts/check_resume_consistency.py`。
+- [x] harness 固定对比 `workers=1` 的 fresh run 与 `workers=auto` 的 crash/resume run。
+- [x] 报告比较 `file/chunk/entity/relation/evidence/vector_ref` 的 live logical digest 与 sample diff。
+- [x] 报告内纳入 `validate --strict --format json` 与 `status --format json` 的结果，并检查 `resumed=true`、`tasks_skipped > 0`、latest job/task 统计。
+- [ ] 用真实工程回填一份通过报告；优先 `ZeppOS` 代表性子集，整仓长跑作为 release gate 附件。
+
+行业实践调研结论：
+
+- Spring Batch 官方建议先测“真实作业”再决定是否继续引入更复杂的并行/恢复策略；本项目对应先对 `ZeppOS` 真实代码子集做 fresh vs resume 一致性验收，而不是只比较 synthetic fixture。参考：https://docs.spring.io/spring-batch/reference/scalability.html
+- Spark Structured Streaming 要求从同一 checkpoint 恢复时保持输入源/状态 schema 的恢复边界稳定；本项目对应让 AR4-03 固定比较同一 workspace、同一 plan signature 下的 fresh 与 resume 输出，而不是跨配置/跨 schema 混比。参考：https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html
+- Flink task-local recovery 明确“本地副本可以不是字节级相同，但主 checkpoint 的逻辑状态必须完整且可恢复”；本项目对应比较 live logical object 集合与 `validate` 结果，而不是要求 fresh/resume 两次产物文件完全 byte-identical。参考：https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/large_state_tuning/
+
+实现记录：
+
+- `active-knowledge-server/src/active_knowledge_server/eval/index_consistency.py` 新增 live collection canonical digest 与 diff helper；对比口径固定为 `file`、`chunk`、`entity`、`relation`、`evidence`、`vector_ref`，并忽略 `created_at/updated_at/freshness_ts` 这类运行时噪声字段。
+- `active-knowledge-server/scripts/check_resume_consistency.py` 会在两个独立 workdir 中分别执行：
+  - fresh：`workers=1`、`resume disabled`
+  - resumed：先受控中断，再 `--resume auto`
+- 报告 schema 为 `index_resume_consistency_report.v1`，输出：
+  - fresh / resumed 两侧的 `collections.{name}.count/digest`
+  - `comparison.collections.{name}` 的 `equal`、`fresh_only_sample`、`resumed_only_sample`、`changed_sample`
+  - `validate` 摘要、`status.latest_job` 摘要、`resume_job_check`
+- 单测 `active-knowledge-server/tests/unit/test_index_consistency.py` 已覆盖 digest 稳定性、diff sample 和标准 collection 排序；相关 benchmark 单测继续通过。
+
+推荐实测命令：
+
+- `ZeppOS` 代表性 GUI 子集：
+  - `rm -rf /tmp/zeppos-ar4-03-gui && mkdir -p /tmp/zeppos-ar4-03-gui/components /tmp/zeppos-ar4-03-gui/configs /tmp/zeppos-ar4-03-gui/build/out_hub`
+  - `cp -a /home/gangan/ZeppOS/components/gui /tmp/zeppos-ar4-03-gui/components/`
+  - `cp -a /home/gangan/ZeppOS/configs/mhs003 /tmp/zeppos-ar4-03-gui/configs/`
+  - `cp -a /home/gangan/ZeppOS/build/.config /tmp/zeppos-ar4-03-gui/build/`
+  - `cp -a /home/gangan/ZeppOS/build/out_hub/.config /tmp/zeppos-ar4-03-gui/build/out_hub/`
+  - `cd active-knowledge-server && PYTHONPATH=src .venv/bin/python scripts/check_resume_consistency.py --config ../examples/local-single-user.yaml --workspace /tmp/zeppos-ar4-03-gui --source code --bench-root /tmp/active-kb-ar4-03-gui --output /tmp/active-kb-ar4-03-gui/report.json`
+- 更小但更快的 storyboard 子集：
+  - `rm -rf /tmp/zeppos-ar4-03-storyboard && mkdir -p /tmp/zeppos-ar4-03-storyboard/components/gui/storyboard /tmp/zeppos-ar4-03-storyboard/configs /tmp/zeppos-ar4-03-storyboard/build/out_hub`
+  - `cp -a /home/gangan/ZeppOS/components/gui/storyboard/src /tmp/zeppos-ar4-03-storyboard/components/gui/storyboard/`
+  - `cp -a /home/gangan/ZeppOS/components/gui/storyboard/include /tmp/zeppos-ar4-03-storyboard/components/gui/storyboard/`
+  - `cp -a /home/gangan/ZeppOS/configs/mhs003 /tmp/zeppos-ar4-03-storyboard/configs/`
+  - `cp -a /home/gangan/ZeppOS/build/.config /tmp/zeppos-ar4-03-storyboard/build/`
+  - `cp -a /home/gangan/ZeppOS/build/out_hub/.config /tmp/zeppos-ar4-03-storyboard/build/out_hub/`
+  - `cd active-knowledge-server && PYTHONPATH=src .venv/bin/python scripts/check_resume_consistency.py --config ../examples/local-single-user.yaml --workspace /tmp/zeppos-ar4-03-storyboard --source code --bench-root /tmp/active-kb-ar4-03-storyboard --output /tmp/active-kb-ar4-03-storyboard/report.json`
 
 验收标准：
 
