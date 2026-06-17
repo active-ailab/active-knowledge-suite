@@ -26,6 +26,13 @@ from active_knowledge_server.indexing import (
     make_index_task_list,
     summarize_entity_profile_states_from_reader,
 )
+from active_knowledge_server.indexing.artifacts import (
+    IndexCollectArtifactStore,
+    decode_indexed_code_artifact_payload,
+    decode_indexed_documents_artifact_payload,
+    encode_indexed_code_artifact_payload,
+    encode_indexed_documents_artifact_payload,
+)
 from active_knowledge_server.indexing.jobs import (
     SQLiteJobStore,
     decode_task_checkpoint,
@@ -33,8 +40,8 @@ from active_knowledge_server.indexing.jobs import (
     task_checkpoint_key,
 )
 from active_knowledge_server.indexing.pipeline import (
-    ApplyBatchItem,
     INCREMENTAL_INDEX_CREATED_BY_JOB_FALLBACK,
+    ApplyBatchItem,
     IndexRunContext,
     _build_apply_batches,
     _format_discover_target,
@@ -464,6 +471,77 @@ def overlay_distinct_values(
     with sqlite3.connect(path) as connection:
         rows = connection.execute(query, params).fetchall()
     return tuple(row[0] for row in rows)
+
+
+def test_collect_artifact_store_round_trips_code_and_doc_results(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    docs_root = Path(config.runtime.source_docs_root)
+    write_workspace_fixture(workspace_root)
+    write_doc_fixture(docs_root)
+    _metadata_adapter, _vector_adapter, _pipeline, indexed_code, indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path, include_docs=True)
+    )
+    assert indexed_docs is not None
+
+    decoded_code = decode_indexed_code_artifact_payload(
+        encode_indexed_code_artifact_payload(indexed_code)
+    )
+    decoded_docs = decode_indexed_documents_artifact_payload(
+        encode_indexed_documents_artifact_payload(indexed_docs)
+    )
+
+    assert [record.relative_path for record in decoded_code.file_records] == [
+        record.relative_path for record in indexed_code.file_records
+    ]
+    assert [record.relative_path for record in decoded_docs.file_records] == [
+        record.relative_path for record in indexed_docs.file_records
+    ]
+    assert [write.record.object_id for write in decoded_docs.vector_writes] == [
+        write.record.object_id for write in indexed_docs.vector_writes
+    ]
+
+    store = IndexCollectArtifactStore.from_config(
+        config,
+        cwd=tmp_path,
+        job_id="index:artifact-roundtrip",
+    )
+    code_ref = store.save_code(
+        decoded_code,
+        plan_signature="sha256:test-code",
+        collect_paths=("components/health/main.c",),
+        task_keys=("code:apply:components/health/main.c",),
+    )
+    docs_ref = store.save_docs(
+        decoded_docs,
+        plan_signature="sha256:test-docs",
+        collect_paths=("engineering/runtime.md",),
+        task_keys=(
+            "doc:apply:engineering/runtime.md",
+            "vector:doc:engineering/runtime.md",
+        ),
+    )
+    loaded_code = store.load_code(
+        plan_signature="sha256:test-code",
+        expected_paths=("components/health/main.c",),
+        expected_schema_version=indexed_code.schema_version,
+    )
+    loaded_docs = store.load_docs(
+        plan_signature="sha256:test-docs",
+        expected_paths=("engineering/runtime.md",),
+        expected_schema_version=indexed_docs.schema_version,
+    )
+
+    assert loaded_code is not None
+    assert loaded_docs is not None
+    assert loaded_code[1].artifact_hash == code_ref.artifact_hash
+    assert loaded_docs[1].artifact_hash == docs_ref.artifact_hash
+    assert [record.relative_path for record in loaded_code[0].file_records] == [
+        record.relative_path for record in indexed_code.file_records
+    ]
+    assert [record.relative_path for record in loaded_docs[0].file_records] == [
+        record.relative_path for record in indexed_docs.file_records
+    ]
 
 
 def test_incremental_pipeline_plans_rebuilds_for_schema_and_embedding_changes(
@@ -1688,6 +1766,101 @@ int health_replay_probe(void)
     assert len(file_records) == 1
     assert replay_entities.count("HEALTH_REPLAY_PROBE") == 1
     assert store.get_checkpoint(job.job_id, task_checkpoint_key(replayed_task)) is not None
+
+
+def test_incremental_pipeline_reuses_code_collect_artifact_after_interrupt(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    write_workspace_fixture(workspace_root)
+    metadata_adapter, vector_adapter, healthy_pipeline, _indexed_code, _indexed_docs, _profiles = (
+        seed_baseline(config, cwd=tmp_path)
+    )
+    (workspace_root / "components" / "health" / "main.c").write_text(
+        """#include "health.h"
+
+#define HEALTH_ARTIFACT_REUSE 44
+
+int health_artifact_reuse(void)
+{
+    return HEALTH_ARTIFACT_REUSE;
+}
+""",
+        encoding="utf-8",
+    )
+    spy_code_indexer = SpyCodeIndexer(CodeIndexer.from_config(config, cwd=tmp_path))
+    interrupted_pipeline = InterruptBeforeCodeCheckpointPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        code_indexer=spy_code_indexer,
+    )
+    plan = healthy_pipeline.plan(snapshot_id=CURRENT_SNAPSHOT_ID, source="code")
+    signature = make_index_plan_signature(
+        plan,
+        config=config,
+        mode="incremental",
+        target="local",
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        metadata={"plan_signature": signature.digest},
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupted_pipeline.run(
+            snapshot_id=CURRENT_SNAPSHOT_ID,
+            source="code",
+            plan=plan,
+            run_context=IndexRunContext(
+                job_store=store,
+                job_id=job.job_id,
+                plan_signature=signature,
+                resume_policy={"mode": "auto"},
+            ),
+        )
+
+    artifact_store = IndexCollectArtifactStore.from_config(
+        config,
+        cwd=tmp_path,
+        job_id=job.job_id,
+    )
+    assert (artifact_store.collect_root / "code.json").exists()
+    assert len(spy_code_indexer.include_paths_calls) == 1
+
+    resumed_pipeline = IncrementalIndexPipeline(
+        config,
+        cwd=tmp_path,
+        metadata_adapter=metadata_adapter,
+        vector_adapter=vector_adapter,
+        code_indexer=spy_code_indexer,
+    )
+    result = resumed_pipeline.run(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        source="code",
+        plan=plan,
+        run_context=IndexRunContext(
+            job_store=store,
+            job_id=job.job_id,
+            plan_signature=signature,
+            resume_policy={"mode": "auto"},
+        ),
+    )
+
+    assert result.result_status == "ready"
+    assert result.metadata["collect_artifacts"]["code"]["status"] == "hit"
+    assert len(spy_code_indexer.include_paths_calls) == 1
+    reader = metadata_adapter.reader()
+    scope = QueryScope(snapshot_id=CURRENT_SNAPSHOT_ID, source_scope="components")
+    replay_entities = [
+        item.record.name
+        for item in reader.logical_entities(scope)
+        if item.record.name == "HEALTH_ARTIFACT_REUSE"
+    ]
+    assert replay_entities.count("HEALTH_ARTIFACT_REUSE") == 1
 
 
 def test_incremental_pipeline_checkpoints_successful_code_apply_and_delete(

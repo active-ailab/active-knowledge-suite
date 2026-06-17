@@ -112,6 +112,11 @@ def test_clean_old_jobs_keeps_newest_terminal_jobs_and_active_jobs(tmp_path: Pat
         store.transition_job(job.job_id, "failed", error_summary="done")
     active = store.create_job(job_id="job-active")
     store.transition_job(active.job_id, "discovering")
+    job_artifacts_root = Path(config.storage.local_artifacts_root) / "index-jobs"
+    for job_id in ("job-old", "job-mid", "job-new", "job-active"):
+        artifact_dir = job_artifacts_root / job_id / "collect"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        (artifact_dir / "code.json").write_text("{}", encoding="utf-8")
 
     report = clean_local_state(config, cwd=tmp_path, old_jobs_keep=1)
 
@@ -123,6 +128,10 @@ def test_clean_old_jobs_keeps_newest_terminal_jobs_and_active_jobs(tmp_path: Pat
     assert remaining == {"job-active", "job-new"}
     assert store.get_job("job-old") is None
     assert store.get_job("job-mid") is None
+    assert not (job_artifacts_root / "job-old").exists()
+    assert not (job_artifacts_root / "job-mid").exists()
+    assert (job_artifacts_root / "job-new").exists()
+    assert (job_artifacts_root / "job-active").exists()
 
 
 def test_clean_old_snapshots_only_removes_overlay_rows(tmp_path: Path) -> None:

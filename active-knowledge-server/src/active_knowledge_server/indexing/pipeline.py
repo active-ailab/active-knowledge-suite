@@ -22,6 +22,10 @@ from active_knowledge_server.connectors.workspace import (
     WorkspaceInventory,
     WorkspaceScanProgress,
 )
+from active_knowledge_server.indexing.artifacts import (
+    CollectArtifactRef,
+    IndexCollectArtifactStore,
+)
 from active_knowledge_server.indexing.code_indexer import (
     CODE_INDEXER_SCHEMA_VERSION,
     CodeIndexer,
@@ -38,8 +42,9 @@ from active_knowledge_server.indexing.jobs import (
     JobStateTransitionError,
     SQLiteJobStore,
     decode_task_checkpoint,
-    record_task_attempt,
     record_task_applied_checkpoint,
+    record_task_attempt,
+    record_task_collected_checkpoint,
     task_checkpoint_key,
     task_has_attempt_record,
 )
@@ -905,6 +910,15 @@ class IncrementalIndexPipeline:
         )
         if job_reporter is not None:
             job_reporter.start()
+        artifact_store = (
+            None
+            if run_context is None
+            else IndexCollectArtifactStore.from_config(
+                self._config,
+                cwd=self._cwd,
+                job_id=run_context.job_id,
+            )
+        )
         doc_paths_to_collect = _collect_dependency_paths(tasks_to_run, prefix="doc:collect:")
         code_paths_to_collect = _code_collect_paths_after_skips(plan, skipped_tasks)
         progress_totals = _progress_totals_from_tasks(
@@ -1056,6 +1070,7 @@ class IncrementalIndexPipeline:
                 "slowest_items": [],
             },
             "apply_batches": _empty_apply_batch_metadata(writer_limits),
+            "collect_artifacts": {},
             "tasks": {
                 "total": task_counts["total"],
                 "by_phase": task_counts["by_phase"],
@@ -1073,26 +1088,87 @@ class IncrementalIndexPipeline:
             plan.changed_code_paths or plan.deleted_code_paths or plan.reindex_all_code
         ):
             try:
-                code_collect_base = global_done
-
-                def handle_code_collect(event: IndexProgressEvent) -> None:
-                    updated_event = replace(
-                        event,
-                        global_total=global_total,
-                        global_done=code_collect_base + (event.stage_done or 0),
-                        started_at=started_at,
-                        updated_at=utc_timestamp(),
+                code_collect_artifact: CollectArtifactRef | None = None
+                if artifact_store is not None and code_paths_to_collect:
+                    loaded_code_artifact = artifact_store.load_code(
+                        plan_signature=signature.digest,
+                        expected_paths=code_paths_to_collect,
+                        expected_schema_version=CODE_INDEXER_SCHEMA_VERSION,
                     )
-                    if job_reporter is not None:
-                        job_reporter.observe_event(updated_event)
-                    callback(updated_event)
+                    if loaded_code_artifact is not None:
+                        code_indexed, code_collect_artifact = loaded_code_artifact
+                        result_metadata["collect_artifacts"] = {
+                            **cast(dict[str, object], result_metadata["collect_artifacts"]),
+                            "code": _collect_artifact_metadata(
+                                status="hit",
+                                artifact=code_collect_artifact,
+                            ),
+                        }
+                        if progress_totals["code_collect"] > 0:
+                            global_done += progress_totals["code_collect"]
+                            emit(
+                                phase="code_collect",
+                                stage_total=progress_totals["code_collect"],
+                                stage_done=progress_totals["code_collect"],
+                                message="Reusing collected code artifact",
+                            )
+                if code_indexed is None:
+                    code_collect_base = global_done
 
-                code_indexed = self._code_indexer.collect(
-                    snapshot_id=snapshot_id,
-                    workspace_inventory=plan.workspace_inventory,
-                    include_paths=code_paths_to_collect,
-                    progress_callback=handle_code_collect,
-                )
+                    def handle_code_collect(event: IndexProgressEvent) -> None:
+                        updated_event = replace(
+                            event,
+                            global_total=global_total,
+                            global_done=code_collect_base + (event.stage_done or 0),
+                            started_at=started_at,
+                            updated_at=utc_timestamp(),
+                        )
+                        if job_reporter is not None:
+                            job_reporter.observe_event(updated_event)
+                        callback(updated_event)
+
+                    code_indexed = self._code_indexer.collect(
+                        snapshot_id=snapshot_id,
+                        workspace_inventory=plan.workspace_inventory,
+                        include_paths=code_paths_to_collect,
+                        progress_callback=handle_code_collect,
+                    )
+                    if artifact_store is not None and code_paths_to_collect:
+                        code_collect_tasks = _tasks_with_collect_dependency(
+                            tasks_to_run,
+                            prefix="code:collect:",
+                        )
+                        if not _has_warning_code(
+                            code_indexed.warnings,
+                            "code_indexer.collect_failed",
+                        ):
+                            code_collect_artifact = artifact_store.save_code(
+                                code_indexed,
+                                plan_signature=signature.digest,
+                                collect_paths=code_paths_to_collect,
+                                task_keys=tuple(task.task_key for task in code_collect_tasks),
+                            )
+                            _record_collect_artifact_checkpoints(
+                                run_context=run_context,
+                                tasks=code_collect_tasks,
+                                artifact=code_collect_artifact,
+                                plan_signature=signature.digest,
+                            )
+                            result_metadata["collect_artifacts"] = {
+                                **cast(dict[str, object], result_metadata["collect_artifacts"]),
+                                "code": _collect_artifact_metadata(
+                                    status="stored",
+                                    artifact=code_collect_artifact,
+                                ),
+                            }
+                        else:
+                            result_metadata["collect_artifacts"] = {
+                                **cast(dict[str, object], result_metadata["collect_artifacts"]),
+                                "code": {
+                                    "status": "partial",
+                                    "path_count": len(code_paths_to_collect),
+                                },
+                            }
                 result_metadata["code_collect_workers"] = code_indexed.metadata.get(
                     "collect_workers",
                     {},
@@ -1123,7 +1199,8 @@ class IncrementalIndexPipeline:
                             },
                         )
                     )
-                global_done += progress_totals["code_collect"]
+                if code_collect_artifact is None and progress_totals["code_collect"] > 0:
+                    global_done += progress_totals["code_collect"]
                 new_code_bundles = _code_bundles_by_path(code_indexed)
                 code_apply_done = phase_done["code_apply"]
                 code_apply_eta = SlidingWindowEtaEstimator()
@@ -1319,29 +1396,92 @@ class IncrementalIndexPipeline:
             indexed_docs: IndexedDocuments | None = None
             if doc_paths_to_collect:
                 try:
-                    doc_collect_base = global_done
-
-                    def handle_doc_collect(event: IndexProgressEvent) -> None:
-                        updated_event = replace(
-                            event,
-                            global_total=global_total,
-                            global_done=doc_collect_base + (event.stage_done or 0),
-                            started_at=started_at,
-                            updated_at=utc_timestamp(),
+                    doc_collect_artifact: CollectArtifactRef | None = None
+                    if artifact_store is not None:
+                        loaded_doc_artifact = artifact_store.load_docs(
+                            plan_signature=signature.digest,
+                            expected_paths=doc_paths_to_collect,
+                            expected_schema_version=DOC_INDEXER_SCHEMA_VERSION,
                         )
-                        if job_reporter is not None:
-                            job_reporter.observe_event(updated_event)
-                        callback(updated_event)
+                        if loaded_doc_artifact is not None:
+                            indexed_docs, doc_collect_artifact = loaded_doc_artifact
+                            result_metadata["collect_artifacts"] = {
+                                **cast(dict[str, object], result_metadata["collect_artifacts"]),
+                                "docs": _collect_artifact_metadata(
+                                    status="hit",
+                                    artifact=doc_collect_artifact,
+                                ),
+                            }
+                            global_done += progress_totals["doc_collect"]
+                            emit(
+                                phase="doc_collect",
+                                stage_total=progress_totals["doc_collect"],
+                                stage_done=progress_totals["doc_collect"],
+                                message="Reusing collected document artifact",
+                            )
+                    if indexed_docs is None:
+                        doc_collect_base = global_done
 
-                    manifest = _filter_source_docs_manifest(
-                        plan.source_docs_manifest,
-                        include_paths=doc_paths_to_collect,
-                    )
-                    indexed_docs = self._doc_indexer.collect(
-                        snapshot_id=snapshot_id,
-                        source_docs_manifest=manifest,
-                        progress_callback=handle_doc_collect,
-                    )
+                        def handle_doc_collect(event: IndexProgressEvent) -> None:
+                            updated_event = replace(
+                                event,
+                                global_total=global_total,
+                                global_done=doc_collect_base + (event.stage_done or 0),
+                                started_at=started_at,
+                                updated_at=utc_timestamp(),
+                            )
+                            if job_reporter is not None:
+                                job_reporter.observe_event(updated_event)
+                            callback(updated_event)
+
+                        manifest = _filter_source_docs_manifest(
+                            plan.source_docs_manifest,
+                            include_paths=doc_paths_to_collect,
+                        )
+                        indexed_docs = self._doc_indexer.collect(
+                            snapshot_id=snapshot_id,
+                            source_docs_manifest=manifest,
+                            progress_callback=handle_doc_collect,
+                        )
+                        if artifact_store is not None:
+                            doc_collect_tasks = _tasks_with_collect_dependency(
+                                tasks_to_run,
+                                prefix="doc:collect:",
+                            )
+                            if not _has_warning_code(indexed_docs.warnings, "docs.collect_failed"):
+                                doc_collect_artifact = artifact_store.save_docs(
+                                    indexed_docs,
+                                    plan_signature=signature.digest,
+                                    collect_paths=doc_paths_to_collect,
+                                    task_keys=tuple(task.task_key for task in doc_collect_tasks),
+                                )
+                                _record_collect_artifact_checkpoints(
+                                    run_context=run_context,
+                                    tasks=doc_collect_tasks,
+                                    artifact=doc_collect_artifact,
+                                    plan_signature=signature.digest,
+                                )
+                                result_metadata["collect_artifacts"] = {
+                                    **cast(
+                                        dict[str, object],
+                                        result_metadata["collect_artifacts"],
+                                    ),
+                                    "docs": _collect_artifact_metadata(
+                                        status="stored",
+                                        artifact=doc_collect_artifact,
+                                    ),
+                                }
+                            else:
+                                result_metadata["collect_artifacts"] = {
+                                    **cast(
+                                        dict[str, object],
+                                        result_metadata["collect_artifacts"],
+                                    ),
+                                    "docs": {
+                                        "status": "partial",
+                                        "path_count": len(doc_paths_to_collect),
+                                    },
+                                }
                     result_metadata["doc_collect_workers"] = indexed_docs.metadata.get(
                         "collect_workers",
                         {},
@@ -1372,7 +1512,8 @@ class IncrementalIndexPipeline:
                                 },
                             )
                         )
-                    global_done += progress_totals["doc_collect"]
+                    if doc_collect_artifact is None:
+                        global_done += progress_totals["doc_collect"]
                 except IndexJobCancelled:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -2389,6 +2530,56 @@ def _index_task_counts(tasks: Sequence[IndexTask]) -> dict[str, object]:
     }
 
 
+def _tasks_with_collect_dependency(
+    tasks: Sequence[IndexTask],
+    *,
+    prefix: str,
+) -> tuple[IndexTask, ...]:
+    return tuple(
+        task
+        for task in tasks
+        if any(dependency.startswith(prefix) for dependency in task.collect_dependencies)
+    )
+
+
+def _record_collect_artifact_checkpoints(
+    *,
+    run_context: IndexRunContext | None,
+    tasks: Sequence[IndexTask],
+    artifact: CollectArtifactRef,
+    plan_signature: str,
+) -> None:
+    if run_context is None:
+        return
+    for task in tasks:
+        record_task_collected_checkpoint(
+            run_context.job_store,
+            run_context.job_id,
+            task,
+            metadata={
+                "job_id": run_context.job_id,
+                "plan_signature": plan_signature,
+                "artifact_ref": str(artifact.path),
+                "artifact_hash": artifact.artifact_hash,
+                "collected_paths": list(artifact.collect_paths),
+            },
+        )
+
+
+def _collect_artifact_metadata(
+    *,
+    status: str,
+    artifact: CollectArtifactRef,
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "artifact_path": str(artifact.path),
+        "artifact_hash": artifact.artifact_hash,
+        "path_count": len(artifact.collect_paths),
+        "task_count": len(artifact.task_keys),
+    }
+
+
 def _index_plan_summary(plan: IncrementalIndexPlan) -> dict[str, object]:
     return {
         "snapshot_id": plan.snapshot_id,
@@ -2406,6 +2597,13 @@ def _index_plan_summary(plan: IncrementalIndexPlan) -> dict[str, object]:
         "removed_profile_ids_count": len(plan.removed_profile_ids),
         "warnings_count": len(plan.warnings),
     }
+
+
+def _has_warning_code(
+    warnings: Sequence[object],
+    code: str,
+) -> bool:
+    return any(getattr(warning, "code", None) == code for warning in warnings)
 
 
 def _task_has_matching_applied_checkpoint(

@@ -97,6 +97,7 @@ def clean_local_state(
     acc = _CleanAccumulator()
     baseline_dir = resolve_runtime_path(config.runtime.baseline_dir, cwd)
     local_dir = resolve_runtime_path(config.runtime.local_dir, cwd)
+    local_artifacts_root = resolve_runtime_path(config.storage.local_artifacts_root, cwd)
     sqlite_paths = configured_sqlite_paths(config, cwd=cwd)
 
     if clean_cache:
@@ -122,7 +123,11 @@ def clean_local_state(
         acc.deleted_dirs += result.deleted_dirs
 
     if old_jobs_keep is not None:
-        acc.deleted_jobs += clean_old_jobs(sqlite_paths["jobs"], keep=old_jobs_keep)
+        acc.deleted_jobs += clean_old_jobs(
+            sqlite_paths["jobs"],
+            keep=old_jobs_keep,
+            artifacts_root=local_artifacts_root / "index-jobs",
+        )
 
     if old_snapshots_keep is not None:
         acc.deleted_snapshots += clean_old_overlay_snapshots(
@@ -175,7 +180,12 @@ def assert_clean_path(path: Path, *, local_dir: Path, baseline_dir: Path) -> Non
         raise ValueError(f"clean path must be under local runtime dir: {path}")
 
 
-def clean_old_jobs(jobs_path: Path, *, keep: int) -> int:
+def clean_old_jobs(
+    jobs_path: Path,
+    *,
+    keep: int,
+    artifacts_root: Path | None = None,
+) -> int:
     """Delete old terminal jobs and their checkpoints, preserving active jobs."""
 
     if keep < 0:
@@ -202,6 +212,13 @@ def clean_old_jobs(jobs_path: Path, *, keep: int) -> int:
             connection.execute("DELETE FROM job_checkpoint WHERE job_id = ?", (job_id,))
             connection.execute("DELETE FROM job WHERE job_id = ?", (job_id,))
         connection.commit()
+    if artifacts_root is not None:
+        for job_id in delete_ids:
+            artifact_path = artifacts_root / job_id
+            if artifact_path.is_dir():
+                shutil.rmtree(artifact_path)
+            elif artifact_path.exists():
+                artifact_path.unlink()
     return len(delete_ids)
 
 

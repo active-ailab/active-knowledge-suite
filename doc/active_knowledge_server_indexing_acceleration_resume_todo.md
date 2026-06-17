@@ -909,7 +909,7 @@ Phase R5 是进一步减少重启后重复解析和重复 embedding 的优化。
 
 ### AR5-01 collect artifact cache v1
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-01`
@@ -917,11 +917,26 @@ Phase R5 是进一步减少重启后重复解析和重复 embedding 的优化。
 
 TODO：
 
-- [ ] 定义 artifact root：`.active-kb/local/artifacts/index-jobs/<job_id>/collect/`。
-- [ ] 支持 code/doc collect result JSON-safe 编解码。
-- [ ] 写入 artifact_hash，恢复读取时校验。
-- [ ] artifact 失败或 schema mismatch 时自动重 collect。
-- [ ] 清理策略接入 maintenance。
+- [x] 定义 artifact root：`.active-kb/local/artifacts/index-jobs/<job_id>/collect/`。
+- [x] 支持 code/doc collect result JSON-safe 编解码。
+- [x] 写入 artifact_hash，恢复读取时校验。
+- [x] artifact 失败或 schema mismatch 时自动重 collect。
+- [x] 清理策略接入 maintenance。
+
+行业实践调研结论：
+
+- Gradle Build Cache 强调 cache key 必须覆盖完整 inputs/outputs，遗漏输入会导致错误命中；本项目对应把 collect artifact 绑定 `plan_signature`、result schema version 和 collect path 集合，命中条件不满足就直接重 collect。参考：https://docs.gradle.org/current/userguide/build_cache.html 与 https://docs.gradle.org/current/userguide/build_cache_concepts.html
+- Bazel Remote Cache 把 action metadata 和内容哈希分开存储；本项目对应为 collect artifact 单独写 `artifact_hash`，恢复时先校验 hash，再决定是否复用落盘结果。参考：https://bazel.build/remote/caching
+- Spring Batch restart 要求可恢复上下文中的值可序列化，否则恢复能力不可靠；本项目对应不直接持久化 Python 临时对象，而是新增 code/doc collect result 的 JSON-safe codec。参考：https://docs.spring.io/spring-batch/docs/5.0.5-SNAPSHOT/reference/reference/html/index-single.html
+- Turborepo 将 cache 建立在任务结果可重复、可确定的前提上；本项目对应只在 schema 与计划签名匹配时命中，否则宁可 miss 也不冒险复用旧 artifact。参考：https://turborepo.dev/docs/crafting-your-repository/caching
+
+完成记录：
+
+- 新增 `active_knowledge_server/indexing/artifacts.py`，定义 `.active-kb/local/artifacts/index-jobs/<job_id>/collect/{code,docs}.json`、`artifact_hash` 校验和 code/doc collect result codec。
+- `active_knowledge_server/indexing/pipeline.py` 在 code/doc collect 阶段接入 artifact hit/store：resume 时优先加载 artifact；hash 不匹配、schema 不匹配、缺少期望 path 时自动回退到重 collect；成功落盘后为依赖 task 写 `collected` checkpoint metadata。
+- `active_knowledge_server/storage/maintenance.py` 的 `clean --old-jobs` 现在会同步清理 `local/artifacts/index-jobs/<job_id>/`。
+- `tests/unit/test_incremental_pipeline.py` 新增 codec round-trip 与“collect 完成、apply 前中断，resume 不重 collect”的覆盖；`tests/unit/test_storage_maintenance.py` 增加 job artifact 目录清理断言。
+- 真实工程验证：`ZeppOS` 整仓在 `manual_resume_smoke.py` 的默认 120 秒首 checkpoint 窗口内未完成首个 applied checkpoint；改用 `ZeppOS` 真实 storyboard 代表性子集后，resume job metadata 已观察到 `last_message=\"Reusing collected code artifact\"`，且产出 `collect/code.json`（296 paths / 296 task keys）与 296 条 `task:collected:*` checkpoint，证明 artifact cache 命中链路在真实工程上可工作。
 
 验收标准：
 
