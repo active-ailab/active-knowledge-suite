@@ -25,7 +25,10 @@ from active_knowledge_server.indexing.embeddings import (
     EmbeddingInput,
     EmbeddingPreparationResult,
     embed_text_locally,
-    prepare_embedding_inputs,
+)
+from active_knowledge_server.indexing.embedding_cache import (
+    IndexEmbeddingCacheStore,
+    prepare_cached_embeddings,
 )
 from active_knowledge_server.indexing.parallel import (
     parallel_map_ordered,
@@ -206,6 +209,8 @@ class DocumentIndexer:
         self.embedding_model_version = config.indexing.embeddings.model
         self.embedding_provider = config.indexing.embeddings.provider
         self.embedding_dimensions = 24
+        self._embedding_batch_size = config.indexing.embeddings.batch_size
+        self._embedding_cache = IndexEmbeddingCacheStore.from_config(config, cwd=self._cwd)
 
     @classmethod
     def from_config(
@@ -372,21 +377,42 @@ class DocumentIndexer:
             "preparing embedding batches"
         )
         embedding_started_at = time.perf_counter()
-        embedding_preparation = (
-            prepare_embedding_inputs(embedding_inputs, secret_scanner=self._secret_scanner)
+        prepared_embeddings = (
+            prepare_cached_embeddings(
+                embedding_inputs,
+                model=self.embedding_model_version,
+                provider=self.embedding_provider,
+                batch_size=self._embedding_batch_size,
+                embed_batch=self._embed_batch,
+                secret_scanner=self._secret_scanner,
+                cache_store=self._embedding_cache,
+            )
             if self._embeddings_enabled
+            else None
+        )
+        embedding_seconds = time.perf_counter() - embedding_started_at
+        embedding_preparation = (
+            prepared_embeddings.preparation
+            if prepared_embeddings is not None
             else EmbeddingPreparationResult(
                 schema_version=EMBEDDING_PREPARATION_SCHEMA_VERSION,
                 accepted_inputs=(),
                 skipped_reports=(),
             )
         )
-        embedding_seconds = time.perf_counter() - embedding_started_at
         chunk_lookup = {chunk.chunk_id: chunk for chunk in chunk_records}
         vector_writes = tuple(
-            self._build_vector_write(chunk_lookup[item.object_id])
+            self._build_vector_write(
+                chunk_lookup[item.object_id],
+                embedding=prepared_embeddings.embeddings_by_object_id[item.object_id],
+            )
             for item in embedding_preparation.accepted_inputs
-            if item.object_type == "chunk" and item.object_id in chunk_lookup
+            if (
+                prepared_embeddings is not None
+                and item.object_type == "chunk"
+                and item.object_id in chunk_lookup
+                and item.object_id in prepared_embeddings.embeddings_by_object_id
+            )
         )
 
         report_finalize("Finalizing document index bundle for overlay apply")
@@ -409,6 +435,11 @@ class DocumentIndexer:
                     "parser_seconds": round(parser_seconds, 6),
                     "embedding_seconds": round(embedding_seconds, 6),
                 },
+                "embedding_cache": (
+                    {}
+                    if prepared_embeddings is None
+                    else prepared_embeddings.cache_stats.to_dict()
+                ),
                 "diagnostics": {
                     "slowest_items": _top_slowest_items(slowest_items),
                 },
@@ -977,28 +1008,39 @@ class DocumentIndexer:
             },
         )
 
-    def _build_vector_write(self, chunk_record: ChunkRecord) -> VectorWrite:
+    def _build_vector_write(
+        self,
+        chunk_record: ChunkRecord,
+        *,
+        embedding: tuple[float, ...],
+    ) -> VectorWrite:
         return VectorWrite(
-            record=VectorRefRecord(
-                vector_ref_id=_stable_id(
-                    "vector_ref", chunk_record.chunk_id, self.embedding_model_version
-                ),
-                object_type="chunk",
-                object_id=chunk_record.chunk_id,
-                chunk_id=chunk_record.chunk_id,
-                embedding_model_version=self.embedding_model_version,
-                content_hash=chunk_record.content_hash,
-                source_scope=chunk_record.source_scope,
-                profile_id=chunk_record.profile_id,
-                metadata={
-                    "provider": self.embedding_provider,
-                    "doc_type": chunk_record.metadata.get("doc_type"),
-                    "domain": chunk_record.metadata.get("domain"),
-                    "title": chunk_record.metadata.get("title"),
-                },
-            ),
-            embedding=self.embed_text(chunk_record.text),
+            record=self._build_vector_ref_record(chunk_record),
+            embedding=embedding,
         )
+
+    def _build_vector_ref_record(self, chunk_record: ChunkRecord) -> VectorRefRecord:
+        return VectorRefRecord(
+            vector_ref_id=_stable_id(
+                "vector_ref", chunk_record.chunk_id, self.embedding_model_version
+            ),
+            object_type="chunk",
+            object_id=chunk_record.chunk_id,
+            chunk_id=chunk_record.chunk_id,
+            embedding_model_version=self.embedding_model_version,
+            content_hash=chunk_record.content_hash,
+            source_scope=chunk_record.source_scope,
+            profile_id=chunk_record.profile_id,
+            metadata={
+                "provider": self.embedding_provider,
+                "doc_type": chunk_record.metadata.get("doc_type"),
+                "domain": chunk_record.metadata.get("domain"),
+                "title": chunk_record.metadata.get("title"),
+            },
+        )
+
+    def _embed_batch(self, inputs: Sequence[EmbeddingInput]) -> tuple[tuple[float, ...], ...]:
+        return tuple(self.embed_text(item.content) for item in inputs)
 
 
 def _source_id_for_category(category: str) -> str:

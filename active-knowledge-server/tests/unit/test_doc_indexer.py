@@ -228,6 +228,79 @@ Heart tile shows bpm, status, and warning indicators on the watch face.
     assert vector_result.matches[0].logical_object_id in chunk_ids
 
 
+def test_doc_indexer_reuses_embedding_cache_on_repeated_collect(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    docs_root = Path(config.runtime.source_docs_root)
+    (docs_root / "engineering").mkdir()
+    (docs_root / "engineering" / "runtime.md").write_text(
+        """---
+title: Runtime Scheduling Guide
+authority_level: official
+version: 1.0.0
+---
+# Runtime Scheduling Guide
+
+Runtime scheduling keeps UI and sensor tasks responsive.
+
+## Task Model
+The runtime scheduler prioritizes sensor sampling, UI refresh, and health pipelines.
+""",
+        encoding="utf-8",
+    )
+
+    indexer = DocumentIndexer.from_config(config, cwd=tmp_path)
+    cold = indexer.collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+    warm = indexer.collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+
+    cold_cache = dict(cold.metadata.get("embedding_cache", {}))
+    warm_cache = dict(warm.metadata.get("embedding_cache", {}))
+
+    assert cold.vector_writes
+    assert cold_cache["cache_hits"] == 0
+    assert cold_cache["computed_embeddings"] == len(cold.embedding_preparation.accepted_inputs)
+    assert warm_cache["computed_embeddings"] == 0
+    assert warm_cache["cache_hits"] == len(warm.embedding_preparation.accepted_inputs)
+    assert [write.embedding for write in warm.vector_writes] == [
+        write.embedding for write in cold.vector_writes
+    ]
+    assert list((Path(config.storage.cache_root) / "embeddings").rglob("*.json"))
+
+
+def test_doc_indexer_reuses_cached_secret_scan_skip_results(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    docs_root = Path(config.runtime.source_docs_root)
+    (docs_root / "engineering").mkdir()
+    (docs_root / "engineering" / "secrets.md").write_text(
+        """---
+title: Runtime Secret Notes
+authority_level: official
+version: 1.0.0
+---
+# Runtime Secret Notes
+
+TOKEN=super-secret-value
+""",
+        encoding="utf-8",
+    )
+
+    indexer = DocumentIndexer.from_config(config, cwd=tmp_path)
+    cold = indexer.collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+    warm = indexer.collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+
+    cold_cache = dict(cold.metadata.get("embedding_cache", {}))
+    warm_cache = dict(warm.metadata.get("embedding_cache", {}))
+
+    assert cold.embedding_preparation.skipped_reports
+    assert warm.embedding_preparation.skipped_reports
+    assert cold.vector_writes == ()
+    assert cold_cache["cache_stores"] >= 1
+    assert warm_cache["computed_embeddings"] == 0
+    assert warm_cache["cache_hits"] == len(warm.embedding_preparation.skipped_reports)
+    assert [report.source_path for report in warm.embedding_preparation.skipped_reports] == [
+        "knowledge-sources/engineering/secrets.md"
+    ]
+
+
 def test_doc_indexer_reports_api_version_missing_without_blocking_index(tmp_path: Path) -> None:
     config = resolve_model(tmp_path)
     docs_root = Path(config.runtime.source_docs_root)

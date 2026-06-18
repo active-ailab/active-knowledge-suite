@@ -944,17 +944,38 @@ TODO：
 
 ### AR5-02 embedding input/cache
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-04`
 
 TODO：
 
-- [ ] 定义 embedding cache key：model + object_type + content_hash + sanitizer version。
-- [ ] 缓存 accepted/skipped secret scan 结果。
-- [ ] 命中时直接生成 vector write。
-- [ ] provider/local embedding 都经过同一 batcher。
+- [x] 定义 embedding cache key：model + object_type + content_hash + sanitizer version。
+- [x] 缓存 accepted/skipped secret scan 结果。
+- [x] 命中时直接生成 vector write。
+- [x] provider/local embedding 都经过同一 batcher。
+
+行业实践调研结论：
+
+- Gradle Build Cache 强调 cache key 必须覆盖任务实现、输出属性以及“task inputs 的名称和值”；本项目对应把 embedding cache key 固定为 `model + object_type + content_hash + sanitizer_version`，并额外用 provider 做目录级 namespace，避免同名 model 跨 provider 误命中。参考：https://docs.gradle.org/current/userguide/build_cache_concepts.html
+- Turborepo 明确要求被缓存任务是 deterministic；本项目对应只缓存“同一内容、同一模型、同一 sanitizer 版本”的 embedding/secret-scan 结果，并把重复内容折叠到单次计算，命中时直接恢复既有结果而不是重跑。参考：https://turborepo.dev/docs/crafting-your-repository/caching
+- OpenAI Embeddings API 支持“一个请求传数组输入”，且官方 rate-limit 建议在共享请求层做 exponential backoff；本项目对应把 provider/local 都收敛到同一个 batcher，按 `indexing.embeddings.batch_size` 统一聚合，后续接远端 provider 时可直接在该层补 retry/backoff。参考：https://developers.openai.com/api/reference/resources/embeddings/methods/create 与 https://help.openai.com/en/articles/6891753-what-are-the-best-practices-for-managing-my-rate-limits-in-the-api
+
+完成记录：
+
+- 新增 `active_knowledge_server/indexing/embedding_cache.py`，实现持久化 `IndexEmbeddingCacheStore`、稳定 cache key、secret-scan skip 结果编码，以及共享的 `prepare_cached_embeddings(...)` batcher。
+- `active_knowledge_server/indexing/doc_indexer.py` 的 embedding 准备阶段改为统一经过 cache + batcher：命中 cache 时直接复用 embedding/skip decision，miss 时才进入 secret scan 和 embedding 计算。
+- vector write 构造改为“先解出 embedding，再组装 `VectorRefRecord`”，因此 cache hit 可以直接生成 `VectorWrite`，不再重复调用 `embed_text(...)`。
+- `IndexedDocuments.metadata` 新增 `embedding_cache` 统计，输出 `cache_hits/cache_misses/cache_stores/deduplicated_inputs/batch_count/computed_embeddings/skipped_inputs`，便于 benchmark 与真实工程复盘。
+- `tests/unit/test_doc_indexer.py` 新增重复 collect 命中 cache、secret-scan skip 结果复用两组单测；同时回归 `tests/unit/test_incremental_pipeline.py`，确认增量 pipeline 与现有 vector checkpoint 语义不回退。
+
+真实工程验证：
+
+- 采用 `/home/gangan/ZeppOS/docs` 的 14 个 Markdown 文档作为真实样本；因 source-docs connector 需要顶层分类目录，测试时把这些文件复制到临时 `source-docs/engineering/` 下运行 `DocumentIndexer.collect()`。
+- 实测样本共 14 个文档、707 个 chunk、704 个唯一 embedding cache 文件（说明有 3 个重复内容 chunk 在单次 collect 内被折叠复用）。
+- 冷启动首轮：`cache_hits=0`、`cache_misses=707`、`cache_stores=704`、`computed_embeddings=704`、`batch_count=22`、`embedding_seconds=0.200234`。
+- 热启动第二轮：`cache_hits=707`、`cache_misses=0`、`cache_stores=0`、`computed_embeddings=0`、`batch_count=0`、`embedding_seconds=0.067296`，embedding 阶段耗时下降约 `66.4%`。
 
 验收标准：
 
