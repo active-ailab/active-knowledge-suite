@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Sequence
+import os
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
@@ -33,13 +35,18 @@ from active_knowledge_server.storage.sqlite_store import SQLiteStorageAdapter
 
 VectorObjectType = Literal["chunk", "entity", "evidence"]
 
-LATEST_VECTOR_SCHEMA_VERSION: Final = "1.0.0"
+LATEST_VECTOR_SCHEMA_VERSION: Final = "1.1.0"
 _SOURCE_PRIORITY: Final[dict[StorageSourceIndex, int]] = {
     "baseline": 1,
     "merged": 2,
     "overlay": 3,
 }
 _COLLECTIONS: Final[tuple[VectorObjectType, ...]] = ("chunk", "entity", "evidence")
+_SEGMENT_FILE_SUFFIX: Final = ".jsonl"
+_SEGMENT_DISCOVERY_GLOB: Final = f"*{_SEGMENT_FILE_SUFFIX}"
+_DEFAULT_SEGMENT_JOB_ID: Final = "adhoc"
+_COMPACTION_SEGMENT_THRESHOLD: Final = 8
+_COMPACTION_ROW_THRESHOLD: Final = 1024
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,13 @@ class _LiveObject:
     profile_id: str
     source_scope: str
     chunk_id: str | None = None
+
+
+@dataclass(frozen=True)
+class _VectorSegmentWrite:
+    filename: str
+    row_count: int
+    embedding_model_versions: tuple[str, ...]
 
 
 def configured_lancedb_paths(
@@ -174,6 +188,9 @@ class LanceDBVectorReader:
         """Run merged vector search over baseline and delta collections."""
 
         expected_model = request.embedding_model_version or self._default_embedding_model_version
+        live_vector_refs = {
+            item.vector_ref_id: item for item in self._metadata_reader.iter_vector_refs(request.scope)
+        }
         live_chunks = {
             item.logical_object_id: live_chunk(item)
             for item in self._metadata_reader.logical_chunks(request.scope)
@@ -227,6 +244,7 @@ class LanceDBVectorReader:
                     row=row,
                     request=request,
                     source_index=source_index,
+                    live_vector_refs=live_vector_refs,
                     live_chunks=live_chunks,
                     live_entities=live_entities,
                     live_evidence=live_evidence_objects,
@@ -257,6 +275,7 @@ class LanceDBVectorReader:
         row: _VectorRow,
         request: VectorQuery,
         source_index: Literal["baseline", "overlay"],
+        live_vector_refs: dict[str, VectorRefRecord],
         live_chunks: dict[str, _LiveObject],
         live_entities: dict[str, _LiveObject],
         live_evidence: dict[str, _LiveObject],
@@ -282,6 +301,9 @@ class LanceDBVectorReader:
             return None
         if self._metadata_reader.is_tombstoned("vector_ref", row.vector_ref_id, row_scope):
             return None
+        vector_ref = live_vector_refs.get(row.vector_ref_id)
+        if vector_ref is None:
+            return None
         resolution = self._metadata_reader.resolve_replacement(
             row.object_type,
             row.object_id,
@@ -298,6 +320,10 @@ class LanceDBVectorReader:
             live_evidence=live_evidence,
         )
         if live_object is None:
+            return None
+        if vector_ref.object_type != row.object_type or vector_ref.object_id != row.object_id:
+            return None
+        if vector_ref.content_hash != row.content_hash:
             return None
         if live_object.content_hash is not None and row.content_hash != live_object.content_hash:
             return None
@@ -344,6 +370,7 @@ class LanceDBVectorWriter:
         self._delta_vector_path = delta_vector_path
         self._metadata_writer = metadata_writer
         self._request = request
+        self._dirty_object_types: set[VectorObjectType] = set()
 
     @property
     def request(self) -> StorageWriteRequest:
@@ -380,16 +407,25 @@ class LanceDBVectorWriter:
 
         root = self._target_root
         for object_type, new_rows in rows_by_type.items():
-            rows = list(load_collection_rows(root, object_type))
-            row_index = {row.vector_ref_id: index for index, row in enumerate(rows)}
-            for row in new_rows:
-                existing_index = row_index.get(row.vector_ref_id)
-                if existing_index is None:
-                    row_index[row.vector_ref_id] = len(rows)
-                    rows.append(row)
-                else:
-                    rows[existing_index] = row
-            write_collection_rows(root, object_type, rows)
+            if self._request.target == "baseline" and self._request.operation_mode == "baseline_publish":
+                rows = list(load_collection_rows(root, object_type))
+                row_index = {row.vector_ref_id: index for index, row in enumerate(rows)}
+                for row in new_rows:
+                    existing_index = row_index.get(row.vector_ref_id)
+                    if existing_index is None:
+                        row_index[row.vector_ref_id] = len(rows)
+                        rows.append(row)
+                    else:
+                        rows[existing_index] = row
+                write_collection_rows(root, object_type, rows)
+            else:
+                append_collection_segment(
+                    root,
+                    object_type,
+                    new_rows,
+                    job_id=self._request.job_id,
+                )
+                self._dirty_object_types.add(object_type)
             validate_collection_rows_written(root, object_type, new_rows)
 
         with self._metadata_writer.transaction():
@@ -408,10 +444,17 @@ class LanceDBVectorWriter:
         rows = list(load_collection_rows(root, object_type))
         kept = [row for row in rows if row.object_id not in target_ids]
         write_collection_rows(root, object_type, kept)
+        self._dirty_object_types.discard(object_type)
         return len(rows) - len(kept)
 
     def flush(self) -> None:
-        return None
+        for object_type in tuple(sorted(self._dirty_object_types)):
+            maybe_compact_collection(
+                self._target_root,
+                object_type,
+                requested_by_job_id=self._request.job_id,
+            )
+        self._dirty_object_types.clear()
 
     @property
     def _target_root(self) -> Path:
@@ -533,6 +576,10 @@ def manifest_path(root: Path) -> Path:
     return root / "manifest.json"
 
 
+def segment_dir(root: Path, object_type: VectorObjectType) -> Path:
+    return root / object_type
+
+
 def load_store_rows(root: Path, object_types: Iterable[VectorObjectType]) -> tuple[_VectorRow, ...]:
     rows: list[_VectorRow] = []
     for object_type in object_types:
@@ -541,6 +588,19 @@ def load_store_rows(root: Path, object_types: Iterable[VectorObjectType]) -> tup
 
 
 def load_collection_rows(root: Path, object_type: VectorObjectType) -> tuple[_VectorRow, ...]:
+    merged: dict[str, _VectorRow] = {
+        row.vector_ref_id: row for row in _load_compacted_collection_rows(root, object_type)
+    }
+    for path in _segment_paths(root, object_type):
+        for row in _load_segment_rows(path):
+            merged[row.vector_ref_id] = row
+    return tuple(merged.values())
+
+
+def _load_compacted_collection_rows(
+    root: Path,
+    object_type: VectorObjectType,
+) -> tuple[_VectorRow, ...]:
     path = collection_path(root, object_type)
     if not path.exists():
         return ()
@@ -554,15 +614,82 @@ def write_collection_rows(
     root: Path,
     object_type: VectorObjectType,
     rows: Sequence[_VectorRow],
+    *,
+    compaction_checkpoint: Mapping[str, Any] | None = None,
 ) -> None:
     root.mkdir(parents=True, exist_ok=True)
     path = collection_path(root, object_type)
     payload = [vector_row_to_dict(row) for row in rows]
-    path.write_text(
+    _atomic_write_text(
+        path,
         json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-        encoding="utf-8",
     )
-    write_manifest(root)
+    _delete_segment_files(root, object_type)
+    _update_manifest_collection(
+        root,
+        object_type,
+        compacted_rows=rows,
+        segments=(),
+        segment_row_count=0,
+        compaction_checkpoint=compaction_checkpoint,
+    )
+
+
+def append_collection_segment(
+    root: Path,
+    object_type: VectorObjectType,
+    rows: Sequence[_VectorRow],
+    *,
+    job_id: str | None = None,
+) -> _VectorSegmentWrite | None:
+    if not rows:
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    directory = segment_dir(root, object_type)
+    directory.mkdir(parents=True, exist_ok=True)
+    safe_job_id = _segment_job_id(job_id)
+    filename = f"{safe_job_id}-part-{_next_segment_part(root, object_type, safe_job_id):06d}{_SEGMENT_FILE_SUFFIX}"
+    path = directory / filename
+    lines = [
+        json.dumps(vector_row_to_dict(row), ensure_ascii=True, sort_keys=True)
+        for row in rows
+    ]
+    _atomic_write_text(path, "".join(f"{line}\n" for line in lines))
+    segment_write = _VectorSegmentWrite(
+        filename=filename,
+        row_count=len(rows),
+        embedding_model_versions=tuple(sorted({row.embedding_model_version for row in rows})),
+    )
+    manifest = _read_manifest(root)
+    collection = _manifest_collection_entry(manifest, object_type)
+    segments = list(_manifest_segments(collection))
+    segments.append(filename)
+    _set_manifest_collection(
+        manifest,
+        object_type,
+        compacted_rows=_load_compacted_collection_rows(root, object_type),
+        segments=segments,
+        segment_row_count=int(collection.get("segment_row_count", 0)) + len(rows),
+        embedding_model_versions=tuple(
+            sorted(
+                {
+                    *(
+                        str(item)
+                        for item in collection.get("embedding_model_versions", [])
+                        if str(item)
+                    ),
+                    *segment_write.embedding_model_versions,
+                }
+            )
+        ),
+        last_compaction=(
+            collection.get("last_compaction")
+            if isinstance(collection.get("last_compaction"), dict)
+            else None
+        ),
+    )
+    _write_manifest_payload(root, manifest)
+    return segment_write
 
 
 def validate_collection_rows_written(
@@ -584,26 +711,273 @@ def validate_collection_rows_written(
 
 def write_manifest(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    previous_manifest = _read_manifest(root)
     collections: dict[str, dict[str, Any]] = {}
     for object_type in _COLLECTIONS:
-        rows = load_collection_rows(root, object_type)
-        if not rows:
+        compacted_rows = _load_compacted_collection_rows(root, object_type)
+        segments = [path.name for path in _segment_paths(root, object_type)]
+        segment_row_count = sum(len(_load_segment_rows(path)) for path in _segment_paths(root, object_type))
+        if not compacted_rows and not segments:
             continue
-        collections[object_type] = {
-            "row_count": len(rows),
-            "embedding_model_versions": sorted(
-                {row.embedding_model_version for row in rows},
+        last_compaction = _manifest_collection_entry(previous_manifest, object_type).get(
+            "last_compaction"
+        )
+        collections[object_type] = _build_manifest_collection(
+            compacted_rows=compacted_rows,
+            segments=segments,
+            segment_row_count=segment_row_count,
+            embedding_model_versions=tuple(
+                sorted(
+                    {
+                        *(row.embedding_model_version for row in compacted_rows),
+                        *(
+                            row.embedding_model_version
+                            for path in _segment_paths(root, object_type)
+                            for row in _load_segment_rows(path)
+                        ),
+                    }
+                )
             ),
-        }
+            last_compaction=last_compaction if isinstance(last_compaction, dict) else None,
+        )
     payload = {
         "schema_version": LATEST_VECTOR_SCHEMA_VERSION,
         "backend": "lancedb-fallback",
         "collections": collections,
     }
-    manifest_path(root).write_text(
-        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-        encoding="utf-8",
+    _write_manifest_payload(root, payload)
+
+
+def maybe_compact_collection(
+    root: Path,
+    object_type: VectorObjectType,
+    *,
+    requested_by_job_id: str | None = None,
+) -> bool:
+    manifest = _read_manifest(root)
+    collection = _manifest_collection_entry(manifest, object_type)
+    segment_paths = _segment_paths(root, object_type)
+    if not segment_paths:
+        return False
+    segment_row_count = int(collection.get("segment_row_count", 0))
+    if len(segment_paths) < _COMPACTION_SEGMENT_THRESHOLD and segment_row_count < _COMPACTION_ROW_THRESHOLD:
+        return False
+    rows = load_collection_rows(root, object_type)
+    write_collection_rows(
+        root,
+        object_type,
+        rows,
+        compaction_checkpoint={
+            "compacted_at": utc_now(),
+            "requested_by_job_id": requested_by_job_id,
+            "segment_count": len(segment_paths),
+            "segment_row_count": segment_row_count,
+            "row_count": len(rows),
+        },
     )
+    return True
+
+
+def utc_now() -> str:
+    return datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _load_segment_rows(path: Path) -> tuple[_VectorRow, ...]:
+    if not path.exists():
+        return ()
+    rows: list[_VectorRow] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        payload = json.loads(line)
+        if isinstance(payload, dict):
+            rows.append(vector_row_from_dict(payload))
+    return tuple(rows)
+
+
+def _segment_paths(root: Path, object_type: VectorObjectType) -> tuple[Path, ...]:
+    directory = segment_dir(root, object_type)
+    if not directory.exists():
+        return ()
+    manifest = _read_manifest(root)
+    collection = _manifest_collection_entry(manifest, object_type)
+    listed = _manifest_segments(collection)
+    ordered: list[Path] = []
+    seen: set[str] = set()
+    for filename in listed:
+        path = directory / filename
+        if path.exists():
+            ordered.append(path)
+            seen.add(filename)
+    for path in sorted(directory.glob(_SEGMENT_DISCOVERY_GLOB)):
+        if path.name in seen:
+            continue
+        ordered.append(path)
+    return tuple(ordered)
+
+
+def _delete_segment_files(root: Path, object_type: VectorObjectType) -> None:
+    directory = segment_dir(root, object_type)
+    if not directory.exists():
+        return
+    for path in directory.glob(_SEGMENT_DISCOVERY_GLOB):
+        path.unlink()
+    try:
+        directory.rmdir()
+    except OSError:
+        return
+
+
+def _next_segment_part(root: Path, object_type: VectorObjectType, job_id: str) -> int:
+    highest = 0
+    prefix = f"{job_id}-part-"
+    for path in segment_dir(root, object_type).glob(f"{prefix}*{_SEGMENT_FILE_SUFFIX}"):
+        suffix = path.stem
+        if not suffix.startswith(prefix):
+            continue
+        part = suffix[len(prefix) :]
+        if part.isdigit():
+            highest = max(highest, int(part))
+    return highest + 1
+
+
+def _segment_job_id(job_id: str | None) -> str:
+    raw = (job_id or _DEFAULT_SEGMENT_JOB_ID).strip()
+    cleaned = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in raw
+    )
+    return cleaned or _DEFAULT_SEGMENT_JOB_ID
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp_path.write_text(content, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _read_manifest(root: Path) -> dict[str, Any]:
+    path = manifest_path(root)
+    if not path.exists():
+        return {
+            "schema_version": LATEST_VECTOR_SCHEMA_VERSION,
+            "backend": "lancedb-fallback",
+            "collections": {},
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return {
+            "schema_version": LATEST_VECTOR_SCHEMA_VERSION,
+            "backend": "lancedb-fallback",
+            "collections": {},
+        }
+    collections = payload.get("collections")
+    if not isinstance(collections, dict):
+        payload["collections"] = {}
+    payload["schema_version"] = LATEST_VECTOR_SCHEMA_VERSION
+    payload["backend"] = "lancedb-fallback"
+    return cast(dict[str, Any], payload)
+
+
+def _write_manifest_payload(root: Path, payload: Mapping[str, Any]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(
+        manifest_path(root),
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
+    )
+
+
+def _manifest_collection_entry(
+    manifest: Mapping[str, Any],
+    object_type: VectorObjectType,
+) -> dict[str, Any]:
+    collections = manifest.get("collections", {})
+    if not isinstance(collections, dict):
+        return {}
+    entry = collections.get(object_type, {})
+    return cast(dict[str, Any], entry if isinstance(entry, dict) else {})
+
+
+def _manifest_segments(collection: Mapping[str, Any]) -> tuple[str, ...]:
+    segments = collection.get("segments", ())
+    if not isinstance(segments, list):
+        return ()
+    return tuple(str(item) for item in segments if str(item))
+
+
+def _update_manifest_collection(
+    root: Path,
+    object_type: VectorObjectType,
+    *,
+    compacted_rows: Sequence[_VectorRow],
+    segments: Sequence[str],
+    segment_row_count: int,
+    compaction_checkpoint: Mapping[str, Any] | None = None,
+) -> None:
+    manifest = _read_manifest(root)
+    last_compaction = compaction_checkpoint
+    previous_collection = _manifest_collection_entry(manifest, object_type)
+    if last_compaction is None:
+        previous = previous_collection.get("last_compaction")
+        last_compaction = previous if isinstance(previous, dict) else None
+    _set_manifest_collection(
+        manifest,
+        object_type,
+        compacted_rows=compacted_rows,
+        segments=segments,
+        segment_row_count=segment_row_count,
+        embedding_model_versions=tuple(
+            sorted({row.embedding_model_version for row in compacted_rows})
+        ),
+        last_compaction=last_compaction,
+    )
+    _write_manifest_payload(root, manifest)
+
+
+def _set_manifest_collection(
+    manifest: dict[str, Any],
+    object_type: VectorObjectType,
+    *,
+    compacted_rows: Sequence[_VectorRow],
+    segments: Sequence[str],
+    segment_row_count: int,
+    embedding_model_versions: Sequence[str],
+    last_compaction: Mapping[str, Any] | None,
+) -> None:
+    collections = manifest.setdefault("collections", {})
+    if not isinstance(collections, dict):
+        collections = {}
+        manifest["collections"] = collections
+    if not compacted_rows and not segments:
+        collections.pop(object_type, None)
+        return
+    collections[object_type] = _build_manifest_collection(
+        compacted_rows=compacted_rows,
+        segments=segments,
+        segment_row_count=segment_row_count,
+        embedding_model_versions=embedding_model_versions,
+        last_compaction=last_compaction,
+    )
+
+
+def _build_manifest_collection(
+    *,
+    compacted_rows: Sequence[_VectorRow],
+    segments: Sequence[str],
+    segment_row_count: int,
+    embedding_model_versions: Sequence[str],
+    last_compaction: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "row_count": len(compacted_rows),
+        "segment_count": len(segments),
+        "segment_row_count": segment_row_count,
+        "segments": list(segments),
+        "embedding_model_versions": sorted({str(item) for item in embedding_model_versions}),
+        "last_compaction": dict(last_compaction) if last_compaction is not None else None,
+    }
 
 
 def vector_row_from_dict(payload: dict[str, Any]) -> _VectorRow:

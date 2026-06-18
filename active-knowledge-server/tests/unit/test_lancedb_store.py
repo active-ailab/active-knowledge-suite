@@ -98,6 +98,27 @@ def read_collection(path: Path, object_type: str = "chunk") -> list[dict[str, ob
     return payload
 
 
+def read_manifest(path: Path) -> dict[str, object]:
+    manifest = path / "manifest.json"
+    assert manifest.exists()
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def read_segment_rows(path: Path, object_type: str = "chunk") -> list[dict[str, object]]:
+    directory = path / object_type
+    rows: list[dict[str, object]] = []
+    if not directory.exists():
+        return rows
+    for segment in sorted(directory.glob("*.jsonl")):
+        for line in segment.read_text(encoding="utf-8").splitlines():
+            payload = json.loads(line)
+            assert isinstance(payload, dict)
+            rows.append(payload)
+    return rows
+
+
 def test_vector_upsert_syncs_chunk_metadata_and_searches_across_baseline_and_delta(
     tmp_path: Path,
 ) -> None:
@@ -163,7 +184,10 @@ def test_vector_upsert_syncs_chunk_metadata_and_searches_across_baseline_and_del
     assert overlay_chunk.metadata["embedding_ref"] == "vec-overlay"
 
     assert len(read_collection(baseline_vectors)) == 1
-    assert len(read_collection(delta_vectors)) == 1
+    assert [row["vector_ref_id"] for row in read_segment_rows(delta_vectors)] == ["vec-overlay"]
+    manifest = read_manifest(delta_vectors)
+    chunk_manifest = manifest["collections"]["chunk"]
+    assert chunk_manifest["segment_count"] == 1
 
     result = vector_adapter.reader().search(
         VectorQuery(
@@ -236,7 +260,7 @@ def test_vector_batch_upsert_writes_collection_and_metadata_refs(tmp_path: Path)
     )
 
     assert [record.vector_ref_id for record in written] == ["vec-a", "vec-b"]
-    assert [row["vector_ref_id"] for row in read_collection(delta_vectors)] == ["vec-a", "vec-b"]
+    assert [row["vector_ref_id"] for row in read_segment_rows(delta_vectors)] == ["vec-a", "vec-b"]
     chunk_a = metadata_adapter.reader().get_chunk("chunk-a")
     chunk_b = metadata_adapter.reader().get_chunk("chunk-b")
     assert chunk_a is not None
@@ -263,16 +287,16 @@ def test_vector_upsert_validates_payload_before_metadata_refs(
         file_id="file-overlay",
         content_hash="hash:bad",
     )
-    original_write_collection_rows = lancedb_store.write_collection_rows
-
     def drop_collection_rows(
         root: Path,
         object_type: lancedb_store.VectorObjectType,
         rows: object,
+        *,
+        job_id: str | None = None,
     ) -> None:
-        original_write_collection_rows(root, object_type, ())
+        return None
 
-    monkeypatch.setattr(lancedb_store, "write_collection_rows", drop_collection_rows)
+    monkeypatch.setattr(lancedb_store, "append_collection_segment", drop_collection_rows)
     writer = vector_adapter.writer(StorageWriteRequest(target="overlay"))
 
     with pytest.raises(RuntimeError, match="vector payload validation failed"):
@@ -561,3 +585,93 @@ def test_deleting_delta_vectors_does_not_modify_baseline_payloads(tmp_path: Path
     assert deleted == 1
     assert (baseline_vectors / "chunk.json").read_text(encoding="utf-8") == baseline_before
     assert read_collection(delta_vectors) == []
+
+
+def test_overlay_vector_segments_compact_after_threshold_flush(tmp_path: Path) -> None:
+    metadata_adapter, vector_adapter, _baseline_vectors, delta_vectors = build_adapters(tmp_path)
+    seed_file(
+        metadata_adapter,
+        target="overlay",
+        file_id="file-overlay",
+        relative_path="knowledge-sources/api/compact.md",
+    )
+    writer = vector_adapter.writer(StorageWriteRequest(target="overlay", job_id="job-compact"))
+
+    for index in range(8):
+        chunk_id = f"chunk-{index}"
+        seed_chunk(
+            metadata_adapter,
+            target="overlay",
+            chunk_id=chunk_id,
+            file_id="file-overlay",
+            content_hash=f"hash:{index}",
+        )
+        writer.upsert_vector(
+            VectorRefRecord(
+                vector_ref_id=f"vec-{index}",
+                object_type="chunk",
+                object_id=chunk_id,
+                chunk_id=chunk_id,
+                embedding_model_version="bge-m3",
+                content_hash=f"hash:{index}",
+                profile_id="watch",
+            ),
+            embedding=(1.0, float(index)),
+        )
+
+    assert len(read_segment_rows(delta_vectors)) == 8
+    writer.flush()
+
+    compacted = read_collection(delta_vectors)
+    assert len(compacted) == 8
+    assert not (delta_vectors / "chunk").exists()
+    manifest = read_manifest(delta_vectors)
+    chunk_manifest = manifest["collections"]["chunk"]
+    assert chunk_manifest["segment_count"] == 0
+    assert chunk_manifest["last_compaction"]["requested_by_job_id"] == "job-compact"
+
+
+def test_orphan_overlay_vector_segment_is_hidden_without_metadata_ref(tmp_path: Path) -> None:
+    metadata_adapter, vector_adapter, _baseline_vectors, delta_vectors = build_adapters(tmp_path)
+    seed_file(
+        metadata_adapter,
+        target="overlay",
+        file_id="file-overlay",
+        relative_path="knowledge-sources/api/orphan.md",
+    )
+    seed_chunk(
+        metadata_adapter,
+        target="overlay",
+        chunk_id="chunk-orphan",
+        file_id="file-overlay",
+        content_hash="hash:orphan",
+    )
+    lancedb_store.append_collection_segment(
+        delta_vectors,
+        "chunk",
+        (
+            lancedb_store._VectorRow(  # type: ignore[attr-defined]
+                vector_ref_id="vec-orphan",
+                object_type="chunk",
+                object_id="chunk-orphan",
+                chunk_id="chunk-orphan",
+                embedding_model_version="bge-m3",
+                content_hash="hash:orphan",
+                source_scope="all",
+                profile_id="watch",
+                embedding=(1.0, 0.0),
+                metadata={},
+            ),
+        ),
+        job_id="job-orphan",
+    )
+
+    result = vector_adapter.reader().search(
+        VectorQuery(
+            embedding=(1.0, 0.0),
+            scope=QueryScope(snapshot_id="current", profile_id="watch"),
+            embedding_model_version="bge-m3",
+        )
+    )
+
+    assert result.matches == ()

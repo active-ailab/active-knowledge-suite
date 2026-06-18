@@ -411,6 +411,7 @@ class StorageWriteRequest:
 
     target: StorageWriteTarget
     operation_mode: StorageOperationMode = "normal"
+    job_id: str | None = None
 
 
 class StorageAccessError(ValueError):

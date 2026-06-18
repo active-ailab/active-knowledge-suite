@@ -983,17 +983,51 @@ TODO：
 
 ### AR5-03 vector delta segment 与 compaction
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR2-04`
 
 TODO：
 
-- [ ] 评估当前 JSON collection 全量读写热点。
-- [ ] 设计 append-only delta segment：`vectors/<object_type>/<job_id>-part-N.jsonl`。
-- [ ] query reader 合并 base + delta 或 compaction 后读取。
-- [ ] compaction 成功后 checkpoint，失败不影响已提交 metadata。
+- [x] 评估当前 JSON collection 全量读写热点。
+- [x] 设计 append-only delta segment：`vectors/<object_type>/<job_id>-part-N.jsonl`。
+- [x] query reader 合并 base + delta 或 compaction 后读取。
+- [x] compaction 成功后 checkpoint，失败不影响已提交 metadata。
+
+行业实践调研结论：
+
+- Apache Hudi 的 Merge-On-Read 把新写入先追加到 log file，再由 compaction 合并回 base file，用更低写放大换取可控的读放大；本项目对应把 overlay vector payload 改成 append-only segment，reader 负责合并，flush 后按阈值做 compaction。参考：https://hudi.apache.org/docs/compaction/ 与 https://hudi.apache.org/docs/concepts/
+- Qdrant 明确要求 point upsert 幂等、同 ID 重传覆盖旧值；本项目继续沿用稳定 `vector_ref_id`，segment 合并时按 `vector_ref_id` 取最后一条，保证重复 apply 或 resume replay 可以收敛。参考：https://qdrant.tech/documentation/manage-data/points/
+- Weaviate 批量导入建议把 ingestion 与 indexing 解耦，必要时启用 async indexing；本项目对应把“payload append 成功”与“compaction 成功”拆成两个边界，task applied checkpoint 只绑定 payload/ref 提交，compaction 只写 manifest checkpoint，不反向影响已提交 metadata。参考：https://docs.weaviate.io/weaviate/manage-objects/import
+- LanceDB 的 `merge_insert` / consistency 文档强调 upsert 与版本可见性分离；本地 fallback store 虽不直接使用 Lance table API，但继续保持“写后校验 payload，再提交 metadata ref，再由 reader 按 manifest 合并”的顺序，减少跨进程可见性歧义。参考：https://docs.lancedb.com/tables/update 与 https://docs.lancedb.com/tables/consistency
+
+完成记录：
+
+- `active_knowledge_server/storage/base.py` 为 `StorageWriteRequest` 增加可选 `job_id`，让 vector writer 能按 job 生成 segment 文件名。
+- `active_knowledge_server/indexing/pipeline.py` 在创建 overlay vector writer 时传入真实 `job_id`，segment 文件落盘格式为 `vectors/<object_type>/<job_id>-part-N.jsonl`。
+- `active_knowledge_server/storage/lancedb_store.py` 把 overlay `upsert_vectors(...)` 从“整 collection 读出、替换、整文件写回”改成 append-only segment 写入；baseline publish 仍保留 compacted collection 语义。
+- fallback reader 现在会合并 `chunk.json` + `chunk/*.jsonl`，并额外校验 metadata `vector_ref` 是否存在且与 payload 一致，避免 payload 先落盘时出现 orphan 向量被误召回。
+- manifest schema 升级为 `1.1.0`；collection metadata 新增 `segment_count`、`segment_row_count`、`segments` 和 `last_compaction`。其中 `last_compaction` 作为本地 compaction checkpoint，记录 `compacted_at`、`requested_by_job_id`、合并的 segment 数量和最终 row 数。
+- `vector_writer.flush()` 现在只做 best-effort compaction：达到阈值时把当前 live rows compact 到 `<object_type>.json`，然后清空 segment 目录；compaction 失败不会回滚已提交 payload/ref，也不会阻断已写 task checkpoint。
+- `tests/unit/test_lancedb_store.py` 新增覆盖：
+  - overlay upsert 写 segment 而不是重写 compacted collection；
+  - 多 segment flush 后触发 compaction，并把 checkpoint 写入 manifest；
+  - orphan payload 在缺少 metadata `vector_ref` 时不会被 query reader 返回。
+- `tests/unit/test_incremental_pipeline.py` 的向量读取 helper 已更新为读取 merged vector rows，确保 pipeline 回归测试覆盖新格式。
+
+真实工程验证：
+
+- 使用 `/home/gangan/ZeppOS` 作为真实 workspace；由于 source-docs connector 需要顶层分类目录，测试时把 ZeppOS `components/` 下 60 个真实 Markdown/HTML 文档映射到临时 `source-docs/engineering/components/...` 样本树后执行增量 docs 索引。
+- 默认 writer 批次配置下，实测 `59` 个成功文档触发 `413` 条 chunk vectors，overlay vector store 最终只生成 `chunk/index-...-part-000001.jsonl` 与 `manifest.json`，没有重写 `chunk.json`；manifest 记录 `segment_count=1`、`segment_row_count=413`。
+- 为了验证“多 batch 不重复整库重写”，把 writer 收紧到 `max_files_per_transaction=4`、`max_records_per_transaction=64` 后再次跑同一批 ZeppOS 文档，`vectors_apply` 被拆成 `20` 个 batch、`826` 条向量写入记录，最终 manifest 记录：
+  - `last_compaction.segment_count = 20`
+  - `last_compaction.segment_row_count = 413`
+  - `last_compaction.row_count = 413`
+  - `segment_count = 0`
+  - `row_count = 413`
+- 这说明真实工程样本下已经形成“多段 append -> 最终单次 compaction”的写路径，而不是每个 batch 都反复重写整个 collection。
+- 两次 ZeppOS 实测都存在 1 个 `package.html` 文档 collect partial，因此结果状态为 `partial_ready`；但成功文档的 metadata/vector apply 和 compaction 路径都已完整执行，不影响对 `AR5-03` 的验证。
 
 验收标准：
 

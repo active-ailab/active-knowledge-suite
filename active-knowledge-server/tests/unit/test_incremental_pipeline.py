@@ -50,7 +50,7 @@ from active_knowledge_server.indexing.pipeline import (
 )
 from active_knowledge_server.indexing.progress import IndexProgressEvent
 from active_knowledge_server.storage import QueryScope, StorageWriteRequest
-from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
+from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter, load_collection_rows
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
     migrate_sqlite_store,
@@ -448,12 +448,21 @@ def seed_baseline(
 
 
 def read_vector_collection(path: Path, object_type: str = "chunk") -> list[dict[str, object]]:
-    collection = path / f"{object_type}.json"
-    if not collection.exists():
-        return []
-    payload = json.loads(collection.read_text(encoding="utf-8"))
-    assert isinstance(payload, list)
-    return payload
+    return [
+        {
+            "vector_ref_id": row.vector_ref_id,
+            "object_type": row.object_type,
+            "object_id": row.object_id,
+            "chunk_id": row.chunk_id,
+            "embedding_model_version": row.embedding_model_version,
+            "content_hash": row.content_hash,
+            "source_scope": row.source_scope,
+            "profile_id": row.profile_id,
+            "embedding": list(row.embedding),
+            "metadata": dict(row.metadata),
+        }
+        for row in load_collection_rows(path, object_type)  # type: ignore[arg-type]
+    ]
 
 
 def overlay_count(path: Path, query: str, params: tuple[object, ...]) -> int:

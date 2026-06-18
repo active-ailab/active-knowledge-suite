@@ -1048,7 +1048,12 @@ class IncrementalIndexPipeline:
             mark_task_skipped(skipped_task)
         reader = self._metadata_adapter.reader()
         writer = self._metadata_adapter.writer(StorageWriteRequest(target="overlay"))
-        vector_writer = self._vector_adapter.writer(StorageWriteRequest(target="overlay"))
+        vector_writer = self._vector_adapter.writer(
+            StorageWriteRequest(
+                target="overlay",
+                job_id=None if run_context is None else run_context.job_id,
+            )
+        )
 
         warnings = list(plan.warnings)
         failed = False
