@@ -49,6 +49,7 @@ from active_knowledge_server.storage.base import (
     make_tombstone_id,
     validate_write_request,
 )
+from active_knowledge_server.storage.publish import resolve_published_storage_paths
 
 SQLiteTarget = Literal["baseline_metadata", "overlay_metadata", "jobs"]
 SQLiteJournalMode = Literal["delete", "wal"]
@@ -677,13 +678,28 @@ def configured_sqlite_paths(
     config: ActiveKnowledgeConfig,
     *,
     cwd: Path,
+    follow_publish_pointer: bool = True,
 ) -> dict[SQLiteTarget, Path]:
     """Resolve configured SQLite store paths for each target."""
 
+    baseline_metadata_path = resolve_runtime_path(config.storage.metadata.path, cwd)
+    overlay_metadata_path = resolve_runtime_path(config.storage.overlay.path, cwd)
+    jobs_path = resolve_runtime_path(config.storage.jobs.path, cwd)
+    if follow_publish_pointer:
+        baseline_vector_path = resolve_runtime_path(config.storage.vector.path, cwd)
+        overlay_vector_path = resolve_runtime_path(config.storage.vector_delta.path, cwd)
+        baseline_metadata_path, _ = resolve_published_storage_paths(
+            metadata_anchor_path=baseline_metadata_path,
+            vector_anchor_path=baseline_vector_path,
+        )
+        overlay_metadata_path, _ = resolve_published_storage_paths(
+            metadata_anchor_path=overlay_metadata_path,
+            vector_anchor_path=overlay_vector_path,
+        )
     return {
-        "baseline_metadata": resolve_runtime_path(config.storage.metadata.path, cwd),
-        "overlay_metadata": resolve_runtime_path(config.storage.overlay.path, cwd),
-        "jobs": resolve_runtime_path(config.storage.jobs.path, cwd),
+        "baseline_metadata": baseline_metadata_path,
+        "overlay_metadata": overlay_metadata_path,
+        "jobs": jobs_path,
     }
 
 

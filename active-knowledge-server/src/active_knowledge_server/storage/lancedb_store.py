@@ -31,6 +31,7 @@ from active_knowledge_server.storage.base import (
     VectorSearchResult,
     validate_write_request,
 )
+from active_knowledge_server.storage.publish import resolve_published_storage_paths
 from active_knowledge_server.storage.sqlite_store import SQLiteStorageAdapter
 
 VectorObjectType = Literal["chunk", "entity", "evidence"]
@@ -85,12 +86,26 @@ def configured_lancedb_paths(
     config: ActiveKnowledgeConfig,
     *,
     cwd: Path,
+    follow_publish_pointer: bool = True,
 ) -> dict[Literal["baseline", "overlay"], Path]:
     """Resolve configured baseline and delta vector-store roots."""
 
+    baseline_metadata_path = resolve_runtime_path(config.storage.metadata.path, cwd)
+    overlay_metadata_path = resolve_runtime_path(config.storage.overlay.path, cwd)
+    baseline_vector_path = resolve_runtime_path(config.storage.vector.path, cwd)
+    overlay_vector_path = resolve_runtime_path(config.storage.vector_delta.path, cwd)
+    if follow_publish_pointer:
+        _, baseline_vector_path = resolve_published_storage_paths(
+            metadata_anchor_path=baseline_metadata_path,
+            vector_anchor_path=baseline_vector_path,
+        )
+        _, overlay_vector_path = resolve_published_storage_paths(
+            metadata_anchor_path=overlay_metadata_path,
+            vector_anchor_path=overlay_vector_path,
+        )
     return {
-        "baseline": resolve_runtime_path(config.storage.vector.path, cwd),
-        "overlay": resolve_runtime_path(config.storage.vector_delta.path, cwd),
+        "baseline": baseline_vector_path,
+        "overlay": overlay_vector_path,
     }
 
 

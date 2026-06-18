@@ -1082,23 +1082,33 @@ TODO：
 
 ### AR6-02 validate 后 publish pointer
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`IMPL`、`TEST`
 - 依赖：`AR6-01`
 
 TODO：
 
-- [ ] staging build 完成后运行 critical validation。
-- [ ] SQLite WAL checkpoint/truncate 并关闭连接。
-- [ ] metadata DB 使用 `os.replace` 或 manifest pointer 切换。
-- [ ] vector directory 使用 versioned path + pointer manifest，避免目录替换非原子。
-- [ ] publish 成功后 job ready，失败后 live 仍指向旧版本。
+- [x] staging build 完成后运行 critical validation。
+- [x] SQLite WAL checkpoint/truncate 并关闭连接。
+- [x] metadata DB 使用 versioned DB + publish manifest pointer 切换。
+- [x] vector directory 使用 versioned path + pointer manifest，避免目录替换非原子。
+- [x] publish 成功后 job ready，失败后 live 仍指向旧版本。
 
 验收标准：
 
 - publish 前崩溃不影响旧 live index。
 - publish 后 query 使用新版本。
+
+实现备注：
+
+- full local/baseline build 现在真正写入 staging storage，而不是只在 jobs metadata 里记录 staging path。
+- publish 改成两段式：先把 staging metadata/vector 物化到 versioned artifact；只有最后一步才原子替换 `*.publish.json` pointer，因此 publish 前崩溃不会污染旧 live。
+- live reader/writer 通过 publish manifest 解析当前 metadata/vector 版本；staging path resolver 继续固定使用配置 anchor，不受当前 live pointer 干扰。
+- 本地单测已覆盖“materialize 前后 live 不切换”和“staging resolver 忽略 active pointer”。
+- 真实工程 smoke：
+  - `/home/gangan/ZeppOS` 整仓 full code 已验证能进入真实 staging job 链路，并生成稳定 staging path。
+  - 基于 `/home/gangan/ZeppOS/components/gui/storyboard` 的真实代表性子集，在补齐 baseline metadata 后复跑 `local full code`，结果 `validation.status=ok`、`publish.status=published`、job `status=ready`，且正式配置解析到新的 versioned live path。
 
 ### AR6-03 旧 staging/live 版本清理
 

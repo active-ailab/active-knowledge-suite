@@ -61,8 +61,8 @@ def resolve_live_storage_paths(
 ) -> ResolvedStoragePaths:
     """Return the configured live metadata/vector paths for one write target."""
 
-    sqlite_paths = configured_sqlite_paths(config, cwd=cwd)
-    vector_paths = configured_lancedb_paths(config, cwd=cwd)
+    sqlite_paths = configured_sqlite_paths(config, cwd=cwd, follow_publish_pointer=False)
+    vector_paths = configured_lancedb_paths(config, cwd=cwd, follow_publish_pointer=False)
     if target == "baseline":
         return ResolvedStoragePaths(
             metadata_path=sqlite_paths["baseline_metadata"],

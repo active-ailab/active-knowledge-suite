@@ -104,12 +104,17 @@ from active_knowledge_server.storage import (
     StorageMetadata,
     StorageWriteRequest,
     StorageWriteTarget,
+    activate_published_storage,
+    configured_lancedb_paths,
+    materialize_published_storage,
+    resolve_published_storage_for_job,
     resolve_staging_storage_paths,
 )
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
+    checkpoint_sqlite_database,
     configured_sqlite_paths,
     migrate_local_sqlite_stores,
     migrate_sqlite_store,
@@ -1244,6 +1249,11 @@ def _run_index_command(
             source=source,
             operation_mode="baseline_publish" if target == "baseline" else "normal",
             progress_callback=job_progress_callback,
+            staging_storage=cast(
+                Mapping[str, object] | None,
+                job_context.job.metadata.get("staging_storage"),
+            ),
+            job_id=job_context.job.job_id,
         )
     except KeyboardInterrupt:
         mark_index_job_interrupted(job_context)
@@ -2979,6 +2989,8 @@ def run_full_index(
     source: str,
     operation_mode: str,
     progress_callback=None,
+    staging_storage: Mapping[str, object] | None = None,
+    job_id: str | None = None,
 ) -> dict[str, object]:
     """Execute one full indexing pass for local overlay or baseline target."""
 
@@ -2987,28 +2999,34 @@ def run_full_index(
     callback = progress_callback or noop_progress_callback
     started_at = utc_timestamp()
     write_target = storage_write_target_for_cli_target(target)
+    runtime_model = _resolve_full_index_runtime_model(
+        model,
+        cwd=cwd,
+        target=write_target,
+        staging_storage=staging_storage,
+    )
     request = StorageWriteRequest(
         target=write_target, operation_mode=cast(Any, operation_mode)
     )
 
     if target == "baseline":
-        baseline_path = configured_sqlite_paths(model, cwd=cwd)["baseline_metadata"]
+        baseline_path = configured_sqlite_paths(runtime_model, cwd=cwd)["baseline_metadata"]
         migrate_sqlite_store(baseline_path, target="baseline_metadata")
     else:
-        migrate_local_sqlite_stores(model, cwd=cwd)
+        migrate_local_sqlite_stores(runtime_model, cwd=cwd)
 
-    metadata_adapter = SQLiteStorageAdapter.from_config(model, cwd=cwd)
+    metadata_adapter = SQLiteStorageAdapter.from_config(runtime_model, cwd=cwd)
     vector_adapter = LanceDBVectorAdapter.from_config(
-        model, cwd=cwd, metadata_adapter=metadata_adapter
+        runtime_model, cwd=cwd, metadata_adapter=metadata_adapter
     )
     writer = metadata_adapter.writer(request)
     vector_writer = vector_adapter.writer(request)
     workspace_inventory = None
     if source in {"all", "code"}:
-        workspace_inventory = WorkspaceConnector.from_config(model, cwd=cwd).scan()
+        workspace_inventory = WorkspaceConnector.from_config(runtime_model, cwd=cwd).scan()
     source_docs_manifest = None
     if source in {"all", "docs"}:
-        source_docs_manifest = SourceDocsConnector.from_config(model, cwd=cwd).scan()
+        source_docs_manifest = SourceDocsConnector.from_config(runtime_model, cwd=cwd).scan()
 
     code_collect_total = (
         0 if workspace_inventory is None else count_indexable_workspace_files(workspace_inventory)
@@ -3017,6 +3035,8 @@ def run_full_index(
     vectors_apply_total = int(source_docs_manifest is not None)
     profile_relations_total = int(source in {"all", "code"})
     workspace_map_total = int(source in {"all", "code"})
+    validation_total = int(staging_storage is not None)
+    publish_total = int(staging_storage is not None)
     global_total = (
         1
         + 2
@@ -3025,12 +3045,14 @@ def run_full_index(
         + vectors_apply_total
         + profile_relations_total
         + workspace_map_total
+        + validation_total
+        + publish_total
     )
     global_done = 0
     result_metadata: dict[str, object] = {
         "writer": {
-            "batch_size": model.indexing.writer.batch_size,
-            "commit_interval_ms": model.indexing.writer.commit_interval_ms,
+            "batch_size": runtime_model.indexing.writer.batch_size,
+            "commit_interval_ms": runtime_model.indexing.writer.commit_interval_ms,
         },
         "timings": {
             "parser_seconds": 0.0,
@@ -3069,7 +3091,7 @@ def run_full_index(
     global_done += 1
     emit(phase="plan", stage_total=1, stage_done=1, message="Full index plan ready")
 
-    snapshot = SnapshotCollector.from_config(model, cwd=cwd).collect_and_store(writer)
+    snapshot = SnapshotCollector.from_config(runtime_model, cwd=cwd).collect_and_store(writer)
     global_done += 1
     emit(
         phase="discover",
@@ -3078,7 +3100,7 @@ def run_full_index(
         current_path=snapshot.snapshot_record.snapshot_id,
         message="Collecting snapshot metadata",
     )
-    profiles = ProfileCollector.from_config(model, cwd=cwd).collect_and_store(
+    profiles = ProfileCollector.from_config(runtime_model, cwd=cwd).collect_and_store(
         writer,
         snapshot_id=snapshot.snapshot_record.snapshot_id,
     )
@@ -3111,7 +3133,7 @@ def run_full_index(
                 )
             )
 
-        code_records = CodeIndexer.from_config(model, cwd=cwd).collect_and_store(
+        code_records = CodeIndexer.from_config(runtime_model, cwd=cwd).collect_and_store(
             writer,
             snapshot_id=snapshot.snapshot_record.snapshot_id,
             workspace_inventory=workspace_inventory,
@@ -3140,7 +3162,7 @@ def run_full_index(
                 )
             )
 
-        doc_records = DocumentIndexer.from_config(model, cwd=cwd).collect_and_store(
+        doc_records = DocumentIndexer.from_config(runtime_model, cwd=cwd).collect_and_store(
             writer,
             vector_writer=vector_writer,
             snapshot_id=snapshot.snapshot_record.snapshot_id,
@@ -3185,7 +3207,7 @@ def run_full_index(
 
     if source in {"all", "code"}:
         workspace_map_started_at = time.perf_counter()
-        WorkspaceMapBuilder.from_config(model, cwd=cwd).collect_and_write(
+        WorkspaceMapBuilder.from_config(runtime_model, cwd=cwd).collect_and_write(
             snapshot_id=snapshot.snapshot_record.snapshot_id,
             workspace_inventory=workspace_inventory,
             reader=metadata_adapter.reader(),
@@ -3203,6 +3225,63 @@ def run_full_index(
         assert isinstance(timings, dict)
         timings["workspace_map_seconds"] = round(time.perf_counter() - workspace_map_started_at, 6)
 
+    metadata_adapter.close()
+    vector_adapter.close()
+
+    result_status = "ready"
+    if staging_storage is not None:
+        emit(
+            phase="validate",
+            stage_total=1,
+            stage_done=0,
+            message="Running staging storage validation",
+        )
+        validation_report = validate_storage_consistency(runtime_model, cwd=cwd, mode="full")
+        result_metadata["validation"] = validation_report.to_dict()
+        global_done += 1
+        emit(
+            phase="validate",
+            stage_total=1,
+            stage_done=1,
+            message=f"Staging validation finished ({validation_report.status})",
+        )
+        if validation_report.status != "ok":
+            result_status = "partial_ready"
+            global_done += 1
+            result_metadata["publish"] = {
+                "status": "skipped",
+                "reason": "validation_not_ok",
+                "validation_status": validation_report.status,
+            }
+            emit(
+                phase="publish",
+                stage_total=1,
+                stage_done=1,
+                message="Skipped publish pointer switch because staging validation did not pass",
+            )
+        else:
+            emit(
+                phase="publish",
+                stage_total=1,
+                stage_done=0,
+                message="Checkpointing staging SQLite and switching publish pointer",
+            )
+            publish_payload = _publish_full_index_storage(
+                runtime_model=runtime_model,
+                cwd=cwd,
+                target=write_target,
+                staging_storage=staging_storage,
+                job_id=job_id,
+            )
+            result_metadata["publish"] = publish_payload
+            global_done += 1
+            emit(
+                phase="publish",
+                stage_total=1,
+                stage_done=1,
+                message="Published new live storage pointer",
+            )
+
     emit(
         phase="done",
         stage_total=1,
@@ -3213,7 +3292,7 @@ def run_full_index(
 
     return {
         "schema_version": "index_full_result.v1",
-        "result_status": "ready",
+        "result_status": result_status,
         "target": target,
         "operation_mode": operation_mode,
         "snapshot_id": snapshot.snapshot_record.snapshot_id,
@@ -3235,6 +3314,129 @@ def run_full_index(
         else relation_records.schema_version,
         "metadata": result_metadata,
     }
+
+
+def _resolve_full_index_runtime_model(
+    model: Any,
+    *,
+    cwd: Path,
+    target: StorageWriteTarget,
+    staging_storage: Mapping[str, object] | None,
+) -> Any:
+    if staging_storage is None:
+        return model
+    live_sqlite_paths = configured_sqlite_paths(model, cwd=cwd)
+    live_vector_paths = configured_lancedb_paths(model, cwd=cwd)
+    storage = model.storage
+    staging = _require_mapping(staging_storage, "staging")
+    target_metadata_path = Path(_require_mapping_text(staging, "metadata_path"))
+    target_vector_path = Path(_require_mapping_text(staging, "vector_path"))
+    if target == "baseline":
+        return model.model_copy(
+            update={
+                "storage": storage.model_copy(
+                    update={
+                        "metadata": storage.metadata.model_copy(
+                            update={"path": str(target_metadata_path), "mode": "readwrite"}
+                        ),
+                        "overlay": storage.overlay.model_copy(
+                            update={"path": str(live_sqlite_paths["overlay_metadata"])}
+                        ),
+                        "vector": storage.vector.model_copy(
+                            update={"path": str(target_vector_path), "mode": "readwrite"}
+                        ),
+                        "vector_delta": storage.vector_delta.model_copy(
+                            update={"path": str(live_vector_paths["overlay"])}
+                        ),
+                    }
+                )
+            }
+        )
+    return model.model_copy(
+        update={
+            "storage": storage.model_copy(
+                update={
+                    "metadata": storage.metadata.model_copy(
+                        update={"path": str(live_sqlite_paths["baseline_metadata"])}
+                    ),
+                    "overlay": storage.overlay.model_copy(
+                        update={"path": str(target_metadata_path), "mode": "readwrite"}
+                    ),
+                    "vector": storage.vector.model_copy(
+                        update={"path": str(live_vector_paths["baseline"])}
+                    ),
+                    "vector_delta": storage.vector_delta.model_copy(
+                        update={"path": str(target_vector_path), "mode": "readwrite"}
+                    ),
+                }
+            )
+        }
+    )
+
+
+def _publish_full_index_storage(
+    *,
+    runtime_model: Any,
+    cwd: Path,
+    target: StorageWriteTarget,
+    staging_storage: Mapping[str, object],
+    job_id: str | None,
+) -> dict[str, object]:
+    if not job_id:
+        raise ValueError("full staging publish requires a persisted job_id")
+    live = _require_mapping(staging_storage, "live")
+    staging = _require_mapping(staging_storage, "staging")
+    publish_token = str(staging_storage.get("job_token", "")).strip()
+    if not publish_token:
+        raise ValueError("staging_storage.job_token must not be empty")
+    staging_metadata_path = Path(_require_mapping_text(staging, "metadata_path"))
+    staging_vector_path = Path(_require_mapping_text(staging, "vector_path"))
+    published = resolve_published_storage_for_job(
+        target=target,
+        job_id=job_id,
+        publish_token=publish_token,
+        metadata_anchor_path=Path(_require_mapping_text(live, "metadata_path")),
+        vector_anchor_path=Path(_require_mapping_text(live, "vector_path")),
+    )
+    checkpoint_result = checkpoint_sqlite_database(staging_metadata_path, mode="truncate")
+    materialize_published_storage(
+        staging_metadata_path=staging_metadata_path,
+        staging_vector_path=staging_vector_path,
+        published=published,
+    )
+    activate_published_storage(published)
+    return {
+        "status": "published",
+        "target": target,
+        "published_storage": published.to_dict(),
+        "sqlite_checkpoint": None
+        if checkpoint_result is None
+        else {
+            "mode": checkpoint_result.mode,
+            "busy": checkpoint_result.busy,
+            "log_frames": checkpoint_result.log_frames,
+            "checkpointed_frames": checkpoint_result.checkpointed_frames,
+        },
+        "resolved_live_storage": {
+            "metadata_path": str(published.metadata_path),
+            "vector_path": str(published.vector_path),
+            "manifest_path": str(published.manifest_path),
+        },
+    }
+
+
+def _require_mapping(value: Mapping[str, object], key: str) -> Mapping[str, object]:
+    nested = value.get(key)
+    if not isinstance(nested, Mapping):
+        raise ValueError(f"staging_storage.{key} must be a mapping")
+    return cast(Mapping[str, object], nested)
+
+
+def _require_mapping_text(value: Mapping[str, object], key: str) -> str:
+    raw = value.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"staging_storage.{key} must be a non-empty string")
+    return raw
 
 
 def _merge_index_result_metadata(

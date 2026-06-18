@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import sqlite3
 from pathlib import Path
 
 from active_knowledge_server.cli import (
@@ -11,6 +13,11 @@ from active_knowledge_server.cli import (
 )
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.storage import (
+    activate_published_storage,
+    configured_lancedb_paths,
+    configured_sqlite_paths,
+    materialize_published_storage,
+    resolve_published_storage_for_job,
     resolve_staging_storage_paths,
     staging_job_token,
 )
@@ -169,3 +176,139 @@ def test_prepare_nonresumable_full_job_persists_staging_storage_metadata(
             INDEX_JOB_LOCK_ID,
             owner_job_id=job_context.job.job_id,
         )
+
+
+def test_publish_pointer_switch_keeps_old_live_until_activation(tmp_path: Path) -> None:
+    resolved = resolve_test_config(tmp_path)
+    raw_sqlite_paths = configured_sqlite_paths(
+        resolved.model,
+        cwd=tmp_path,
+        follow_publish_pointer=False,
+    )
+    raw_vector_paths = configured_lancedb_paths(
+        resolved.model,
+        cwd=tmp_path,
+        follow_publish_pointer=False,
+    )
+    _write_marker_db(raw_sqlite_paths["overlay_metadata"], "old-live")
+    _write_vector_marker(raw_vector_paths["overlay"], "old-live")
+
+    staging = resolve_staging_storage_paths(
+        resolved.model,
+        cwd=tmp_path,
+        target="overlay",
+        job_id="index:publish-pointer-smoke",
+    )
+    _write_marker_db(staging.staging.metadata_path, "new-staging")
+    _write_vector_marker(staging.staging.vector_path, "new-staging")
+
+    published = resolve_published_storage_for_job(
+        target="overlay",
+        job_id=staging.job_id,
+        publish_token=staging.job_token,
+        metadata_anchor_path=staging.live.metadata_path,
+        vector_anchor_path=staging.live.vector_path,
+    )
+    materialize_published_storage(
+        staging_metadata_path=staging.staging.metadata_path,
+        staging_vector_path=staging.staging.vector_path,
+        published=published,
+    )
+
+    assert not staging.staging.metadata_path.exists()
+    assert not staging.staging.vector_path.exists()
+    assert configured_sqlite_paths(resolved.model, cwd=tmp_path)["overlay_metadata"] == (
+        raw_sqlite_paths["overlay_metadata"]
+    )
+    assert configured_lancedb_paths(resolved.model, cwd=tmp_path)["overlay"] == (
+        raw_vector_paths["overlay"]
+    )
+    assert _read_marker_db(raw_sqlite_paths["overlay_metadata"]) == "old-live"
+    assert _read_vector_marker(raw_vector_paths["overlay"]) == "old-live"
+
+    activate_published_storage(published)
+
+    assert configured_sqlite_paths(resolved.model, cwd=tmp_path)["overlay_metadata"] == (
+        published.metadata_path
+    )
+    assert configured_lancedb_paths(resolved.model, cwd=tmp_path)["overlay"] == (
+        published.vector_path
+    )
+    assert _read_marker_db(configured_sqlite_paths(resolved.model, cwd=tmp_path)["overlay_metadata"]) == (
+        "new-staging"
+    )
+    assert _read_vector_marker(configured_lancedb_paths(resolved.model, cwd=tmp_path)["overlay"]) == (
+        "new-staging"
+    )
+
+
+def test_staging_resolution_ignores_active_publish_pointer(tmp_path: Path) -> None:
+    resolved = resolve_test_config(tmp_path)
+    staging = resolve_staging_storage_paths(
+        resolved.model,
+        cwd=tmp_path,
+        target="overlay",
+        job_id="index:staging-before-pointer",
+    )
+    published = resolve_published_storage_for_job(
+        target="overlay",
+        job_id=staging.job_id,
+        publish_token=staging.job_token,
+        metadata_anchor_path=staging.live.metadata_path,
+        vector_anchor_path=staging.live.vector_path,
+    )
+    published.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    published.metadata_path.write_text("db-placeholder", encoding="utf-8")
+    published.vector_path.mkdir(parents=True, exist_ok=True)
+    _write_vector_marker(published.vector_path, "published")
+    activate_published_storage(published)
+
+    resolved_paths = resolve_staging_storage_paths(
+        resolved.model,
+        cwd=tmp_path,
+        target="overlay",
+        job_id="index:staging-after-pointer",
+    )
+
+    assert resolved_paths.live.metadata_path == staging.live.metadata_path
+    assert resolved_paths.live.vector_path == staging.live.vector_path
+
+
+def _write_marker_db(path: Path, marker: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS marker(value TEXT NOT NULL)")
+        connection.execute("DELETE FROM marker")
+        connection.execute("INSERT INTO marker(value) VALUES (?)", (marker,))
+        connection.commit()
+
+
+def _read_marker_db(path: Path) -> str:
+    with sqlite3.connect(path) as connection:
+        row = connection.execute("SELECT value FROM marker LIMIT 1").fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _write_vector_marker(root: Path, marker: str) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "1.1.0",
+                "backend": "lancedb-fallback",
+                "collections": {},
+                "marker": marker,
+            },
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _read_vector_marker(root: Path) -> str:
+    payload = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return str(payload["marker"])
