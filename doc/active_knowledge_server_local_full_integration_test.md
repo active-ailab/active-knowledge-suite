@@ -215,6 +215,112 @@ uv run python scripts/manual_resume_smoke.py \
 - 第二轮 JSON 满足 `status=ok`、`job.resumed=true`、`job.tasks_skipped > 0`。
 - `uv run active-kb validate --config "$RESUME_CONFIG" --strict --format json` 返回 `status=ok`。
 
+### 2.2 Full staging resolver smoke（AR6-01）
+
+这一步专门验证 `AR6-01` 新增的 staging storage resolver，不要求真正执行 full build publish。推荐直接对真实工程 `/home/gangan/ZeppOS` 跑，因为 resolver 依赖的正是“真实配置 + 真实 workdir + 真实 job id”。
+
+建议新增一组隔离变量：
+
+```bash
+STAGING_WORKSPACE=/home/gangan/ZeppOS
+STAGING_WORKDIR=/tmp/active-kb-ar6-01-staging
+STAGING_ARTIFACTS="$STAGING_WORKDIR/artifacts"
+STAGING_CONFIG="$STAGING_WORKDIR/staging-smoke.yaml"
+STAGING_JOB_ID="index:full-staging-smoke"
+
+mkdir -p "$STAGING_ARTIFACTS"
+```
+
+先按和 resume smoke 相同的方式生成隔离配置：
+
+```bash
+rm -rf "$STAGING_WORKDIR"
+mkdir -p "$STAGING_ARTIFACTS"
+export CONFIG STAGING_WORKSPACE STAGING_WORKDIR STAGING_CONFIG
+
+uv run python - <<'PY'
+import os
+from pathlib import Path
+
+import yaml
+from active_knowledge_server.config.loader import set_nested
+
+config_path = Path(os.environ["CONFIG"])
+staging_config = Path(os.environ["STAGING_CONFIG"])
+staging_workdir = Path(os.environ["STAGING_WORKDIR"])
+baseline_dir = staging_workdir / "baseline"
+local_dir = staging_workdir / "local"
+payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+
+set_nested(payload, ("runtime", "workdir"), str(staging_workdir))
+set_nested(payload, ("runtime", "baseline_dir"), str(baseline_dir))
+set_nested(payload, ("runtime", "local_dir"), str(local_dir))
+set_nested(payload, ("project", "workspace_root"), os.environ["STAGING_WORKSPACE"])
+set_nested(payload, ("storage", "baseline", "manifest"), str(baseline_dir / "manifest.json"))
+set_nested(payload, ("storage", "metadata", "path"), str(baseline_dir / "db" / "metadata.db"))
+set_nested(payload, ("storage", "overlay", "path"), str(local_dir / "db" / "overlay.db"))
+set_nested(payload, ("storage", "jobs", "path"), str(local_dir / "db" / "jobs.db"))
+set_nested(payload, ("storage", "vector", "path"), str(baseline_dir / "vectors" / "lancedb"))
+set_nested(payload, ("storage", "vector_delta", "path"), str(local_dir / "vectors" / "lancedb-delta"))
+set_nested(payload, ("storage", "artifacts_root"), str(baseline_dir / "artifacts"))
+set_nested(payload, ("storage", "local_artifacts_root"), str(local_dir / "artifacts"))
+set_nested(payload, ("storage", "cache_root"), str(local_dir / "cache"))
+
+staging_config.write_text(
+    yaml.safe_dump(payload, sort_keys=False, allow_unicode=False),
+    encoding="utf-8",
+)
+print(staging_config)
+PY
+```
+
+然后直接调用 resolver，确认同一 `job_id` 能推导出稳定的 staging metadata/vector path：
+
+```bash
+uv run python - <<'PY' | tee "$STAGING_ARTIFACTS/resolver.json"
+import json
+import os
+from pathlib import Path
+
+from active_knowledge_server.config.loader import resolve_config
+from active_knowledge_server.storage import resolve_staging_storage_paths
+
+config_path = Path(os.environ["STAGING_CONFIG"])
+job_id = os.environ["STAGING_JOB_ID"]
+resolved = resolve_config(config_path=config_path, cwd=Path.cwd())
+
+overlay = resolve_staging_storage_paths(
+    resolved.model,
+    cwd=Path.cwd(),
+    target="overlay",
+    job_id=job_id,
+)
+baseline = resolve_staging_storage_paths(
+    resolved.model,
+    cwd=Path.cwd(),
+    target="baseline",
+    job_id=job_id,
+)
+
+print(json.dumps(
+    {
+        "job_id": job_id,
+        "overlay": overlay.to_dict(),
+        "baseline": baseline.to_dict(),
+    },
+    ensure_ascii=False,
+    indent=2,
+))
+PY
+```
+
+通过标准：
+
+- `resolver.json` 中的 `overlay.staging.metadata_path` 落在 `$STAGING_WORKDIR/local/db/` 下，且文件名形如 `overlay.staging.<job_token>.db`。
+- `resolver.json` 中的 `baseline.staging.metadata_path` 落在 `$STAGING_WORKDIR/baseline/db/` 下，且文件名形如 `metadata.staging.<job_token>.db`。
+- 同一个 `STAGING_JOB_ID` 重跑两次，`job_token`、metadata path、vector path 完全一致。
+- 当前阶段只验证 resolver 和 job metadata 约定；真正“full build 写 staging、validate 后 publish”要等 `AR6-02`。
+
 上面的 `serve --format json` 只验证 runtime wiring，不会阻塞当前终端。接着补一段 live query smoke，直接调用与 MCP 同一套 tool handler：
 
 ```bash

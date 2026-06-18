@@ -104,6 +104,7 @@ from active_knowledge_server.storage import (
     StorageMetadata,
     StorageWriteRequest,
     StorageWriteTarget,
+    resolve_staging_storage_paths,
 )
 from active_knowledge_server.storage.lancedb_store import LanceDBVectorAdapter
 from active_knowledge_server.storage.maintenance import clean_local_state
@@ -1346,6 +1347,9 @@ def build_index_job_payload(
         "tasks_applied": None if job_context is None else job_context.tasks_applied,
         "tasks_skipped": None if job_context is None else job_context.tasks_skipped,
         "tasks_failed": None if job_context is None else job_context.tasks_failed,
+        "staging_storage": (
+            None if job_context is None else job_context.job.metadata.get("staging_storage")
+        ),
     }
 
 
@@ -1505,10 +1509,11 @@ def prepare_nonresumable_index_job(
     migrate_sqlite_store(paths["jobs"], target="jobs")
     store = SQLiteJobStore(paths["jobs"])
     planned_job_id = _optional_nonempty_text(resume_policy.get("planned_job_id"))
+    write_target = storage_write_target_for_cli_target(target)
     job = store.create_job(
         job_id=planned_job_id,
         job_type="index",
-        write_target=storage_write_target_for_cli_target(target),
+        write_target=write_target,
         snapshot_id=CURRENT_SNAPSHOT_ID,
         profile_id=ALL_SCOPE,
         metadata=build_index_job_metadata(
@@ -1520,6 +1525,14 @@ def prepare_nonresumable_index_job(
             tasks_total=None,
         ),
     )
+    staging_storage = None
+    if mode == "full":
+        staging_storage = resolve_staging_storage_paths(
+            resolved.model,
+            cwd=Path.cwd(),
+            target=write_target,
+            job_id=job.job_id,
+        ).to_dict()
     store.acquire_lock(
         INDEX_JOB_LOCK_ID,
         owner_job_id=job.job_id,
@@ -1542,6 +1555,7 @@ def prepare_nonresumable_index_job(
             "tasks_applied": None,
             "tasks_skipped": None,
             "tasks_failed": None,
+            **({} if staging_storage is None else {"staging_storage": staging_storage}),
         },
     )
     return IndexJobContext(

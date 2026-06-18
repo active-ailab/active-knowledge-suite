@@ -65,6 +65,14 @@ from active_knowledge_server.storage.sqlite_store import (
     migrate_sqlite_store,
     plan_sqlite_migration,
 )
+from active_knowledge_server.storage.staging import (
+    STAGING_STORAGE_SCHEMA_VERSION,
+    ResolvedStoragePaths,
+    StagingStoragePaths,
+    resolve_live_storage_paths,
+    resolve_staging_storage_paths,
+    staging_job_token,
+)
 from active_knowledge_server.storage.validation import (
     StorageValidationCheck,
     StorageValidationReport,
@@ -93,8 +101,11 @@ __all__ = [
     "RelationValidationIssue",
     "ReplacementRecord",
     "ReplacementResolution",
+    "ResolvedStoragePaths",
     "SnapshotRecord",
     "SourceRecord",
+    "STAGING_STORAGE_SCHEMA_VERSION",
+    "StagingStoragePaths",
     "StorageAccessError",
     "StorageAdapter",
     "StorageFTSTable",
@@ -133,6 +144,9 @@ __all__ = [
     "migrate_local_sqlite_stores",
     "migrate_sqlite_store",
     "plan_sqlite_migration",
+    "resolve_live_storage_paths",
+    "resolve_staging_storage_paths",
+    "staging_job_token",
     "validate_write_request",
     "validate_storage_consistency",
 ]

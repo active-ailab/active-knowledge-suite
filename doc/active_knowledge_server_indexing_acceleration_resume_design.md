@@ -372,6 +372,19 @@ vectors.staging.<job_id>/
 publish-manifest.json
 ```
 
+工程落地时不应硬编码上述文件名，而应从当前配置的 live path 派生 staging path：
+
+- baseline metadata：`baseline/db/metadata.db -> baseline/db/metadata.staging.<job_token>.db`
+- local full metadata：`local/db/overlay.db -> local/db/overlay.staging.<job_token>.db`
+- baseline vectors：`baseline/vectors/lancedb -> baseline/vectors/lancedb.staging.<job_token>/`
+- local full vectors：`local/vectors/lancedb-delta -> local/vectors/lancedb-delta.staging.<job_token>/`
+
+其中 `job_token` 由 `job_id` 经过 filesystem-safe 归一化后再附加短 hash，要求：
+
+- 同一 `job_id` 多次恢复得到完全一致的 staging path。
+- 不同 `job_id` 必然落到不同 staging path。
+- path token 不直接暴露 `:`、`/` 等跨平台不安全字符。
+
 流程：
 
 1. full build 写 staging DB/vector root。
