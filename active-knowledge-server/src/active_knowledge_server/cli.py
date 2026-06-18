@@ -465,6 +465,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete old local overlay snapshots.",
     )
     clean_parser.add_argument(
+        "--staging-jobs",
+        action="store_true",
+        help="Delete staging artifacts left by failed or superseded full-index jobs.",
+    )
+    clean_parser.add_argument(
+        "--old-live-versions",
+        action="store_true",
+        help="Delete old published live metadata/vector versions.",
+    )
+    clean_parser.add_argument(
         "--compact-overlay",
         action="store_true",
         help="Compact local overlay control rows and rebuild overlay FTS.",
@@ -2059,6 +2069,8 @@ def handle_clean(args: argparse.Namespace) -> int:
         clean_tmp=bool(args.tmp),
         old_jobs_keep=int(args.keep) if args.old_jobs else None,
         old_snapshots_keep=int(args.keep) if args.old_snapshots else None,
+        clean_staging_jobs=bool(args.staging_jobs),
+        live_versions_keep=int(args.keep) if args.old_live_versions else None,
         compact_overlay=bool(args.compact_overlay),
     )
     payload = {
@@ -2074,6 +2086,8 @@ def handle_clean(args: argparse.Namespace) -> int:
         print(f"Deleted dirs: {report.deleted_dirs}")
         print(f"Deleted jobs: {report.deleted_jobs}")
         print(f"Deleted snapshots: {report.deleted_snapshots}")
+        print(f"Deleted staging artifacts: {report.deleted_staging_artifacts}")
+        print(f"Deleted live versions: {report.deleted_live_versions}")
         if report.compact:
             print(f"Compact: {report.compact}")
     return 0

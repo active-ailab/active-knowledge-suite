@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from active_knowledge_server.cli import main
@@ -16,6 +17,9 @@ from active_knowledge_server.storage import (
     SnapshotRecord,
     StorageWriteRequest,
     TombstoneRecord,
+    activate_published_storage,
+    resolve_published_storage_for_job,
+    resolve_staging_storage_paths,
 )
 from active_knowledge_server.storage.maintenance import clean_local_state
 from active_knowledge_server.storage.sqlite_store import (
@@ -165,6 +169,103 @@ def test_clean_old_snapshots_only_removes_overlay_rows(tmp_path: Path) -> None:
     assert reader.get_snapshot("baseline-snapshot") is not None
     assert reader.get_snapshot("new-local") is not None
     assert reader.get_snapshot("old-local") is None
+
+
+def test_clean_staging_jobs_removes_failed_full_index_staging_artifacts(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    build_adapter(config)
+    staging = resolve_staging_storage_paths(
+        config,
+        cwd=tmp_path,
+        target="overlay",
+        job_id="index:failed-full-stage",
+    )
+    store = SQLiteJobStore(Path(config.storage.jobs.path))
+    job = store.create_job(job_id=staging.job_id, metadata={"staging_storage": staging.to_dict()})
+    store.transition_job(job.job_id, "discovering")
+    store.transition_job(job.job_id, "failed", error_summary="boom")
+
+    staging.staging.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    staging.staging.metadata_path.write_text("metadata", encoding="utf-8")
+    Path(f"{staging.staging.metadata_path}-wal").write_text("wal", encoding="utf-8")
+    Path(f"{staging.staging.metadata_path}-shm").write_text("shm", encoding="utf-8")
+    staging.staging.vector_path.mkdir(parents=True)
+    (staging.staging.vector_path / "manifest.json").write_text("{}", encoding="utf-8")
+
+    report = clean_local_state(config, cwd=tmp_path, clean_staging_jobs=True)
+
+    assert report.deleted_staging_artifacts == 4
+    assert not staging.staging.metadata_path.exists()
+    assert not Path(f"{staging.staging.metadata_path}-wal").exists()
+    assert not Path(f"{staging.staging.metadata_path}-shm").exists()
+    assert not staging.staging.vector_path.exists()
+    assert store.get_job(job.job_id) is not None
+
+
+def test_clean_old_live_versions_keeps_current_pointer_even_when_older(
+    tmp_path: Path,
+) -> None:
+    config = resolve_model(tmp_path)
+    live = resolve_staging_storage_paths(
+        config,
+        cwd=tmp_path,
+        target="overlay",
+        job_id="index:live-anchor",
+    ).live
+    versions = {
+        "active-old": 10,
+        "prune-mid": 20,
+        "keep-newest": 30,
+    }
+    for token, mtime in versions.items():
+        published = resolve_published_storage_for_job(
+            target="overlay",
+            job_id=f"index:{token}",
+            publish_token=token,
+            metadata_anchor_path=live.metadata_path,
+            vector_anchor_path=live.vector_path,
+        )
+        published.metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        published.metadata_path.write_text(token, encoding="utf-8")
+        published.vector_path.mkdir(parents=True, exist_ok=True)
+        (published.vector_path / "manifest.json").write_text("{}", encoding="utf-8")
+        os.utime(published.metadata_path, (mtime, mtime))
+        os.utime(published.vector_path, (mtime, mtime))
+        if token == "active-old":
+            activate_published_storage(published)
+
+    report = clean_local_state(config, cwd=tmp_path, live_versions_keep=1)
+
+    active = resolve_published_storage_for_job(
+        target="overlay",
+        job_id="index:active-old",
+        publish_token="active-old",
+        metadata_anchor_path=live.metadata_path,
+        vector_anchor_path=live.vector_path,
+    )
+    newest = resolve_published_storage_for_job(
+        target="overlay",
+        job_id="index:keep-newest",
+        publish_token="keep-newest",
+        metadata_anchor_path=live.metadata_path,
+        vector_anchor_path=live.vector_path,
+    )
+    pruned = resolve_published_storage_for_job(
+        target="overlay",
+        job_id="index:prune-mid",
+        publish_token="prune-mid",
+        metadata_anchor_path=live.metadata_path,
+        vector_anchor_path=live.vector_path,
+    )
+    assert report.deleted_live_versions == 1
+    assert active.metadata_path.exists()
+    assert active.vector_path.exists()
+    assert newest.metadata_path.exists()
+    assert newest.vector_path.exists()
+    assert not pruned.metadata_path.exists()
+    assert not pruned.vector_path.exists()
 
 
 def test_compact_overlay_keeps_query_results_stable(tmp_path: Path) -> None:

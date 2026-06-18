@@ -321,6 +321,25 @@ PY
 - 同一个 `STAGING_JOB_ID` 重跑两次，`job_token`、metadata path、vector path 完全一致。
 - 当前阶段只验证 resolver 和 job metadata 约定；真正“full build 写 staging、validate 后 publish”要等 `AR6-02`。
 
+### 2.3 Full staging cleanup smoke（AR6-03）
+
+这一步验证旧 full staging/live 版本不会长期堆积。建议沿用上一步针对 `/home/gangan/ZeppOS` 生成的隔离配置，尤其是已经执行过一次或多次 `local full code` publish 的 `$STAGING_CONFIG`。
+
+```bash
+uv run active-kb clean \
+  --config "$STAGING_CONFIG" \
+  --staging-jobs \
+  --old-live-versions \
+  --keep 2 \
+  --format json | tee "$STAGING_ARTIFACTS/cleanup.json"
+```
+
+通过标准：
+
+- `cleanup.json` 中 `clean_report.deleted_staging_artifacts` 和 `clean_report.deleted_live_versions` 是机器可读数字。
+- 当前 `*.publish.json` 指向的 `publish_token` 对应 metadata/vector 版本仍然存在。
+- 重复执行同一条 clean 命令应收敛为 0 或只清理新产生的 stale artifact。
+
 上面的 `serve --format json` 只验证 runtime wiring，不会阻塞当前终端。接着补一段 live query smoke，直接调用与 MCP 同一套 tool handler：
 
 ```bash

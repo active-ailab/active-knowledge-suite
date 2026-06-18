@@ -1112,16 +1112,44 @@ TODO：
 
 ### AR6-03 旧 staging/live 版本清理
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`OPS`、`IMPL`、`TEST`
 - 依赖：`AR6-02`
 
 TODO：
 
-- [ ] maintenance 支持清理 superseded/failed staging job。
-- [ ] 保留最近 N 个 live 版本。
-- [ ] 清理前确认不删除当前 pointer 指向版本。
+- [x] maintenance 支持清理 superseded/failed staging job。
+- [x] 保留最近 N 个 live 版本。
+- [x] 清理前确认不删除当前 pointer 指向版本。
+
+行业实践调研结论：
+
+- Kubernetes Deployment 通过 `revisionHistoryLimit` 控制历史 ReplicaSet 保留数量；本项目对应把 full publish 产物作为可回滚版本，提供 `--old-live-versions --keep N`，避免 versioned metadata/vector 无限增长。参考：https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+- Google Artifact Registry cleanup policy 支持 delete policy、keep policy 和 keep most recent versions；本项目对应采用“按最近 N 个 token 保留 + 当前 pointer 强制保留”的组合，保证清理不会删除正在服务的版本。参考：https://docs.cloud.google.com/artifact-registry/docs/repositories/cleanup-policy-overview
+- Docker prune 支持 `until` / `label` 等过滤条件，而不是无差别删除；本项目对应只清理 jobs metadata 明确记录的 full-index staging path，并校验 staging 文件名确实由 live anchor 派生，避免 maintenance 变成泛化删除器。参考：https://docs.docker.com/reference/cli/docker/image/prune/
+
+完成记录：
+
+- `active_knowledge_server/storage/maintenance.py` 新增 `clean_stale_staging_jobs(...)` 和 `clean_old_published_versions(...)`，并接入 `clean_local_state(...)`。
+- `active-kb clean` 新增 `--staging-jobs` 与 `--old-live-versions`；`--keep N` 复用为 live 版本保留数量。
+- stale staging 清理范围限定为 terminal `failed/partial_ready` index job 的 `staging_storage`，并同时清理 SQLite staging DB、`-wal`、`-shm` 以及 staging vector dir。
+- live version 清理扫描 `metadata.db.versions/` 与 `lancedb*.versions/`，按 token 聚合 metadata/vector 版本；无论 mtime 是否较老，当前 `*.publish.json` pointer 指向的 `publish_token` 都会被保留。
+- `storage/publish.py` 抽出 version dir/path helper 与 `current_publish_token(...)`，避免 maintenance 重复拼路径。
+- `tests/unit/test_storage_maintenance.py` 覆盖 failed full-index staging 清理，以及“当前 pointer 指向旧版本但仍不可删除”的保留策略。
+
+验证命令：
+
+- `cd active-knowledge-server && uv run python -m pytest tests/unit/test_storage_maintenance.py tests/unit/test_storage_staging.py`
+- `cd active-knowledge-server && python -m py_compile src/active_knowledge_server/storage/maintenance.py src/active_knowledge_server/storage/publish.py src/active_knowledge_server/cli.py`
+
+推荐 ZeppOS 实测命令：
+
+- 已有多次 full publish 后清理旧 live 版本：
+  - `cd active-knowledge-server && uv run active-kb clean --config /tmp/active-kb-ar6-01-staging/staging-smoke.yaml --old-live-versions --keep 2 --format json`
+- 曾经中断或 supersede full staging job 后清理 staging 残留：
+  - `cd active-knowledge-server && uv run active-kb clean --config /tmp/active-kb-ar6-01-staging/staging-smoke.yaml --staging-jobs --format json`
+- 更贴近真实工程的回归路径：先沿用 `/home/gangan/ZeppOS` 或其 `components/gui/storyboard` 子集执行两次 `local full code` publish，再执行 `--old-live-versions --keep 1`；验收重点是最新 publish 可查询，当前 pointer token 未被清理，旧非 pointer token 被回收。
 
 验收标准：
 

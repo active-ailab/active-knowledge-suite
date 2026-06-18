@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from active_knowledge_server.config.loader import resolve_runtime_path
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.storage.base import StorageMetadata
+from active_knowledge_server.storage.publish import (
+    current_publish_token,
+    published_metadata_versions_dir,
+    published_vector_versions_dir,
+)
 from active_knowledge_server.storage.sqlite_store import (
     configured_sqlite_paths,
+    decode_metadata,
     fetch_file_record,
     row_to_chunk_record,
     row_to_entity_record,
@@ -21,12 +28,14 @@ from active_knowledge_server.storage.sqlite_store import (
     sync_entity_fts,
     table_exists,
 )
+from active_knowledge_server.storage.staging import resolve_live_storage_paths
 from active_knowledge_server.storage.validation import (
     StorageValidationReport,
     validate_storage_consistency,
 )
 
 TERMINAL_JOB_STATUSES = ("ready", "failed", "partial_ready")
+STALE_STAGING_JOB_STATUSES = ("failed", "partial_ready")
 
 
 @dataclass(frozen=True)
@@ -39,6 +48,8 @@ class CleanReport:
     deleted_dirs: int = 0
     deleted_jobs: int = 0
     deleted_snapshots: int = 0
+    deleted_staging_artifacts: int = 0
+    deleted_live_versions: int = 0
     compact: StorageMetadata = field(default_factory=dict)
     validation_before: StorageMetadata | None = None
     validation_after: StorageMetadata | None = None
@@ -51,6 +62,8 @@ class CleanReport:
             "deleted_dirs": self.deleted_dirs,
             "deleted_jobs": self.deleted_jobs,
             "deleted_snapshots": self.deleted_snapshots,
+            "deleted_staging_artifacts": self.deleted_staging_artifacts,
+            "deleted_live_versions": self.deleted_live_versions,
             "compact": self.compact,
             "validation_before": self.validation_before,
             "validation_after": self.validation_after,
@@ -64,6 +77,8 @@ class _CleanAccumulator:
     deleted_dirs: int = 0
     deleted_jobs: int = 0
     deleted_snapshots: int = 0
+    deleted_staging_artifacts: int = 0
+    deleted_live_versions: int = 0
     compact: StorageMetadata = field(default_factory=dict)
     validation_before: StorageMetadata | None = None
     validation_after: StorageMetadata | None = None
@@ -76,6 +91,8 @@ class _CleanAccumulator:
             deleted_dirs=self.deleted_dirs,
             deleted_jobs=self.deleted_jobs,
             deleted_snapshots=self.deleted_snapshots,
+            deleted_staging_artifacts=self.deleted_staging_artifacts,
+            deleted_live_versions=self.deleted_live_versions,
             compact=self.compact,
             validation_before=self.validation_before,
             validation_after=self.validation_after,
@@ -90,9 +107,11 @@ def clean_local_state(
     clean_tmp: bool = False,
     old_jobs_keep: int | None = None,
     old_snapshots_keep: int | None = None,
+    clean_staging_jobs: bool = False,
+    live_versions_keep: int | None = None,
     compact_overlay: bool = False,
 ) -> CleanReport:
-    """Clean local runtime state without deleting baseline assets."""
+    """Clean selected runtime maintenance targets while preserving active publish versions."""
 
     acc = _CleanAccumulator()
     baseline_dir = resolve_runtime_path(config.runtime.baseline_dir, cwd)
@@ -135,6 +154,24 @@ def clean_local_state(
             keep=old_snapshots_keep,
         )
 
+    if clean_staging_jobs:
+        result = clean_stale_staging_jobs(sqlite_paths["jobs"])
+        acc.deleted_files += result.deleted_files
+        acc.deleted_dirs += result.deleted_dirs
+        acc.deleted_staging_artifacts += result.deleted_files + result.deleted_dirs
+
+    if live_versions_keep is not None:
+        for target in ("baseline", "overlay"):
+            live = resolve_live_storage_paths(config, cwd=cwd, target=target)
+            result = clean_old_published_versions(
+                metadata_anchor_path=live.metadata_path,
+                vector_anchor_path=live.vector_path,
+                keep=live_versions_keep,
+            )
+            acc.deleted_files += result.deleted_files
+            acc.deleted_dirs += result.deleted_dirs
+            acc.deleted_live_versions += result.deleted_versions
+
     if compact_overlay:
         before = validate_storage_consistency(config, cwd=cwd)
         acc.validation_before = validation_summary(before)
@@ -149,6 +186,7 @@ def clean_local_state(
 class DeleteResult:
     deleted_files: int = 0
     deleted_dirs: int = 0
+    deleted_versions: int = 0
 
 
 def clean_directory_contents(path: Path, *, local_dir: Path, baseline_dir: Path) -> DeleteResult:
@@ -220,6 +258,123 @@ def clean_old_jobs(
             elif artifact_path.exists():
                 artifact_path.unlink()
     return len(delete_ids)
+
+
+def clean_stale_staging_jobs(jobs_path: Path) -> DeleteResult:
+    """Delete staging artifacts for failed or partial full-index jobs."""
+
+    if not jobs_path.exists():
+        return DeleteResult()
+    deleted_files = 0
+    deleted_dirs = 0
+    statuses = tuple(STALE_STAGING_JOB_STATUSES)
+    placeholders = ", ".join("?" for _ in statuses)
+    with sqlite_connection(jobs_path) as connection:
+        if not table_exists(connection, "job"):
+            return DeleteResult()
+        rows = connection.execute(
+            f"""
+            SELECT metadata_json
+            FROM job
+            WHERE job_type = 'index'
+              AND status IN ({placeholders})
+            ORDER BY updated_at ASC, job_id ASC
+            """,
+            statuses,
+        ).fetchall()
+
+    for row in rows:
+        metadata = decode_metadata(row["metadata_json"])
+        staging_storage = _mapping_value(metadata, "staging_storage")
+        if staging_storage is None:
+            continue
+        live = _mapping_value(staging_storage, "live")
+        staging = _mapping_value(staging_storage, "staging")
+        if live is None or staging is None:
+            continue
+        live_metadata = _path_value(live, "metadata_path")
+        live_vector = _path_value(live, "vector_path")
+        staging_metadata = _path_value(staging, "metadata_path")
+        staging_vector = _path_value(staging, "vector_path")
+        if (
+            live_metadata is not None
+            and staging_metadata is not None
+            and _is_expected_staging_metadata_path(
+                live_path=live_metadata,
+                staging_path=staging_metadata,
+            )
+        ):
+            result = delete_path(staging_metadata)
+            deleted_files += result.deleted_files
+            deleted_dirs += result.deleted_dirs
+            for sidecar in _sqlite_sidecar_paths(staging_metadata):
+                result = delete_path(sidecar)
+                deleted_files += result.deleted_files
+                deleted_dirs += result.deleted_dirs
+        if (
+            live_vector is not None
+            and staging_vector is not None
+            and _is_expected_staging_vector_path(
+                live_path=live_vector,
+                staging_path=staging_vector,
+            )
+        ):
+            result = delete_path(staging_vector)
+            deleted_files += result.deleted_files
+            deleted_dirs += result.deleted_dirs
+    return DeleteResult(deleted_files=deleted_files, deleted_dirs=deleted_dirs)
+
+
+def clean_old_published_versions(
+    *,
+    metadata_anchor_path: Path,
+    vector_anchor_path: Path,
+    keep: int,
+) -> DeleteResult:
+    """Prune old published versions while always preserving the active pointer token."""
+
+    if keep < 0:
+        raise ValueError("keep must be >= 0")
+    candidates = _published_version_candidates(
+        metadata_anchor_path=metadata_anchor_path,
+        vector_anchor_path=vector_anchor_path,
+    )
+    if not candidates:
+        return DeleteResult()
+
+    current = current_publish_token(metadata_anchor_path)
+    ordered = sorted(
+        candidates.items(),
+        key=lambda item: (item[1].sort_mtime, item[0]),
+        reverse=True,
+    )
+    retain_tokens = {token for token, _candidate in ordered[:keep]}
+    if current is not None:
+        retain_tokens.add(current)
+
+    deleted_files = 0
+    deleted_dirs = 0
+    deleted_versions = 0
+    for token, candidate in ordered:
+        if token in retain_tokens:
+            continue
+        deleted_this_version = False
+        for path in (candidate.metadata_path, candidate.vector_path):
+            if path is None:
+                continue
+            result = delete_path(path)
+            deleted_files += result.deleted_files
+            deleted_dirs += result.deleted_dirs
+            deleted_this_version = deleted_this_version or bool(
+                result.deleted_files or result.deleted_dirs
+            )
+        if deleted_this_version:
+            deleted_versions += 1
+    return DeleteResult(
+        deleted_files=deleted_files,
+        deleted_dirs=deleted_dirs,
+        deleted_versions=deleted_versions,
+    )
 
 
 def clean_old_overlay_snapshots(overlay_path: Path, *, keep: int) -> int:
@@ -307,6 +462,131 @@ def ids_for_snapshot(
         (snapshot_id,),
     ).fetchall()
     return {str(row[id_column]) for row in rows}
+
+
+@dataclass(frozen=True)
+class _PublishedVersionCandidate:
+    token: str
+    sort_mtime: float
+    metadata_path: Path | None = None
+    vector_path: Path | None = None
+
+
+def delete_path(path: Path) -> DeleteResult:
+    """Delete one file or directory and report what was actually removed."""
+
+    if not path.exists():
+        return DeleteResult()
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+        return DeleteResult(deleted_dirs=1)
+    path.unlink()
+    return DeleteResult(deleted_files=1)
+
+
+def _mapping_value(value: Mapping[str, Any], key: str) -> Mapping[str, Any] | None:
+    nested = value.get(key)
+    if not isinstance(nested, Mapping):
+        return None
+    return cast(Mapping[str, Any], nested)
+
+
+def _path_value(value: Mapping[str, Any], key: str) -> Path | None:
+    raw = value.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(raw)
+
+
+def _sqlite_sidecar_paths(path: Path) -> tuple[Path, Path]:
+    return Path(f"{path}-wal"), Path(f"{path}-shm")
+
+
+def _is_expected_staging_metadata_path(*, live_path: Path, staging_path: Path) -> bool:
+    suffix = "".join(live_path.suffixes)
+    live_stem = live_path.name[: -len(suffix)] if suffix else live_path.name
+    return (
+        staging_path.parent.resolve() == live_path.parent.resolve()
+        and staging_path.name.startswith(f"{live_stem}.staging.")
+        and (not suffix or staging_path.name.endswith(suffix))
+    )
+
+
+def _is_expected_staging_vector_path(*, live_path: Path, staging_path: Path) -> bool:
+    return (
+        staging_path.parent.resolve() == live_path.parent.resolve()
+        and staging_path.name.startswith(f"{live_path.name}.staging.")
+    )
+
+
+def _published_version_candidates(
+    *,
+    metadata_anchor_path: Path,
+    vector_anchor_path: Path,
+) -> dict[str, _PublishedVersionCandidate]:
+    candidates: dict[str, _PublishedVersionCandidate] = {}
+    metadata_dir = published_metadata_versions_dir(metadata_anchor_path)
+    metadata_suffix = "".join(metadata_anchor_path.suffixes)
+    if metadata_dir.is_dir():
+        for child in metadata_dir.iterdir():
+            if child.is_dir():
+                continue
+            token = _metadata_version_token(child, metadata_suffix=metadata_suffix)
+            if token is None:
+                continue
+            candidates[token] = _merge_published_version_candidate(
+                candidates.get(token),
+                token=token,
+                metadata_path=child,
+            )
+
+    vector_dir = published_vector_versions_dir(vector_anchor_path)
+    if vector_dir.is_dir():
+        for child in vector_dir.iterdir():
+            if not child.is_dir():
+                continue
+            token = child.name
+            candidates[token] = _merge_published_version_candidate(
+                candidates.get(token),
+                token=token,
+                vector_path=child,
+            )
+    return candidates
+
+
+def _metadata_version_token(path: Path, *, metadata_suffix: str) -> str | None:
+    name = path.name
+    if metadata_suffix:
+        if not name.endswith(metadata_suffix):
+            return None
+        token = name[: -len(metadata_suffix)]
+    else:
+        token = name
+    return token or None
+
+
+def _merge_published_version_candidate(
+    existing: _PublishedVersionCandidate | None,
+    *,
+    token: str,
+    metadata_path: Path | None = None,
+    vector_path: Path | None = None,
+) -> _PublishedVersionCandidate:
+    paths = tuple(path for path in (metadata_path, vector_path) if path is not None)
+    sort_mtime = max((path.stat().st_mtime for path in paths if path.exists()), default=0.0)
+    if existing is None:
+        return _PublishedVersionCandidate(
+            token=token,
+            sort_mtime=sort_mtime,
+            metadata_path=metadata_path,
+            vector_path=vector_path,
+        )
+    return _PublishedVersionCandidate(
+        token=token,
+        sort_mtime=max(existing.sort_mtime, sort_mtime),
+        metadata_path=metadata_path or existing.metadata_path,
+        vector_path=vector_path or existing.vector_path,
+    )
 
 
 def compact_overlay_store(overlay_path: Path) -> StorageMetadata:

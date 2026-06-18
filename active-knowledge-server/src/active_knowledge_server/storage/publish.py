@@ -82,7 +82,6 @@ def resolve_published_storage_for_job(
 ) -> PublishedStoragePaths:
     """Return the deterministic published artifact locations for one job."""
 
-    metadata_suffix = "".join(metadata_anchor_path.suffixes)
     return PublishedStoragePaths(
         schema_version=PUBLISH_POINTER_SCHEMA_VERSION,
         target=target,
@@ -91,11 +90,54 @@ def resolve_published_storage_for_job(
         manifest_path=publish_manifest_path(metadata_anchor_path),
         metadata_anchor_path=metadata_anchor_path,
         vector_anchor_path=vector_anchor_path,
-        metadata_path=metadata_anchor_path.parent
-        / f"{metadata_anchor_path.name}.versions"
-        / f"{publish_token}{metadata_suffix}",
-        vector_path=vector_anchor_path.parent / f"{vector_anchor_path.name}.versions" / publish_token,
+        metadata_path=published_metadata_path(
+            metadata_anchor_path=metadata_anchor_path,
+            publish_token=publish_token,
+        ),
+        vector_path=published_vector_path(
+            vector_anchor_path=vector_anchor_path,
+            publish_token=publish_token,
+        ),
     )
+
+
+def published_metadata_versions_dir(metadata_anchor_path: Path) -> Path:
+    """Return the directory that stores versioned published metadata DBs."""
+
+    return metadata_anchor_path.parent / f"{metadata_anchor_path.name}.versions"
+
+
+def published_vector_versions_dir(vector_anchor_path: Path) -> Path:
+    """Return the directory that stores versioned published vector roots."""
+
+    return vector_anchor_path.parent / f"{vector_anchor_path.name}.versions"
+
+
+def published_metadata_path(*, metadata_anchor_path: Path, publish_token: str) -> Path:
+    """Return the deterministic published metadata path for one version token."""
+
+    metadata_suffix = "".join(metadata_anchor_path.suffixes)
+    return (
+        published_metadata_versions_dir(metadata_anchor_path) / f"{publish_token}{metadata_suffix}"
+    )
+
+
+def published_vector_path(*, vector_anchor_path: Path, publish_token: str) -> Path:
+    """Return the deterministic published vector directory for one version token."""
+
+    return published_vector_versions_dir(vector_anchor_path) / publish_token
+
+
+def current_publish_token(metadata_anchor_path: Path) -> str | None:
+    """Return the active publish token from the manifest when present."""
+
+    payload = read_publish_manifest(publish_manifest_path(metadata_anchor_path))
+    if payload is None:
+        return None
+    token = payload.get("publish_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return token.strip()
 
 
 def materialize_published_storage(
