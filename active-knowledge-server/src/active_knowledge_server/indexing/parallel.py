@@ -21,6 +21,11 @@ IndexingExecutorKind = Literal["serial", "thread", "process"]
 _InputT = TypeVar("_InputT")
 _OutputT = TypeVar("_OutputT")
 
+_AUTO_DOC_WORKER_CAP = 6
+_AUTO_CODE_PROCESS_WORKER_CAP = 4
+_AUTO_CODE_THREAD_LARGE_REPO_THRESHOLD = 4096
+_AUTO_CODE_THREAD_LARGE_REPO_CAP = 2
+
 
 @dataclass(frozen=True)
 class ResolvedIndexingWorkers:
@@ -121,13 +126,13 @@ def resolve_indexing_workers(
         )
 
     available_cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    phase_cap = 4 if phase == "code" else 6
-    workers = max(1, min(task_count, phase_cap, available_cpus))
-    if task_count < 4:
-        workers = 1
-        reason = "small_task_set"
-    else:
-        reason = "auto"
+    workers, reason = _resolve_auto_worker_count(
+        configured_mode=configured_mode,
+        task_count=task_count,
+        phase=phase,
+        available_cpus=available_cpus,
+        allow_process=allow_process,
+    )
     executor_kind = _resolve_executor_kind(
         configured_mode=configured_mode,
         phase=phase,
@@ -143,6 +148,41 @@ def resolve_indexing_workers(
         executor_kind=executor_kind,
         reason=reason,
     )
+
+
+def _resolve_auto_worker_count(
+    *,
+    configured_mode: IndexingParallelMode,
+    task_count: int,
+    phase: IndexingPhaseKind,
+    available_cpus: int,
+    allow_process: bool,
+) -> tuple[int, str]:
+    if task_count < 4:
+        return 1, "small_task_set"
+    if phase == "docs":
+        return max(1, min(task_count, _AUTO_DOC_WORKER_CAP, available_cpus)), "auto"
+    if _auto_code_prefers_thread_serial(
+        configured_mode=configured_mode,
+        allow_process=allow_process,
+    ):
+        if task_count < _AUTO_CODE_THREAD_LARGE_REPO_THRESHOLD:
+            return 1, "thread_code_serial_below_large_repo_threshold"
+        return (
+            max(1, min(task_count, _AUTO_CODE_THREAD_LARGE_REPO_CAP, available_cpus)),
+            "thread_code_large_repo_cap",
+        )
+    return max(1, min(task_count, _AUTO_CODE_PROCESS_WORKER_CAP, available_cpus)), "auto"
+
+
+def _auto_code_prefers_thread_serial(
+    *,
+    configured_mode: IndexingParallelMode,
+    allow_process: bool,
+) -> bool:
+    if configured_mode == "thread":
+        return True
+    return configured_mode in {"process", "hybrid"} and not allow_process
 
 
 def parallel_map_ordered(

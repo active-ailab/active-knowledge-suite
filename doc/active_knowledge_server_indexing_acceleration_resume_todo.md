@@ -1252,16 +1252,29 @@ TODO：
 
 ### AR7-03 auto workers 默认值二次固化
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P3`
 - 类型：`OPS`、`IMPL`
 - 依赖：`IP4-03`、`AR4-01`
 
 TODO：
 
-- [ ] 基于小/中/大仓 phase timing 调整 `resolve_indexing_workers`。
-- [ ] 根据 RSS 风险设置大仓 worker cap。
-- [ ] 记录推荐值和不推荐区间。
+- [x] 基于小/中/大仓真实工程 benchmark 调整 `resolve_indexing_workers`。
+- [x] 根据大仓 thread collect 退化风险设置 code auto worker cap。
+- [x] 记录推荐值和不推荐区间。
+
+完成记录：
+
+- 新增报告：[active_knowledge_server_ar7_auto_workers_benchmark_zeppos.md](./active_knowledge_server_ar7_auto_workers_benchmark_zeppos.md)。
+- ZeppOS 三档 code collect 实测结论：
+  - small `137` code files：`workers=1` 最优，`auto=4` 约慢 `7%`
+  - medium `621` code files：`workers=1` 最优，`auto=4` 约慢 `13%`
+  - large `4613` code files：`workers=2` 最优，`auto=4` 约慢 `5%`
+- `active_knowledge_server/indexing/parallel.py` 已把 auto 逻辑改成 phase + executor mode 感知：
+  - `docs + auto`：继续保留 `cap=6`
+  - `code + thread + auto`：`task_count < 4096 -> 1`，`>= 4096 -> cap=2`
+  - `code + process/hybrid + auto`：继续保留 `cap=4`
+- `workers=1` 仍然保留为显式串行回退开关。
 
 验收标准：
 

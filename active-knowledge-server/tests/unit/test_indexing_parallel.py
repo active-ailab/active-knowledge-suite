@@ -22,6 +22,22 @@ def test_resolve_indexing_workers_caps_auto_conservatively() -> None:
     assert resolved.to_dict()["reason"] == "auto"
 
 
+def test_resolve_indexing_workers_keeps_code_thread_auto_serial_for_small_and_medium_repos() -> None:
+    resolved = resolve_indexing_workers("auto", task_count=621, phase="code", cpu_count=8)
+
+    assert resolved.workers == 1
+    assert resolved.executor_kind == "serial"
+    assert resolved.reason == "thread_code_serial_below_large_repo_threshold"
+
+
+def test_resolve_indexing_workers_caps_code_thread_auto_for_large_repos() -> None:
+    resolved = resolve_indexing_workers("auto", task_count=5000, phase="code", cpu_count=8)
+
+    assert resolved.workers == 2
+    assert resolved.executor_kind == "thread"
+    assert resolved.reason == "thread_code_large_repo_cap"
+
+
 def test_resolve_indexing_workers_honors_explicit_worker_count() -> None:
     resolved = resolve_indexing_workers(8, task_count=3, phase="code")
 
