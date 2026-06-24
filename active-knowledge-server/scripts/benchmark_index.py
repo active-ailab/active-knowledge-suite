@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,6 +133,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--summary-output",
         type=Path,
         help="Optional Markdown or JSON summary output derived from the raw records.",
+    )
+    parser.add_argument(
+        "--readonly-probe",
+        choices=("none", "sqlite_count"),
+        default="none",
+        help=(
+            "Optional read-only probe to run concurrently with indexing. "
+            "'sqlite_count' repeatedly opens the metadata DB read-only and measures "
+            "simple count-query latency."
+        ),
+    )
+    parser.add_argument(
+        "--readonly-probe-interval-ms",
+        type=int,
+        default=50,
+        help="Delay between read-only probe attempts when --readonly-probe is enabled.",
+    )
+    parser.add_argument(
+        "--readonly-probe-timeout-ms",
+        type=int,
+        default=100,
+        help="SQLite busy timeout per read-only probe attempt.",
     )
     parser.add_argument(
         "--summary-format",
@@ -398,11 +421,6 @@ def run_sample(
         progress_callback=None,
         resume_policy=_disabled_resume_policy(),
     )
-    metadata_path = metadata_path_for_target(resolved, args.target)
-    checkpoint = maybe_checkpoint_sqlite_database(
-        metadata_path,
-        checkpoint_mode=args.sqlite_checkpoint_mode,
-    )
     counts = collect_storage_counts(resolved, args.target)
     return build_record(
         args=args,
@@ -416,7 +434,6 @@ def run_sample(
         notes=notes,
         measurement=measurement,
         object_counts=counts,
-        sqlite_checkpoint=checkpoint,
         interrupt_summary=empty_interrupt_summary(),
         validate_summary=empty_validate_summary(),
     )
@@ -478,11 +495,6 @@ def run_crash_resume_sample(
         resume_policy=_auto_resume_policy(),
     )
     validate_payload = run_validate_command(args=args, workdir=workdir)
-    metadata_path = metadata_path_for_target(resolved, args.target)
-    checkpoint = maybe_checkpoint_sqlite_database(
-        metadata_path,
-        checkpoint_mode=args.sqlite_checkpoint_mode,
-    )
     counts = collect_storage_counts(resolved, args.target)
     notes = [
         (
@@ -508,7 +520,6 @@ def run_crash_resume_sample(
         notes=notes,
         measurement=resumed,
         object_counts=counts,
-        sqlite_checkpoint=checkpoint,
         interrupt_summary=interrupt_summary,
         validate_summary=validate_payload,
     )
@@ -697,6 +708,110 @@ def maybe_checkpoint_sqlite_database(
         "log_frames": result.log_frames,
         "checkpointed_frames": result.checkpointed_frames,
     }
+
+
+def _probe_percentile(samples: list[float], quantile: float) -> float:
+    if not samples:
+        return 0.0
+    ordered = sorted(float(value) for value in samples)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+class SQLiteReadonlyProbe:
+    """Sample one lightweight read-only query against the metadata DB."""
+
+    def __init__(
+        self,
+        *,
+        metadata_path: Path,
+        interval_ms: int,
+        timeout_ms: int,
+    ) -> None:
+        self._metadata_path = metadata_path
+        self._interval_seconds = max(int(interval_ms), 1) / 1000.0
+        self._timeout_seconds = max(int(timeout_ms), 1) / 1000.0
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sqlite-readonly-probe", daemon=True)
+        self._latencies_ms: list[float] = []
+        self._success_count = 0
+        self._busy_count = 0
+        self._error_count = 0
+        self._startup_wait_count = 0
+        self._last_error: str | None = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> dict[str, object]:
+        self._stop_event.set()
+        self._thread.join(timeout=max(self._interval_seconds * 4.0, 1.0))
+        latencies_ms = list(self._latencies_ms)
+        return {
+            "enabled": True,
+            "mode": "sqlite_count",
+            "success_count": self._success_count,
+            "busy_count": self._busy_count,
+            "error_count": self._error_count,
+            "startup_wait_count": self._startup_wait_count,
+            "latency_ms_p50": round(_probe_percentile(latencies_ms, 0.50), 3),
+            "latency_ms_p95": round(_probe_percentile(latencies_ms, 0.95), 3),
+            "latency_ms_max": (0.0 if not latencies_ms else round(max(latencies_ms), 3)),
+            "last_error": self._last_error,
+        }
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            started_at = time.perf_counter()
+            if not self._metadata_path.exists():
+                self._startup_wait_count += 1
+                self._sleep_remaining(started_at)
+                continue
+            try:
+                self._probe_once()
+            except sqlite3.OperationalError as exc:
+                message = str(exc)
+                self._last_error = message
+                lowered = message.lower()
+                if "locked" in lowered or "busy" in lowered:
+                    self._busy_count += 1
+                else:
+                    self._error_count += 1
+            except Exception as exc:  # noqa: BLE001 - benchmark probes must stay alive.
+                self._last_error = str(exc)
+                self._error_count += 1
+            self._sleep_remaining(started_at)
+
+    def _probe_once(self) -> None:
+        start = time.perf_counter()
+        connection = sqlite3.connect(
+            f"file:{self._metadata_path}?mode=ro",
+            uri=True,
+            timeout=self._timeout_seconds,
+        )
+        try:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunk'"
+            ).fetchone()
+            chunk_table_present = bool(row and int(row[0]) > 0)
+            if chunk_table_present:
+                connection.execute("SELECT COUNT(*) FROM chunk").fetchone()
+            else:
+                connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
+        finally:
+            connection.close()
+        self._latencies_ms.append((time.perf_counter() - start) * 1000.0)
+        self._success_count += 1
+
+    def _sleep_remaining(self, started_at: float) -> None:
+        remaining = self._interval_seconds - (time.perf_counter() - started_at)
+        if remaining > 0:
+            self._stop_event.wait(remaining)
 
 
 def collect_warning_code_counts(result_payload: dict[str, object]) -> dict[str, int]:
@@ -951,6 +1066,16 @@ def measure_index_run(
     interrupt_after_task_percent: int | None = None,
 ) -> IndexRunMeasurement:
     progress = ProgressPhaseTimingCollector()
+    metadata_path = metadata_path_for_target(resolved, args.target)
+    readonly_probe: SQLiteReadonlyProbe | None = None
+    readonly_probe_summary = empty_readonly_probe_summary()
+    if args.readonly_probe == "sqlite_count":
+        readonly_probe = SQLiteReadonlyProbe(
+            metadata_path=metadata_path,
+            interval_ms=args.readonly_probe_interval_ms,
+            timeout_ms=args.readonly_probe_timeout_ms,
+        )
+        readonly_probe.start()
     if progress_callback is None:
         callback = progress.observe
     else:
@@ -962,28 +1087,36 @@ def measure_index_run(
     wall_before = time.perf_counter()
     interrupted = False
     try:
-        if interrupt_after_task_percent is None:
-            command_payload = execute_index_run(
-                resolved=resolved,
-                args=args,
-                progress_callback=callback,
-                resume_policy=resume_policy,
-            )
-        else:
-            with interrupt_after_task_percent_context(interrupt_after_task_percent):
+        try:
+            if interrupt_after_task_percent is None:
                 command_payload = execute_index_run(
                     resolved=resolved,
                     args=args,
                     progress_callback=callback,
                     resume_policy=resume_policy,
                 )
-    except IndexCommandInterrupted as exc:
-        command_payload = dict(exc.payload)
-        interrupted = True
-    wall_seconds = time.perf_counter() - wall_before
-    cpu_seconds = time.process_time() - cpu_before
-    progress_snapshot = progress.finish()
-    rss_after = current_rss_bytes()
+            else:
+                with interrupt_after_task_percent_context(interrupt_after_task_percent):
+                    command_payload = execute_index_run(
+                        resolved=resolved,
+                        args=args,
+                        progress_callback=callback,
+                        resume_policy=resume_policy,
+                    )
+        except IndexCommandInterrupted as exc:
+            command_payload = dict(exc.payload)
+            interrupted = True
+        wall_seconds = time.perf_counter() - wall_before
+        cpu_seconds = time.process_time() - cpu_before
+        progress_snapshot = progress.finish()
+        rss_after = current_rss_bytes()
+        sqlite_checkpoint = maybe_checkpoint_sqlite_database(
+            metadata_path,
+            checkpoint_mode=args.sqlite_checkpoint_mode,
+        )
+    finally:
+        if readonly_probe is not None:
+            readonly_probe_summary = readonly_probe.stop()
     return IndexRunMeasurement(
         command_payload=command_payload,
         interrupted=interrupted,
@@ -992,6 +1125,8 @@ def measure_index_run(
         rss_before_bytes=rss_before,
         rss_after_bytes=rss_after,
         progress_snapshot=progress_snapshot,
+        sqlite_checkpoint=sqlite_checkpoint,
+        readonly_probe=readonly_probe_summary,
     )
 
 
@@ -1008,7 +1143,6 @@ def build_record(
     notes: list[str],
     measurement: IndexRunMeasurement,
     object_counts: dict[str, int],
-    sqlite_checkpoint: dict[str, object] | None,
     interrupt_summary: dict[str, object],
     validate_summary: dict[str, object],
 ) -> dict[str, object]:
@@ -1019,7 +1153,7 @@ def build_record(
     job_payload = extract_result_job_mapping(result_payload)
     metadata_path = metadata_path_for_target(resolved, args.target)
     return {
-        "schema_version": "index_benchmark_record.v3",
+        "schema_version": "index_benchmark_record.v4",
         "executed_at": utc_now(),
         "config_path": None if args.config is None else str(args.config),
         "mode": args.mode,
@@ -1067,7 +1201,7 @@ def build_record(
                 metadata_path,
                 pragma_profile=sqlite_pragma_profile_from_config(resolved.model),
             ),
-            "checkpoint": sqlite_checkpoint,
+            "checkpoint": measurement.sqlite_checkpoint,
         },
         "workdir": str(workdir),
         "result_status": str(
@@ -1093,6 +1227,7 @@ def build_record(
         "task_stats": task_stats,
         "interrupt": interrupt_summary,
         "validate": validate_summary,
+        "readonly_probe": measurement.readonly_probe,
         "object_counts": object_counts,
         "storage_files": collect_storage_file_sizes(metadata_path),
         "dataset": dataset,
@@ -1166,6 +1301,21 @@ def empty_validate_summary() -> dict[str, object]:
         "error_check_count": 0,
         "storage_status": None,
         "index_result_status": None,
+    }
+
+
+def empty_readonly_probe_summary() -> dict[str, object]:
+    return {
+        "enabled": False,
+        "mode": "none",
+        "success_count": 0,
+        "busy_count": 0,
+        "error_count": 0,
+        "startup_wait_count": 0,
+        "latency_ms_p50": 0.0,
+        "latency_ms_p95": 0.0,
+        "latency_ms_max": 0.0,
+        "last_error": None,
     }
 
 
@@ -1251,6 +1401,8 @@ class IndexRunMeasurement:
         rss_before_bytes: int,
         rss_after_bytes: int,
         progress_snapshot,
+        sqlite_checkpoint: dict[str, object] | None,
+        readonly_probe: dict[str, object],
     ) -> None:
         self.command_payload = command_payload
         self.interrupted = interrupted
@@ -1259,6 +1411,8 @@ class IndexRunMeasurement:
         self.rss_before_bytes = rss_before_bytes
         self.rss_after_bytes = rss_after_bytes
         self.progress_snapshot = progress_snapshot
+        self.sqlite_checkpoint = sqlite_checkpoint
+        self.readonly_probe = dict(readonly_probe)
 
 
 if __name__ == "__main__":

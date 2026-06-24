@@ -34,9 +34,14 @@ def _record(
     replayed_tasks: int = 0,
     interrupt_after_task_percent: int | None = None,
     validate_status: str = "not_run",
+    readonly_probe_mode: str = "none",
+    readonly_latency_p50_ms: float = 0.0,
+    readonly_latency_p95_ms: float = 0.0,
+    readonly_busy_count: int = 0,
+    readonly_error_count: int = 0,
 ) -> dict[str, object]:
     return {
-        "schema_version": "index_benchmark_record.v3",
+        "schema_version": "index_benchmark_record.v4",
         "mode": "incremental",
         "target": "local",
         "source": "all",
@@ -78,6 +83,18 @@ def _record(
         "validate": {
             "ran": validate_status != "not_run",
             "status": validate_status,
+        },
+        "readonly_probe": {
+            "enabled": readonly_probe_mode != "none",
+            "mode": readonly_probe_mode,
+            "success_count": 16 if readonly_probe_mode != "none" else 0,
+            "busy_count": readonly_busy_count,
+            "error_count": readonly_error_count,
+            "startup_wait_count": 0,
+            "latency_ms_p50": readonly_latency_p50_ms,
+            "latency_ms_p95": readonly_latency_p95_ms,
+            "latency_ms_max": max(readonly_latency_p50_ms, readonly_latency_p95_ms),
+            "last_error": None,
         },
         "writer": {
             "batch_size": batch_size,
@@ -188,6 +205,7 @@ def test_summarize_index_benchmark_records_recommends_fastest_stable_scenario() 
     assert recommendation.key.resume_kind == "fresh"
     assert recommendation.key.interrupt_after_task_percent is None
     assert recommendation.key.parallel_mode == "thread"
+    assert recommendation.key.readonly_probe_mode == "none"
     assert recommendation.key.writer_batch_size == 100
     assert recommendation.key.writer_max_files_per_transaction == 100
     assert recommendation.key.writer_max_records_per_transaction == 2048
@@ -219,6 +237,9 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
                 commit_interval_ms=500,
                 wall_seconds=6.0,
                 rss_delta_bytes=150,
+                readonly_probe_mode="sqlite_count",
+                readonly_latency_p50_ms=1.2,
+                readonly_latency_p95_ms=3.4,
             ),
             _record(
                 workers=8,
@@ -228,6 +249,9 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
                 rss_delta_bytes=250,
                 journal_mode="wal",
                 metadata_wal_bytes=2_400,
+                readonly_probe_mode="sqlite_count",
+                readonly_latency_p50_ms=1.5,
+                readonly_latency_p95_ms=4.1,
             ),
         ]
     )
@@ -236,11 +260,34 @@ def test_render_index_benchmark_markdown_includes_recommendation_and_risks() -> 
 
     assert "# Index Benchmark Report" in markdown
     assert (
-        "resume=fresh/disabled, interrupt=-, workers=4, parallel_mode=thread, batch_size=100, "
+        "resume=fresh/disabled, interrupt=-, workers=4, parallel_mode=thread, "
+        "readonly_probe=sqlite_count, batch_size=100, "
         "max_files_per_transaction=100, max_records_per_transaction=2048, "
         "commit_interval_ms=500"
     ) in markdown
+    assert "1.20/3.40 busy=0.0" in markdown
     assert "wal_larger_than_db" in markdown
+
+
+def test_summarize_index_benchmark_records_flags_readonly_probe_busy() -> None:
+    report = summarize_index_benchmark_records(
+        [
+            _record(
+                workers=1,
+                batch_size=64,
+                commit_interval_ms=1000,
+                wall_seconds=10.0,
+                rss_delta_bytes=100,
+                readonly_probe_mode="sqlite_count",
+                readonly_latency_p50_ms=2.4,
+                readonly_latency_p95_ms=8.8,
+                readonly_busy_count=3,
+            ),
+        ]
+    )
+
+    summary = report.scenario_summaries[0]
+    assert "readonly_busy" in summary.risk_flags
 
 
 def test_render_index_benchmark_markdown_includes_resume_summary() -> None:

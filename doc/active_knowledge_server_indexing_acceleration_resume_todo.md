@@ -1201,21 +1201,54 @@ TODO：
 
 ### AR7-02 WAL 默认策略固化
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P3`
 - 类型：`OPS`、`CONTRACT`
 - 依赖：`IP3-04`、`AR4-01`
 
 TODO：
 
-- [ ] 对 local FS 场景压测 `delete/full`、`wal/full`、`wal/normal`。
-- [ ] 记录 query 并发读 p50/p95。
-- [ ] 记录 WAL 膨胀与 checkpoint busy。
-- [ ] 有数据支撑后再决定是否调整默认值。
+- [x] 对 local FS 场景压测 `delete/full`、`wal/full`、`wal/normal`。
+- [x] 记录 query 并发读 p50/p95。
+- [x] 记录 WAL 膨胀与 checkpoint busy。
+- [x] 有数据支撑后再决定是否调整默认值。
+
+行业调研与架构结论：
+
+- SQLite 官方文档确认 WAL 的核心价值是 reader/writer 并发，但同时明确 WAL 不适用于 network filesystem；因此本项目仍把 `assume_local_filesystem=true` 作为启用前提，不把 WAL 直接外推成跨环境默认。参考：https://sqlite.org/wal.html 与 https://sqlite.org/useovernet.html
+- SQLite `PRAGMA synchronous` 文档指出，WAL 模式下 `synchronous=NORMAL` 往往是性能与安全的最佳平衡，但会牺牲掉电/OS crash 时最近事务的 durability；这与本项目“索引可重建、但默认值不能悄悄降低 durability” 的设计边界一致。参考：https://sqlite.org/pragma.html
+- SQLite 官方在 2026-03 公布 WAL-reset bug，修复版本为 `3.51.3+`，旧分支 backport 为 `3.50.7` / `3.44.6`；本地 `uv run python` 运行时实际链接的 SQLite 版本是 `3.50.4`，因此即使 benchmark 对 WAL 有利，也不足以支持“现在就修改仓库全局默认值”。参考：https://sqlite.org/wal.html
+
+真实工程实测：
+
+- 先直接对 `/home/gangan/ZeppOS` 的 `framework` 全量切片执行完整 benchmark，workdir 一度膨胀到约 `21G` 并触发 `No space left on device`；这印证了 AR7 其他任务里已经记录过的“full pipeline 容量放大”风险，因此后续改为复制真实代表性子工作区，而不是继续拿整 `framework` 硬跑。
+- 最终采用真实 ZeppOS 子工作区 `/tmp/zeppos-ar7-wal-sport`：
+  - 来自 `/home/gangan/ZeppOS/framework/engine/sportEngine`
+  - 额外保留 `/home/gangan/ZeppOS/configs/mhs003`、`build/.config`、`build/out_hub/.config`
+  - 继续通过 `active-knowledge-server/scripts/benchmark_index.py` 走真实 `active-kb index` 路径
+- benchmark 配置与命令已沉淀在 [`doc/active_knowledge_server_ar7_wal_benchmark_zeppos.md`](./active_knowledge_server_ar7_wal_benchmark_zeppos.md) 和 [`examples/local-single-user-zeppos-framework-wal-benchmark.yaml`](../examples/local-single-user-zeppos-framework-wal-benchmark.yaml)。
+
+结果摘要：
+
+- 样本规模：`workspace_file_count=154`、`changed_code_paths=154`、`required tasks=156`
+- `delete/full`：wall `223.528s`，read probe p50/p95 `1.367ms / 57.076ms`，`busy_count=454`
+- `wal/full`：wall `168.509s`，相对 `delete/full` 约 `1.33x`，read probe p50/p95 `1.262ms / 51.532ms`，`busy_count=0`
+- `wal/normal`：wall `163.942s`，相对 `delete/full` 约 `1.36x`，read probe p50/p95 `1.084ms / 48.559ms`，`busy_count=0`
+- 三组样本在显式 `passive checkpoint` 后都未保留额外 WAL 内容，`checkpoint.busy=0`
+
+当前决策：
+
+- 仓库内建默认值继续保持 `storage.sqlite.journal_mode=delete` + `synchronous=full`。
+- 对满足以下前提的本地单机部署，把 `wal/normal` 固化为首选 opt-in 推荐：
+  - `storage.sqlite.assume_local_filesystem=true`
+  - SQLite runtime `>= 3.50.7` 或 `>= 3.51.3`
+  - 索引期间存在并发只读需求
+  - 可接受掉电/OS crash 时最近事务 durability 下降的语义
+- 若强调 durability 而不是极致吞吐，可 opt-in `wal/full`；若运行时版本未升级或文件系统边界不清晰，则继续使用 `delete/full`。
 
 验收标准：
 
-- 没有报告不得默认启用 WAL。
+- 已有真实工程报告支撑“不改全局默认值 + 固化本地单机 opt-in 策略”的结论；没有报告不得默认启用 WAL。
 
 ### AR7-03 auto workers 默认值二次固化
 

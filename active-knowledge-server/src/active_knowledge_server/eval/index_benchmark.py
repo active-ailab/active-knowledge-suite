@@ -167,6 +167,7 @@ class IndexBenchmarkScenarioKey:
     interrupt_after_task_percent: int | None
     workers_requested: str
     parallel_mode: str
+    readonly_probe_mode: str
     writer_batch_size: int
     writer_max_files_per_transaction: int
     writer_max_records_per_transaction: int
@@ -186,6 +187,7 @@ class IndexBenchmarkScenarioKey:
             "interrupt_after_task_percent": self.interrupt_after_task_percent,
             "workers_requested": self.workers_requested,
             "parallel_mode": self.parallel_mode,
+            "readonly_probe_mode": self.readonly_probe_mode,
             "writer_batch_size": self.writer_batch_size,
             "writer_max_files_per_transaction": self.writer_max_files_per_transaction,
             "writer_max_records_per_transaction": self.writer_max_records_per_transaction,
@@ -210,6 +212,7 @@ class IndexBenchmarkScenarioSummary:
     max_warning_count: int
     phase_timings: dict[str, MetricSummary]
     task_stats: dict[str, MetricSummary]
+    readonly_probe: dict[str, MetricSummary]
     metadata_db_bytes_max: int
     metadata_wal_bytes_max: int
     metadata_shm_bytes_max: int
@@ -232,6 +235,9 @@ class IndexBenchmarkScenarioSummary:
             },
             "task_stats": {
                 name: summary.to_dict() for name, summary in sorted(self.task_stats.items())
+            },
+            "readonly_probe": {
+                name: summary.to_dict() for name, summary in sorted(self.readonly_probe.items())
             },
             "storage_files": {
                 "metadata_db_bytes_max": self.metadata_db_bytes_max,
@@ -276,7 +282,7 @@ class IndexBenchmarkReport:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "index_benchmark_report.v3",
+            "schema_version": "index_benchmark_report.v4",
             "dataset": self.dataset,
             "machine": self.machine,
             "git_commit": self.git_commit,
@@ -379,6 +385,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
                 f"interrupt={_interrupt_label(scenario.interrupt_after_task_percent)}, "
                 f"workers={scenario.workers_requested}, "
                 f"parallel_mode={scenario.parallel_mode}, "
+                f"readonly_probe={scenario.readonly_probe_mode}, "
                 f"batch_size={scenario.writer_batch_size}, "
                 f"max_files_per_transaction={scenario.writer_max_files_per_transaction}, "
                 f"max_records_per_transaction={scenario.writer_max_records_per_transaction}, "
@@ -392,8 +399,8 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             "",
             "## Scenario Summary",
             "",
-            "| Scenario | p50 wall (s) | p95 wall (s) | Speedup vs ref | Top phases (p50) | Tasks p50 (a/s/r) | Warnings | Risks |",
-            "| --- | ---: | ---: | ---: | --- | --- | ---: | --- |",
+            "| Scenario | p50 wall (s) | p95 wall (s) | Speedup vs ref | Read p50/p95 (ms) | Top phases (p50) | Tasks p50 (a/s/r) | Warnings | Risks |",
+            "| --- | ---: | ---: | ---: | --- | --- | --- | ---: | --- |",
         ]
     )
     for summary in report.scenario_summaries:
@@ -404,6 +411,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             else f"{summary.speedup_vs_reference_p50:.2f}x"
         )
         top_phases = _top_phase_summary(summary.phase_timings)
+        readonly_probe = _readonly_probe_summary(summary.readonly_probe)
         task_stats = _task_stats_summary(summary.task_stats)
         risks = ", ".join(summary.risk_flags) if summary.risk_flags else "none"
         lines.append(
@@ -411,6 +419,7 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             f"{scenario.resume_kind}/{scenario.resume_mode}, "
             f"i={_interrupt_label(scenario.interrupt_after_task_percent)}, "
             f"w={scenario.workers_requested}, m={scenario.parallel_mode}, "
+            f"rp={scenario.readonly_probe_mode}, "
             f"b={scenario.writer_batch_size}, "
             f"mf={scenario.writer_max_files_per_transaction}, "
             f"mr={scenario.writer_max_records_per_transaction}, "
@@ -422,6 +431,8 @@ def render_index_benchmark_markdown(report: IndexBenchmarkReport) -> str:
             f"{summary.wall_seconds.p95:.3f}"
             " | "
             f"{speedup}"
+            " | "
+            f"{readonly_probe}"
             " | "
             f"{top_phases}"
             " | "
@@ -490,6 +501,7 @@ def _scenario_key_from_record(record: dict[str, object]) -> IndexBenchmarkScenar
         ),
         workers_requested=str(record.get("workers_requested", "unknown")),
         parallel_mode=str(_mapping(record.get("parallel")).get("mode", "thread")),
+        readonly_probe_mode=str(_mapping(record.get("readonly_probe")).get("mode", "none")),
         writer_batch_size=int(writer.get("batch_size", 0)),
         writer_max_files_per_transaction=int(
             writer.get("max_files_per_transaction", writer.get("batch_size", 0))
@@ -514,6 +526,7 @@ def _family_key_for_scenario(key: IndexBenchmarkScenarioKey) -> tuple[object, ..
         key.resume_mode,
         key.interrupt_after_task_percent,
         key.parallel_mode,
+        key.readonly_probe_mode,
     )
 
 
@@ -563,6 +576,7 @@ def _build_scenario_summary(
     max_warning_count = 0
     phase_timings = _metric_summaries_by_key(samples, "phase_timings")
     task_stats = _metric_summaries_by_key(samples, "task_stats")
+    readonly_probe = _metric_summaries_by_key(samples, "readonly_probe")
     metadata_db_bytes_max = 0
     metadata_wal_bytes_max = 0
     metadata_shm_bytes_max = 0
@@ -595,6 +609,7 @@ def _build_scenario_summary(
         validate_status_counts=validate_status_counts,
         warning_code_counts=warning_code_counts,
         max_warning_count=max_warning_count,
+        readonly_probe=readonly_probe,
         metadata_db_bytes_max=metadata_db_bytes_max,
         metadata_wal_bytes_max=metadata_wal_bytes_max,
         speedup_vs_reference=speedup,
@@ -612,6 +627,7 @@ def _build_scenario_summary(
         max_warning_count=max_warning_count,
         phase_timings=phase_timings,
         task_stats=task_stats,
+        readonly_probe=readonly_probe,
         metadata_db_bytes_max=metadata_db_bytes_max,
         metadata_wal_bytes_max=metadata_wal_bytes_max,
         metadata_shm_bytes_max=metadata_shm_bytes_max,
@@ -628,6 +644,7 @@ def _risk_flags_for_summary(
     validate_status_counts: Counter[str],
     warning_code_counts: Counter[str],
     max_warning_count: int,
+    readonly_probe: dict[str, MetricSummary],
     metadata_db_bytes_max: int,
     metadata_wal_bytes_max: int,
     speedup_vs_reference: float | None,
@@ -649,6 +666,10 @@ def _risk_flags_for_summary(
         risks.append("sqlite_lock_warning")
     if any(code.startswith("vector.") or code.startswith("embedding.") for code in warning_code_counts):
         risks.append("vector_write_warning")
+    if readonly_probe.get("busy_count") is not None and readonly_probe["busy_count"].p95 > 0:
+        risks.append("readonly_busy")
+    if readonly_probe.get("error_count") is not None and readonly_probe["error_count"].p95 > 0:
+        risks.append("readonly_probe_error")
     if key.sqlite_journal_mode == "wal" and metadata_wal_bytes_max > metadata_db_bytes_max > 0:
         risks.append("wal_larger_than_db")
     if not is_reference and speedup_vs_reference is not None and speedup_vs_reference < 1.0:
@@ -668,6 +689,7 @@ def _recommend_family_scenario(
         "sqlite_lock_warning",
         "vector_write_warning",
         "memory_gt_2x_reference",
+        "readonly_probe_error",
     }
     eligible = [
         summary
@@ -746,6 +768,22 @@ def _task_stats_summary(task_stats: dict[str, MetricSummary]) -> str:
         f"{0.0 if skipped is None else skipped.p50:.1f}/"
         f"{0.0 if replayed is None else replayed.p50:.1f}"
     )
+
+
+def _readonly_probe_summary(readonly_probe: dict[str, MetricSummary]) -> str:
+    if not readonly_probe:
+        return "-"
+    p50 = readonly_probe.get("latency_ms_p50")
+    p95 = readonly_probe.get("latency_ms_p95")
+    busy = readonly_probe.get("busy_count")
+    if p50 is None and p95 is None and busy is None:
+        return "-"
+    latency_text = (
+        f"{0.0 if p50 is None else p50.p50:.2f}/{0.0 if p95 is None else p95.p50:.2f}"
+    )
+    if busy is None:
+        return latency_text
+    return f"{latency_text} busy={busy.p50:.1f}"
 
 
 def _build_resume_comparisons(
