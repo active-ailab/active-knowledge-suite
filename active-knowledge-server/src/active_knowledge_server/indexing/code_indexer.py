@@ -282,6 +282,9 @@ class CodeIndexer:
             )
 
         if workers.executor_kind == "process":
+            # ProcessPoolExecutor requires module-level, pickle-safe task payloads/results.
+            # Keep worker logic isolated in _collect_code_entry_task and never call
+            # executor/future APIs from inside that worker.
             tasks = tuple(
                 _CodeCollectTask(
                     snapshot_id=snapshot_id,
@@ -899,6 +902,8 @@ class CodeIndexer:
 
 
 def _collect_code_entry_task(task: _CodeCollectTask) -> _CollectedCodeEntry:
+    """Collect one code file with a process-safe worker contract."""
+
     started_at = time.perf_counter()
     absolute_path = Path(task.workspace_root) / task.relative_path
     text = absolute_path.read_text(encoding="utf-8", errors="replace")

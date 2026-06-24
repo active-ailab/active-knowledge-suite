@@ -1161,17 +1161,39 @@ TODO：
 
 ### AR7-01 process/hybrid code collect
 
-- 状态：`[ ]`
+- 状态：`[~]`
 - 优先级：`P3`
 - 类型：`IMPL`、`TEST`
 - 依赖：`IP5-01`、`AR4-01`
 
 TODO：
 
-- [ ] 只有当 phase timing 证明 code parse CPU bound 时才实现。
-- [ ] 给 code collect 输入输出增加 pickle 契约测试。
-- [ ] 禁止 process worker 内调用 executor/future。
-- [ ] 支持 `indexing.parallel.mode: thread | process | hybrid`。
+- [x] 只有当 phase timing / collect benchmark 证明 code parse CPU bound 时才实现。
+- [x] 给 code collect 输入输出增加 pickle 契约测试。
+- [x] 禁止 process worker 内调用 executor/future。
+- [x] 支持 `indexing.parallel.mode: thread | process | hybrid`。
+
+行业实践调研结论：
+
+- Python `concurrent.futures` 官方文档明确说明：`ProcessPoolExecutor` 只接受可 pickle 的输入/输出，且 worker 内调用 `Executor` / `Future` 方法会死锁；因此本项目把 process worker 收敛为模块级 `_collect_code_entry_task(...)`，并补了 pickle 契约测试。参考：https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor
+- Python `multiprocessing` 官方文档强调参数通常需要可 pickle，且 `spawn`/`forkserver` 启动方式比 `fork` 更安全但更慢；因此本项目保持 process/hybrid 为显式 opt-in，不把它设成默认值。参考：https://docs.python.org/3/library/multiprocessing.html
+- joblib 官方文档建议：当工作负载主要在 Python 解释器内执行时，进程通常能绕过 GIL；当主要消耗在会释放 GIL 的原生扩展中时，线程更合适。本项目据此不在文档阶段拍脑袋选默认值，而是对真实工程切片做 code collect 实测。参考：https://joblib.readthedocs.io/en/stable/parallel.html#thread-based-parallelism-vs-process-based-parallelism
+
+完成记录：
+
+- `active-knowledge-server/tests/unit/test_code_indexer.py` 新增 `test_code_collect_task_and_result_are_pickle_safe(...)`，对 `_CodeCollectTask` 和 `_CollectedCodeEntry` 做 pickle round-trip 契约测试。
+- `active-knowledge-server/src/active_knowledge_server/indexing/code_indexer.py` 在 process 分支增加注释，明确 worker 只能使用模块级、pickle-safe 的 `_collect_code_entry_task(...)`，且不得在 worker 内触碰 executor/future API。
+- `active-knowledge-server/scripts/benchmark_code_collect.py` 新增“只测 code collect”的轻量 benchmark 入口，支持真实工程 `paths.include` 切片、`max-files` 限流、`thread|process|hybrid` 对比和输出签名等价校验。
+- 基准结论已固化到 `doc/active_knowledge_server_ar7_code_collect_benchmark_zeppos.md`，避免把临时 benchmark 产物留在工作区。
+- ZeppOS 实测采用 `workspace_root=/home/gangan/ZeppOS`、`paths.include=framework` 的真实工程切片，避免把 workspace map / overlay 写盘放大成与本任务无关的磁盘瓶颈；此前全量 benchmark 曾触发 `No space left on device`，因此 AR7-01 后续统一以 collect-only benchmark 作为主口径。
+- 实测结果：
+  - `max_files=512`、`workers=4`、`repeat=3`：`thread` p50 `1.138s`，`process` p50 `0.305s`，`hybrid` p50 `0.308s`；`process/hybrid` 相对 `thread` 约 `3.7x` 加速，`output_signature` 全部等价。
+  - `max_files=1024`、`workers=4`、`repeat=1`：`thread` `3.256s`，`process` `0.897s`，`hybrid` `0.880s`；相对 `thread` 分别约 `3.63x` / `3.70x`，`output_signature` 等价。
+
+当前结论：
+
+- 对 ZeppOS `framework` 真实工程切片，code collect 已经表现出明显的 CPU-bound 特征，`process/hybrid` 稳定优于 `thread`，且输出签名等价。
+- 由于本轮验证口径是 collect-only slice benchmark，而非完整中仓/大仓全流程落盘 benchmark，`AR7-01` 状态先维持 `[~]`；若后续机器资源允许，可继续把 `max-files` 放大到 `2048/4096`，或扩展到 `framework+drivers` 切片后再正式收口为 `[x]`。
 
 验收标准：
 

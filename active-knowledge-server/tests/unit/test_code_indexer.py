@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import pickle
 from dataclasses import asdict
 from pathlib import Path
 
 from active_knowledge_server.config.loader import ConfigDict, resolve_config
 from active_knowledge_server.config.schema import ActiveKnowledgeConfig
 from active_knowledge_server.indexing import CURRENT_SNAPSHOT_ID, CodeIndexer
+from active_knowledge_server.indexing.code_indexer import (
+    _CodeCollectTask,
+    _collect_code_entry_task,
+)
 from active_knowledge_server.storage import FTSQuery, QueryScope, StorageWriteRequest
 from active_knowledge_server.storage.sqlite_store import (
     SQLiteStorageAdapter,
@@ -352,6 +357,48 @@ int health_init(void);
     assert process.metadata["collect_workers"]["executor_kind"] == "process"
     assert process.metadata["timings"]["parser_seconds"] >= 0.0
     assert process.metadata["diagnostics"]["slowest_items"]
+
+
+def test_code_collect_task_and_result_are_pickle_safe(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    component_dir = workspace_root / "components" / "health"
+    component_dir.mkdir(parents=True)
+    source_path = component_dir / "main.c"
+    source_path.write_text(
+        """#include "health.h"
+
+#define HEALTH_DEFAULT 1
+
+int health_init(void)
+{
+    return HEALTH_DEFAULT;
+}
+""",
+        encoding="utf-8",
+    )
+
+    task = _CodeCollectTask(
+        snapshot_id=CURRENT_SNAPSHOT_ID,
+        workspace_root=str(workspace_root),
+        relative_path="components/health/main.c",
+        content_hash=None,
+        area="components",
+        language="c",
+        is_symlink=False,
+        prefer_ctags=True,
+    )
+
+    restored_task = pickle.loads(pickle.dumps(task))
+    assert restored_task == task
+
+    collected = _collect_code_entry_task(restored_task)
+    restored_collected = pickle.loads(pickle.dumps(collected))
+
+    assert restored_collected == collected
+    assert restored_collected.relative_path == "components/health/main.c"
+    assert restored_collected.parsed_code is not None
+    assert restored_collected.parsed_code.symbols
 
 
 def deep_merge(base: ConfigDict, overrides: ConfigDict) -> ConfigDict:
