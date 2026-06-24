@@ -1591,17 +1591,24 @@ TODO：
 
 ### O8-05 可观测性
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
 - 类型：`OPS`、`IMPL`
 - 依赖：`C1-07`、`M6-02`
 
 TODO：
 
-- [ ] 指标：index_files_total、index_files_failed、index_duration_seconds。
-- [ ] 指标：query_latency_seconds、retrieval_candidates_total、evidence_items_returned、warnings_total。
-- [ ] 指标：embedding_queue_size、storage_size_bytes。
-- [ ] 输出 health summary。
+- [x] 指标：index_files_total、index_files_failed、index_duration_seconds。
+- [x] 指标：query_latency_seconds、retrieval_candidates_total、evidence_items_returned、warnings_total。
+- [x] 指标：embedding_queue_size、storage_size_bytes。
+- [x] 输出 health summary。
+
+输出：
+
+- 已新增本地持久化观测快照 `local/logs/observability.json`，在 CLI index 成功完成后记录 index counters / duration，在 MCP query tools 返回后记录 query latency / candidate / evidence / warning 指标。
+- `active-kb status --format json` 新增 `observability.metrics` 与 `observability.health_summary`，text 模式新增最近 query/index 健康摘要。
+- HTTP `/health` 现返回 `health_summary`，与 `status` 复用同一份观测快照与 gauge 刷新逻辑。
+- 真实工程验证：基于 `/home/gangan/ZeppOS` 的 `examples/local-single-user.yaml` 运行 `status` 与 `code_resolve("health_service_publish_event")`，已确认 query 指标会落盘，`status` 可展示最近 query/index 健康状态。
 
 验收标准：
 

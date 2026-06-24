@@ -52,11 +52,14 @@ def test_docs_search_normalizes_returned_tool_name_and_domain(tmp_path: Path, mo
 	monkeypatch.setattr(runtime.query_runtime, "search_query", fake_search)
 
 	result = handler("foo api", doc_type="api")
+	snapshot = runtime.context.observability_store.load_snapshot()
 
 	assert result.tool_name == "docs_search"
 	assert request_seen["request"].caller_tool == "docs_search"
 	assert request_seen["request"].domain == "api"
 	assert request_seen["request"].granularity == "doc_section"
+	assert snapshot["metrics"]["retrieval_candidates_total"] == 1
+	assert snapshot["recent_queries"][0]["tool_name"] == "docs_search"
 
 
 def test_config_impact_passes_compare_to_in_client_context(tmp_path: Path, monkeypatch) -> None:

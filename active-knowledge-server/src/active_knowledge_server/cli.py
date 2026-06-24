@@ -85,6 +85,7 @@ from active_knowledge_server.indexing.jobs import (
 from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
 from active_knowledge_server.models import QueryResult, Warning
 from active_knowledge_server.models.responses import QUERY_RESULT_SCHEMA_VERSION
+from active_knowledge_server.observability.metrics import ObservabilityStore
 from active_knowledge_server.parsers import (
     C_FAMILY_PARSER_SCHEMA_VERSION,
     DOC_PARSER_SCHEMA_VERSION,
@@ -1175,6 +1176,7 @@ def _run_index_command(
             job_context,
             progress_callback=progress_callback,
         )
+        index_started_at = time.perf_counter()
         try:
             run_signature = make_index_plan_signature(
                 plan,
@@ -1218,6 +1220,12 @@ def _run_index_command(
             raise
         else:
             finalize_index_job(job_context, result_status=result.result_status)
+            record_index_observability(
+                resolved,
+                result=result,
+                duration_seconds=max(time.perf_counter() - index_started_at, 0.0),
+                job_id=job_context.job.job_id,
+            )
         finally:
             job_context.store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job_context.job.job_id)
 
@@ -1252,6 +1260,7 @@ def _run_index_command(
         job_context,
         progress_callback=progress_callback,
     )
+    full_index_started_at = time.perf_counter()
     try:
         full_result = run_full_index(
             resolved,
@@ -1290,6 +1299,12 @@ def _run_index_command(
         finalize_index_job(
             job_context,
             result_status=str(full_result.get("result_status", "ready")),
+        )
+        record_index_observability(
+            resolved,
+            result=full_result,
+            duration_seconds=max(time.perf_counter() - full_index_started_at, 0.0),
+            job_id=job_context.job.job_id,
         )
     finally:
         job_context.store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job_context.job.job_id)
@@ -1970,6 +1985,11 @@ def handle_status(args: argparse.Namespace) -> int:
         storage_validation=index_status["storage_validation"],
     )
     profile_status, profile_warnings = collect_profile_status(resolved)
+    observability = collect_observability_status(
+        resolved,
+        layout=layout,
+        index_status=index_status,
+    )
     payload = {
         "command": "status",
         "status": "ok",
@@ -1978,6 +1998,7 @@ def handle_status(args: argparse.Namespace) -> int:
         "baseline_reuse": baseline_reuse,
         "profile": profile_status,
         "index": index_status,
+        "observability": observability,
         "warnings": collect_cli_warnings(
             baseline_warnings,
             profile_warnings,
@@ -1996,6 +2017,8 @@ def handle_status(args: argparse.Namespace) -> int:
         print(format_baseline_reuse_line(baseline_reuse))
         print(format_profile_line(profile_status))
         print(format_index_line(index_status))
+        print(format_query_health_line(observability))
+        print(format_recent_index_health_line(observability))
         for warning in payload["warnings"]:
             print(f"Warning [{warning['code']}]: {warning['message']}")
     return 0
@@ -3870,6 +3893,43 @@ def warning_from_storage_check(check: Any) -> dict[str, object]:
     }
 
 
+def collect_observability_status(
+    resolved: ResolvedConfig,
+    *,
+    layout: WorkdirLayout,
+    index_status: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Load the persisted observability snapshot and refresh runtime gauges."""
+
+    store = ObservabilityStore.from_layout(layout)
+    return store.collect_status(
+        config=resolved.model,
+        layout=layout,
+        cwd=Path.cwd(),
+        index_status=index_status,
+    )
+
+
+def record_index_observability(
+    resolved: ResolvedConfig,
+    *,
+    result: IncrementalIndexResult | Mapping[str, object],
+    duration_seconds: float,
+    job_id: str | None,
+) -> None:
+    """Best-effort persistence of index observability data."""
+
+    try:
+        store = ObservabilityStore.from_layout(workdir_layout(resolved))
+        store.record_index_run(
+            result=result,
+            duration_seconds=duration_seconds,
+            job_id=job_id,
+        )
+    except OSError:
+        return
+
+
 def collect_cli_warnings(*warning_groups: Sequence[dict[str, object]]) -> list[dict[str, object]]:
     """Merge warning payloads while preserving order and removing duplicates."""
 
@@ -3913,6 +3973,63 @@ def format_index_line(summary: dict[str, object]) -> str:
     """Render one text-mode index summary line."""
 
     return f"Index: {summary['result_status']} ({summary['message']})"
+
+
+def format_query_health_line(observability: Mapping[str, object]) -> str:
+    """Render the latest query health summary line for text status output."""
+
+    health_summary = observability.get("health_summary")
+    if not isinstance(health_summary, Mapping):
+        return "Query health: unknown"
+    query = health_summary.get("query")
+    if not isinstance(query, Mapping):
+        return "Query health: unknown"
+    health_state = str(query.get("health_state", "unknown"))
+    latest = query.get("latest")
+    if not isinstance(latest, Mapping):
+        return f"Query health: {health_state}"
+    latency = _format_seconds(latest.get("latency_seconds"))
+    candidates = _metadata_int(latest.get("retrieval_candidates"), 0)
+    evidence = _metadata_int(latest.get("evidence_items_returned"), 0)
+    warnings_total = _metadata_int(latest.get("warnings_total"), 0)
+    return (
+        "Query health: "
+        f"{health_state} (last={latency}, candidates={candidates}, "
+        f"evidence={evidence}, warnings={warnings_total})"
+    )
+
+
+def format_recent_index_health_line(observability: Mapping[str, object]) -> str:
+    """Render the latest index health summary line for text status output."""
+
+    health_summary = observability.get("health_summary")
+    if not isinstance(health_summary, Mapping):
+        return "Recent index health: unknown"
+    index = health_summary.get("index")
+    if not isinstance(index, Mapping):
+        return "Recent index health: unknown"
+    health_state = str(index.get("health_state", "unknown"))
+    latest = index.get("latest")
+    current_result_status = index.get("current_result_status")
+    if not isinstance(latest, Mapping):
+        if current_result_status is None:
+            return f"Recent index health: {health_state}"
+        return f"Recent index health: {health_state} (status={current_result_status})"
+    duration = _format_seconds(latest.get("duration_seconds"))
+    files_total = _metadata_int(latest.get("files_total"), 0)
+    files_failed = _metadata_int(latest.get("files_failed"), 0)
+    result_status = current_result_status or latest.get("result_status")
+    return (
+        "Recent index health: "
+        f"{health_state} (status={result_status}, last={duration}, "
+        f"files={files_total}, failed={files_failed})"
+    )
+
+
+def _format_seconds(value: object) -> str:
+    if isinstance(value, int | float):
+        return f"{float(value):.3f}s"
+    return "n/a"
 
 
 def validation_checks(

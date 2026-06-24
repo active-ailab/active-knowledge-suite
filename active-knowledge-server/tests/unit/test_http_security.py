@@ -74,6 +74,8 @@ def test_local_loopback_http_allows_unauthenticated_requests_and_audits(tmp_path
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert response.json()["health_summary"]["query"]["health_state"] == "missing"
+    assert "storage_size_bytes" in response.json()["health_summary"]["gauges"]
     assert events[-1]["event_type"] == "ops"
     assert events[-1]["ops_operation"] == "http.request"
     assert events[-1]["success"] is True

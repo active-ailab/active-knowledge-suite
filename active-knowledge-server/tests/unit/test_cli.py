@@ -360,6 +360,9 @@ def test_status_json_is_machine_readable(capsys) -> None:
     assert "baseline_reuse" in payload
     assert "profile" in payload
     assert "index" in payload
+    assert "observability" in payload
+    assert "metrics" in payload["observability"]
+    assert "health_summary" in payload["observability"]
     assert "warnings" in payload
 
 
@@ -411,6 +414,9 @@ def test_init_creates_workdir_and_local_config(tmp_path: Path, capsys) -> None:
     assert payload["profile"]["status"] == "resolved"
     assert payload["profile"]["resolved_profile_id"] == "mhs003_watch"
     assert payload["index"]["result_status"] == "missing"
+    assert payload["observability"]["health_summary"]["query"]["health_state"] == "missing"
+    assert "storage_size_bytes" in payload["observability"]["metrics"]
+    assert "embedding_queue_size" in payload["observability"]["metrics"]
     assert {warning["code"] for warning in payload["warnings"]} == {
         "compile_db.missing",
         "storage.schema_missing",
@@ -1399,6 +1405,11 @@ def test_index_incremental_json_is_machine_readable(
     assert payload["job"]["plan_signature"]["digest"].startswith("sha256:")
     assert payload["job"]["tasks_total"] == 0
     assert payload["job"]["tasks_applied"] == 0
+    observability_snapshot = json.loads(
+        (workdir / "local" / "logs" / "observability.json").read_text(encoding="utf-8")
+    )
+    assert observability_snapshot["metrics"]["index_files_total"] == 0
+    assert observability_snapshot["recent_index_runs"][0]["result_status"] == "ready"
 
     with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
         row = connection.execute(

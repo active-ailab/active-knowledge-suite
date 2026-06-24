@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -890,6 +891,7 @@ def register_query_tools(
 		"""Return one live workspace projection view filtered by an optional query string."""
 
 		request_id = str(uuid4())
+		started_at = time.perf_counter()
 		resolved_snapshot_id = snapshot_id or "current"
 		resolved_profile_id = _response_profile_id(profile_id)
 		tool_query = query.strip() if isinstance(query, str) and query.strip() else None
@@ -947,6 +949,11 @@ def register_query_tools(
 				warning_codes=[warning.code for warning in result.warnings],
 				warning_levels=[warning.level for warning in result.warnings],
 			)
+			context.observability_store.record_query_run(
+				tool_name="workspace_view",
+				result=result,
+				latency_seconds=max(time.perf_counter() - started_at, 0.0),
+			)
 			return result
 
 	@mcp.tool(
@@ -991,6 +998,7 @@ def register_query_tools(
 			)
 
 		request_id = str(uuid4())
+		started_at = time.perf_counter()
 		resolved_snapshot_id = snapshot_id or "current"
 		resolved_profile_id = _response_profile_id(profile_id)
 		bundle_profile_id = resolved_profile_id if resolved_profile_id != "not_required" else ALL_SCOPE
@@ -1040,6 +1048,11 @@ def register_query_tools(
 				result_status=result.result_status,
 				warning_codes=[warning.code for warning in result.warnings],
 				warning_levels=[warning.level for warning in result.warnings],
+			)
+			context.observability_store.record_query_run(
+				tool_name="evidence_bundle",
+				result=result,
+				latency_seconds=max(time.perf_counter() - started_at, 0.0),
 			)
 			return result
 
@@ -1674,6 +1687,7 @@ def _execute_search_tool(
 	"""Execute one routed query tool with shared audit and error handling."""
 
 	request_id = str(uuid4())
+	started_at = time.perf_counter()
 	with context.audit_logger.tool_call(
 		tool=tool_name,
 		query=request.query,
@@ -1715,6 +1729,11 @@ def _execute_search_tool(
 			result_status=result.result_status,
 			warning_codes=[warning.code for warning in result.warnings],
 			warning_levels=[warning.level for warning in result.warnings],
+		)
+		context.observability_store.record_query_run(
+			tool_name=tool_name,
+			result=result,
+			latency_seconds=max(time.perf_counter() - started_at, 0.0),
 		)
 		return result
 

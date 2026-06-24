@@ -15,6 +15,7 @@ from active_knowledge_server.config.schema import ActiveKnowledgeConfig, Transpo
 from active_knowledge_server.config.workdir import WorkdirLayout
 from active_knowledge_server.models.evidence import EvidenceRef, SourceIndex
 from active_knowledge_server.models.responses import Warning
+from active_knowledge_server.observability.metrics import ObservabilityStore
 from active_knowledge_server.security.audit import AuditLogger
 
 MCP_INTERFACE_SCHEMA_VERSION: Final = "mcp_interface.v1"
@@ -77,6 +78,7 @@ class MCPAppContext:
 	source_docs_root: Path
 	config_summary: dict[str, Any]
 	audit_logger: AuditLogger
+	observability_store: ObservabilityStore
 	cwd: Path
 
 	def ops_tools_enabled(self) -> bool:

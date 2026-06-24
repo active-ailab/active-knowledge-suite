@@ -438,6 +438,14 @@ active-kb status --format json
 - baseline reuse 状态
 - profile 发现状态
 - index / storage validation 简报
+- observability metrics 与最近 query/index health summary
+
+`status --format json` 里的 `observability` 会提供：
+
+- `metrics.index_files_total` / `index_files_failed` / `index_duration_seconds`
+- `metrics.query_latency_seconds` / `retrieval_candidates_total` / `evidence_items_returned` / `warnings_total`
+- `metrics.embedding_queue_size` / `storage_size_bytes`
+- `health_summary.query` / `health_summary.index`
 
 ### 9.3 基础校验
 
@@ -978,6 +986,14 @@ path guard 会约束访问范围到 allowlist 内，默认包括：
 - tombstone leak
 - replacement loop
 - job lock 状态
+
+### 19.3 Health Summary
+
+本地 workdir 会持久化 `local/logs/observability.json`，用于汇总最近的 index/query 观测数据。
+
+- CLI `index` 成功完成后会刷新 index metrics
+- MCP query tools 返回后会刷新 query metrics
+- `active-kb status` 与 HTTP `/health` 都会输出同一份 `health_summary`
 
 ---
 

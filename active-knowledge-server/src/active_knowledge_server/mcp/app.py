@@ -10,8 +10,15 @@ from active_knowledge_server import __version__
 from active_knowledge_server.config.loader import ResolvedConfig, resolve_runtime_path
 from active_knowledge_server.config.schema import summarize_config
 from active_knowledge_server.config.workdir import layout_from_config
-from active_knowledge_server.mcp.resources import register_bootstrap_resources, register_query_resources
-from active_knowledge_server.mcp.schemas import MCPAppContext, MCPComponentInventory, normalize_mcp_path
+from active_knowledge_server.mcp.resources import (
+	register_bootstrap_resources,
+	register_query_resources,
+)
+from active_knowledge_server.mcp.schemas import (
+	MCPAppContext,
+	MCPComponentInventory,
+	normalize_mcp_path,
+)
 from active_knowledge_server.mcp.tools import (
 	LazyQueryToolRuntime,
 	register_bootstrap_tools,
@@ -19,6 +26,7 @@ from active_knowledge_server.mcp.tools import (
 	register_query_tools,
 )
 from active_knowledge_server.observability.logging import configure_logging
+from active_knowledge_server.observability.metrics import ObservabilityStore
 from active_knowledge_server.security.audit import AuditLogger
 from active_knowledge_server.security.http import fastmcp_http_middleware_entries
 
@@ -120,6 +128,7 @@ def create_fastmcp_app(
 
 	configure_logging(resolved.model, layout)
 	audit_logger = AuditLogger.from_config(resolved.model, layout)
+	observability_store = ObservabilityStore.from_layout(layout)
 	context = MCPAppContext(
 		config=resolved.model,
 		layout=layout,
@@ -127,6 +136,7 @@ def create_fastmcp_app(
 		source_docs_root=source_docs_root,
 		config_summary=config_summary,
 		audit_logger=audit_logger,
+		observability_store=observability_store,
 		cwd=root,
 	)
 	http_middleware = tuple(
@@ -173,8 +183,15 @@ def _register_health_route(mcp: Any, context: MCPAppContext) -> None:
 	"""Expose a basic health route for HTTP transport deployments."""
 
 	@mcp.custom_route("/health", methods=["GET"])
-	async def health_check(request: Request) -> JSONResponse:  # pragma: no cover - HTTP runtime hook
+	async def health_check(
+		request: Request,
+	) -> JSONResponse:  # pragma: no cover - HTTP runtime hook
 		del request
+		observability = context.observability_store.collect_status(
+			config=context.config,
+			layout=context.layout,
+			cwd=context.cwd,
+		)
 		return JSONResponse(
 			{
 				"status": "ok",
@@ -182,6 +199,7 @@ def _register_health_route(mcp: Any, context: MCPAppContext) -> None:
 				"version": __version__,
 				"transport": context.config.server.transport,
 				"deployment_mode": context.config.deployment_mode,
+				"health_summary": observability["health_summary"],
 			}
 		)
 
