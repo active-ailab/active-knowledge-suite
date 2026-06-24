@@ -5,6 +5,7 @@
 The detailed architecture and implementation plan is maintained in:
 
 - [Active Knowledge Server 架构与方案设计](../doc/active_knowledge_server_architecture_design.md)
+- [Active Knowledge Server 使用与说明文档](../doc/active_knowledge_server_usage_guide.md)
 
 Planned responsibilities:
 

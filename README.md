@@ -17,6 +17,14 @@
 
 ---
 
+## 详细文档
+
+- 使用与实现说明：[`doc/active_knowledge_server_usage_guide.md`](./doc/active_knowledge_server_usage_guide.md)
+- 架构设计：[`doc/active_knowledge_server_architecture_design.md`](./doc/active_knowledge_server_architecture_design.md)
+- 本地全功能集成测试：[`doc/active_knowledge_server_local_full_integration_test.md`](./doc/active_knowledge_server_local_full_integration_test.md)
+
+---
+
 ## 核心特性
 
 | 特性 | 说明 |
