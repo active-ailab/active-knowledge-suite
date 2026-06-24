@@ -118,6 +118,7 @@ def test_subcommands_have_help() -> None:
         "baseline",
         "release",
         "status",
+        "feedback",
         "validate",
         "clean",
         "eval",

@@ -47,6 +47,16 @@ from active_knowledge_server.eval.baseline import (
 from active_knowledge_server.eval.metrics import PERFORMANCE_GATE_THRESHOLDS
 from active_knowledge_server.eval.runner import EvalRunReport
 from active_knowledge_server.eval.stability import StabilityBenchmark
+from active_knowledge_server.feedback import (
+    FeedbackMissedTarget,
+    build_feedback_evidence_annotations,
+    build_feedback_record,
+    load_feedback_record,
+    load_query_result_payload,
+    write_eval_draft,
+    write_feedback_record,
+    write_learned_seed_draft,
+)
 from active_knowledge_server.indexing import (
     CODE_INDEXER_SCHEMA_VERSION,
     CURRENT_SNAPSHOT_ID,
@@ -82,7 +92,7 @@ from active_knowledge_server.indexing.jobs import (
     SQLiteJobStore,
     lock_expired,
 )
-from active_knowledge_server.mcp.schemas import MCP_INTERFACE_SCHEMA_VERSION
+from active_knowledge_server.mcp.schemas import ALL_TOOL_NAMES, MCP_INTERFACE_SCHEMA_VERSION
 from active_knowledge_server.models import QueryResult, Warning
 from active_knowledge_server.models.responses import QUERY_RESULT_SCHEMA_VERSION
 from active_knowledge_server.observability.metrics import ObservabilityStore
@@ -429,6 +439,143 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output format.",
     )
     status_parser.set_defaults(handler=handle_status)
+
+    feedback_parser = subparsers.add_parser(
+        "feedback",
+        parents=[common],
+        help="Record user feedback and generate reviewable eval/learned-seed drafts.",
+    )
+    feedback_subparsers = feedback_parser.add_subparsers(
+        dest="feedback_command",
+        metavar="FEEDBACK_COMMAND",
+    )
+
+    feedback_record_parser = feedback_subparsers.add_parser(
+        "record",
+        parents=[common],
+        help="Persist one feedback record under local artifacts/feedback/.",
+    )
+    feedback_record_parser.add_argument("--query", required=True, help="Original user query text.")
+    feedback_record_parser.add_argument(
+        "--tool",
+        choices=ALL_TOOL_NAMES,
+        help="Tool used for the query when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--intent",
+        default="unknown",
+        help="Resolved query intent when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--profile-id",
+        default="not_required",
+        help="Resolved profile id when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--snapshot-id",
+        default="current",
+        help="Resolved snapshot id when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--result-status",
+        default="ok",
+        help="Query result status when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--result-summary",
+        default="Feedback captured without a saved query result payload.",
+        help="Human-readable result summary when --result-file is not provided.",
+    )
+    feedback_record_parser.add_argument(
+        "--request-id",
+        help="Optional request id or trace id used to correlate with audit logs.",
+    )
+    feedback_record_parser.add_argument(
+        "--result-file",
+        type=Path,
+        help="Saved QueryResult JSON used to import route, warnings, and evidence ids.",
+    )
+    feedback_record_parser.add_argument(
+        "--evidence-useful",
+        action="append",
+        default=[],
+        help="Returned evidence id marked as useful. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--evidence-not-useful",
+        action="append",
+        default=[],
+        help="Returned evidence id marked as not useful. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--evidence-accepted",
+        action="append",
+        default=[],
+        help="Returned evidence id that was ultimately adopted. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--missed-path",
+        action="append",
+        default=[],
+        help="Path that should have been returned but was missed. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--missed-symbol",
+        action="append",
+        default=[],
+        help="Symbol that should have been returned but was missed. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--missed-doc-section",
+        action="append",
+        default=[],
+        help="Document section locator that should have been returned but was missed. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--source-ref",
+        action="append",
+        default=[],
+        help="Source reference for this feedback, such as a smoke-test report path. Repeatable.",
+    )
+    feedback_record_parser.add_argument(
+        "--note",
+        help="Optional reviewer note stored on the feedback record.",
+    )
+    feedback_record_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    feedback_record_parser.set_defaults(handler=handle_feedback_record)
+
+    feedback_eval_parser = feedback_subparsers.add_parser(
+        "draft-eval",
+        parents=[common],
+        help="Generate one reviewable eval-case YAML draft from a stored feedback record.",
+    )
+    feedback_eval_parser.add_argument("--feedback-id", required=True, help="Stored feedback id.")
+    feedback_eval_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    feedback_eval_parser.set_defaults(handler=handle_feedback_draft_eval)
+
+    feedback_seed_parser = feedback_subparsers.add_parser(
+        "draft-seed",
+        parents=[common],
+        help="Generate one review-pending learned-seed Markdown draft from feedback.",
+    )
+    feedback_seed_parser.add_argument("--feedback-id", required=True, help="Stored feedback id.")
+    feedback_seed_parser.add_argument(
+        "--format",
+        choices=_FORMAT_CHOICES,
+        default="text",
+        help="Output format.",
+    )
+    feedback_seed_parser.set_defaults(handler=handle_feedback_draft_seed)
 
     validate_parser = subparsers.add_parser(
         "validate",
@@ -1845,6 +1992,29 @@ def _optional_nonempty_text(value: object) -> str | None:
     return text or None
 
 
+def _feedback_missed_targets(args: argparse.Namespace) -> list[FeedbackMissedTarget]:
+    targets: list[FeedbackMissedTarget] = []
+    for locator in getattr(args, "missed_path", ()) or ():
+        normalized = _optional_nonempty_text(locator)
+        if normalized is not None:
+            targets.append(FeedbackMissedTarget(kind="path", locator=normalized))
+    for locator in getattr(args, "missed_symbol", ()) or ():
+        normalized = _optional_nonempty_text(locator)
+        if normalized is not None:
+            targets.append(FeedbackMissedTarget(kind="symbol", locator=normalized))
+    for locator in getattr(args, "missed_doc_section", ()) or ():
+        normalized = _optional_nonempty_text(locator)
+        if normalized is not None:
+            targets.append(FeedbackMissedTarget(kind="doc_section", locator=normalized))
+    return targets
+
+
+def feedback_artifact_root(resolved: ResolvedConfig) -> Path:
+    """Return the managed feedback artifact root under local artifacts."""
+
+    return workdir_layout(resolved).local_artifacts_dir / "feedback"
+
+
 def handle_rebuild(args: argparse.Namespace) -> int:
     """Execute rebuild operations for selected artifacts."""
 
@@ -2021,6 +2191,119 @@ def handle_status(args: argparse.Namespace) -> int:
         print(format_recent_index_health_line(observability))
         for warning in payload["warnings"]:
             print(f"Warning [{warning['code']}]: {warning['message']}")
+    return 0
+
+
+def handle_feedback_record(args: argparse.Namespace) -> int:
+    """Persist one feedback record in local artifacts."""
+
+    resolved = resolve_from_args(args)
+    result = None
+    route: Mapping[str, object] | None = None
+    if args.result_file is not None:
+        result, raw_route = load_query_result_payload(Path(args.result_file))
+        route = raw_route
+
+    tool_name = cast(str | None, args.tool)
+    if result is not None:
+        tool_name = result.tool_name
+    if tool_name is None:
+        raise ConfigError("--tool is required when --result-file is not provided.")
+
+    evidence_feedback = ()
+    if result is not None:
+        evidence_feedback = build_feedback_evidence_annotations(
+            result,
+            useful_ids=args.evidence_useful,
+            not_useful_ids=args.evidence_not_useful,
+            accepted_ids=args.evidence_accepted,
+            note=args.note,
+        )
+    elif args.evidence_useful or args.evidence_not_useful or args.evidence_accepted:
+        raise ConfigError(
+            "evidence verdicts require --result-file so evidence ids can be validated."
+        )
+
+    missed_targets = tuple(_feedback_missed_targets(args))
+    record = build_feedback_record(
+        query=str(args.query),
+        tool_name=cast(Any, tool_name),
+        query_intent=cast(Any, result.query_intent if result is not None else str(args.intent)),
+        profile_id=result.profile_id if result is not None else str(args.profile_id),
+        snapshot_id=result.snapshot_id if result is not None else str(args.snapshot_id),
+        result_status=cast(
+            Any,
+            result.result_status if result is not None else str(args.result_status),
+        ),
+        result_summary=result.summary if result is not None else str(args.result_summary),
+        request_id=_optional_nonempty_text(args.request_id),
+        warning_codes=() if result is None else [warning.code for warning in result.warnings],
+        source_refs=args.source_ref,
+        route=route,
+        evidence_feedback=evidence_feedback,
+        missed_targets=missed_targets,
+        returned_evidence_refs=() if result is None else result.evidence_refs,
+        note=_optional_nonempty_text(args.note),
+        query_result_path=str(args.result_file) if args.result_file is not None else None,
+    )
+    artifact_root = feedback_artifact_root(resolved)
+    output_path = write_feedback_record(artifact_root, record)
+    payload = {
+        "command": "feedback record",
+        "status": "ok",
+        "feedback_id": record.feedback_id,
+        "record_path": str(output_path),
+        "artifact_root": str(artifact_root),
+        "record": record.to_dict(),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Feedback recorded: {record.feedback_id}")
+        print(f"Record: {output_path}")
+    return 0
+
+
+def handle_feedback_draft_eval(args: argparse.Namespace) -> int:
+    """Generate one eval-case draft from feedback."""
+
+    resolved = resolve_from_args(args)
+    artifact_root = feedback_artifact_root(resolved)
+    record = load_feedback_record(artifact_root, str(args.feedback_id))
+    output_path = write_eval_draft(artifact_root, record)
+    payload = {
+        "command": "feedback draft-eval",
+        "status": "ok",
+        "feedback_id": record.feedback_id,
+        "record_path": str(artifact_root / "records" / f"{record.feedback_id}.json"),
+        "draft_path": str(output_path),
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Eval draft: {output_path}")
+    return 0
+
+
+def handle_feedback_draft_seed(args: argparse.Namespace) -> int:
+    """Generate one review-pending learned-seed draft from feedback."""
+
+    resolved = resolve_from_args(args)
+    artifact_root = feedback_artifact_root(resolved)
+    record = load_feedback_record(artifact_root, str(args.feedback_id))
+    output_path = write_learned_seed_draft(artifact_root, record)
+    payload = {
+        "command": "feedback draft-seed",
+        "status": "ok",
+        "feedback_id": record.feedback_id,
+        "record_path": str(artifact_root / "records" / f"{record.feedback_id}.json"),
+        "draft_path": str(output_path),
+        "review_required": True,
+    }
+    if args.format == "json":
+        print_json(payload)
+    else:
+        print(f"Learned-seed draft: {output_path}")
     return 0
 
 

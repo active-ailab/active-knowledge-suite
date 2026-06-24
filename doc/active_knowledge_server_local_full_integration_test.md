@@ -407,6 +407,94 @@ Phase A 通过标准：
 - `workspace_view`、`code_resolve`、`evidence_bundle` 的 `result_status` 不应为 `blocked` 或 `error`。
 - `docs_search` 只有在 `knowledge-sources/` 已经放入实际文档时才算必测项。
 
+### 2.3 用户反馈闭环 smoke（ZeppOS）
+
+这一步验证 `O8-06`：真实查询样本能否沉淀为 feedback artifact、eval 草稿和 learned-seed 待审核草稿。
+
+推荐继续使用真实工程 `/home/gangan/ZeppOS`，不要退回 synthetic fixture。原因是反馈闭环的价值就在于把“真实用户问题”和“真实失败样本”转成可回归资产。
+
+先复用与上文一致的 live query handler 路径，单独导出一条结果：
+
+```bash
+uv run python - <<'PY' | tee "$LOCAL_ARTIFACTS/mcp/feedback-smoke.json"
+import json
+from pathlib import Path
+
+from active_knowledge_server.config.loader import resolve_config
+from active_knowledge_server.server import build_server_app
+
+root = Path.cwd()
+resolved = resolve_config(config_path=Path("../examples/local-single-user.yaml"))
+app = build_server_app(resolved, cwd=root)
+handlers = {tool.name: tool.handler for tool in app.inventory.tools}
+result = handlers["code_resolve"](
+    "health_service_publish_event() 在哪里定义？",
+    granularity="symbol",
+).model_dump(mode="json")
+
+output = Path("/tmp/active-kb-feedback-smoke")
+output.mkdir(parents=True, exist_ok=True)
+path = output / "query-result.json"
+path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+print(json.dumps({
+    "result_status": result["result_status"],
+    "tool_name": result["tool_name"],
+    "evidence_ids": [item["evidence_id"] for item in result.get("evidence_refs", [])],
+    "query_result_path": str(path),
+}, ensure_ascii=False, indent=2))
+PY
+```
+
+如果这条 query 当前返回 `ok`，优先拿 returned `evidence_id` 做正向反馈：
+
+```bash
+uv run active-kb feedback record \
+  --config "$CONFIG" \
+  --query "health_service_publish_event() 在哪里定义？" \
+  --result-file /tmp/active-kb-feedback-smoke/query-result.json \
+  --evidence-useful EVIDENCE_ID \
+  --source-ref "zeppos-smoke:/tmp/active-kb-feedback-smoke/query-result.json" \
+  --format json | tee "$LOCAL_ARTIFACTS/mcp/feedback-record.json"
+```
+
+如果这条 query 当前返回 `zero_result`、`blocked` 或 `error`，就把它当成真实失败样本记录未命中目标：
+
+```bash
+uv run active-kb feedback record \
+  --config "$CONFIG" \
+  --query "health_service_publish_event() 在哪里定义？" \
+  --result-file /tmp/active-kb-feedback-smoke/query-result.json \
+  --missed-symbol health_service_publish_event \
+  --source-ref "zeppos-smoke:/tmp/active-kb-feedback-smoke/query-result.json" \
+  --note "真实工程 smoke 失败样本，转成后续回归资产。" \
+  --format json | tee "$LOCAL_ARTIFACTS/mcp/feedback-record.json"
+```
+
+记下 `feedback-record.json` 里的 `feedback_id`，继续生成两个 reviewable 草稿：
+
+```bash
+FEEDBACK_ID="$(jq -r '.feedback_id' "$LOCAL_ARTIFACTS/mcp/feedback-record.json")"
+
+uv run active-kb feedback draft-eval \
+  --config "$CONFIG" \
+  --feedback-id "$FEEDBACK_ID" \
+  --format json | tee "$LOCAL_ARTIFACTS/mcp/feedback-eval-draft.json"
+
+uv run active-kb feedback draft-seed \
+  --config "$CONFIG" \
+  --feedback-id "$FEEDBACK_ID" \
+  --format json | tee "$LOCAL_ARTIFACTS/mcp/feedback-seed-draft.json"
+```
+
+通过标准：
+
+- `feedback record` 成功输出 `.active-kb/local/artifacts/feedback/records/<feedback-id>.json`。
+- `feedback draft-eval` 成功输出 `.active-kb/local/artifacts/feedback/eval-drafts/<feedback-id>.yaml`。
+- `feedback draft-seed` 成功输出 `.active-kb/local/artifacts/feedback/learned-seed-drafts/<feedback-id>.md`。
+- 默认输出路径不应直接落到 `knowledge-sources/learned-seeds/` 或 `eval/cases.yaml`。
+- `draft-seed` 的 front matter 必须包含 `review_status: pending`。
+
 ## 3. Phase B：Synthetic Gate
 
 这一阶段验证 server 的质量、性能、稳定性和可重复性契约。它依赖 synthetic benchmark，不依赖你当前 ZeppOS 目录里必须存在某个特定符号。

@@ -1616,17 +1616,33 @@ TODO：
 
 ### O8-06 用户反馈闭环
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P2`
-- 类型：`OPS`、`TEST`
+- 类型：`OPS`、`TEST`、`IMPL`
 - 依赖：`Q5-07`、`E7-01`
 
 TODO：
 
-- [ ] 记录有用/无用 evidence 反馈。
-- [ ] 记录未命中目标文件/symbol/doc section。
-- [ ] 支持将反馈转成 eval case 草稿。
-- [ ] learned-seeds 写入需要人工审核状态。
+- [x] 记录有用/无用 evidence 反馈。
+- [x] 记录未命中目标文件/symbol/doc section。
+- [x] 支持将反馈转成 eval case 草稿。
+- [x] learned-seeds 写入需要人工审核状态。
+
+输出：
+
+- 已新增 `active-kb feedback record`，将反馈写入 `.active-kb/local/artifacts/feedback/records/<feedback-id>.json`，支持：
+  - 基于 `--result-file` 校验 returned `evidence_id`
+  - 记录 `evidence-useful` / `evidence-not-useful` / `evidence-accepted`
+  - 记录 `missed-path` / `missed-symbol` / `missed-doc-section`
+- 已新增 `active-kb feedback draft-eval`，将反馈转成 `.active-kb/local/artifacts/feedback/eval-drafts/<feedback-id>.yaml`，默认不直接改写 `eval/cases.yaml`。
+- 已新增 `active-kb feedback draft-seed`，将反馈转成 `.active-kb/local/artifacts/feedback/learned-seed-drafts/<feedback-id>.md`，front matter 固定写 `review_status: pending`，默认不直接写入 `knowledge-sources/learned-seeds/`。
+- 行业调研对齐：
+  - 生产反馈先绑定到 trace/run/evidence，再回流到离线评测集，而不是直接改权威知识。
+  - 在线反馈与离线 eval 要分层：线上负责发现真实失败样本，线下负责回归和发布门禁。
+  - learned-seed 只能通过人工审核晋升，避免“用户反馈直接污染知识库”。
+- 真实工程验证：2026-06-24 基于 `/home/gangan/ZeppOS` 和 `examples/local-single-user.yaml` 执行 `code_resolve("health_service_publish_event() 在哪里定义？")` 的 smoke。
+  - 当前查询结果命中 `SQLiteMigrationError: baseline_metadata requires explicit confirm_major=True for major schema migration.`
+  - 虽然 query 本身返回 `result_status=error`，但已成功通过 `feedback record -> draft-eval -> draft-seed` 把该阻断路径沉淀为 reviewable artifact，验证“真实故障样本 -> eval 草稿”的闭环可用。
 
 验收标准：
 

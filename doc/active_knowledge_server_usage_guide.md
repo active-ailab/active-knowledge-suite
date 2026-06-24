@@ -1160,3 +1160,79 @@ uv run active-kb serve \
 
 - [Active Knowledge Server 架构与方案设计](./active_knowledge_server_architecture_design.md)
 - [Active Knowledge Server 本地全功能集成测试](./active_knowledge_server_local_full_integration_test.md)
+
+---
+
+## 25. 用户反馈闭环
+
+当前仓库已经提供一个“本地 artifact 先行”的最小反馈闭环：
+
+- `active-kb feedback record`
+- `active-kb feedback draft-eval`
+- `active-kb feedback draft-seed`
+
+### 25.1 默认写入位置
+
+所有反馈相关产物默认都写到 `.active-kb/local/artifacts/feedback/`：
+
+- `records/<feedback-id>.json`
+- `eval-drafts/<feedback-id>.yaml`
+- `learned-seed-drafts/<feedback-id>.md`
+
+这样做的目的，是让反馈先进入 reviewable artifact，而不是直接改动：
+
+- `eval/cases.yaml`
+- `knowledge-sources/learned-seeds/`
+
+这也是当前实现对“反馈不会直接污染权威知识”的主要保护边界。
+
+### 25.2 推荐工作流
+
+1. 用真实 query 结果调用 `feedback record`。
+2. 如果 query 成功，优先标记 `--evidence-useful` / `--evidence-not-useful` / `--evidence-accepted`。
+3. 如果 query 失败或漏召回，记录 `--missed-path` / `--missed-symbol` / `--missed-doc-section`。
+4. 用 `feedback draft-eval` 生成回归样本草稿。
+5. 用 `feedback draft-seed` 生成 `review_status: pending` 的知识卡草稿。
+6. 人工审核后，再决定是否把草稿提升进正式 `eval/cases.yaml` 或 `knowledge-sources/learned-seeds/`。
+
+示例：
+
+```bash
+uv run active-kb feedback record \
+  --config ../examples/local-single-user.yaml \
+  --query "health_service_publish_event() 在哪里定义？" \
+  --result-file /tmp/active-kb-feedback-smoke/query-result.json \
+  --missed-symbol health_service_publish_event \
+  --source-ref "zeppos-smoke:/tmp/active-kb-feedback-smoke/query-result.json" \
+  --format json
+
+uv run active-kb feedback draft-eval \
+  --config ../examples/local-single-user.yaml \
+  --feedback-id FEEDBACK_ID \
+  --format json
+
+uv run active-kb feedback draft-seed \
+  --config ../examples/local-single-user.yaml \
+  --feedback-id FEEDBACK_ID \
+  --format json
+```
+
+### 25.3 与行业实践的对齐点
+
+这套实现刻意对齐了当前常见的 LLM/RAG 反馈闭环做法：
+
+- 先把生产反馈附着在 trace / run / retrieval step，而不是直接改权威语料。
+- 在线反馈负责发现真实失败样本，离线 eval 负责回归和发布门禁。
+- 反馈最好能下钻到 retrieval evidence 级别，而不是只留一个“好/不好”总分。
+- learned knowledge 必须经过人工审核，才能进入长期知识资产。
+
+参考资料：
+
+- LangSmith `Evaluation concepts`：生产反馈应回流为 offline dataset example。  
+  https://docs.langchain.com/langsmith/evaluation-concepts
+- LangSmith `Log user feedback using the SDK`：反馈可以挂到 trace，也可以挂到 RAG 的 retrieval/generation 子步骤。  
+  https://docs.langchain.com/langsmith/attach-user-feedback
+- Arize Phoenix `Annotations and Evaluation`：先做人类标注，再把用户投诉和 thumbs up/down 绑定到 trace。  
+  https://arize.com/docs/phoenix/tracing/tutorial/annotations-and-evaluations
+- Arize Phoenix `Evaluate RAG`：RAG 评测要明确区分 retrieval evaluation 和 response evaluation。  
+  https://arize.com/docs/phoenix/cookbook/evaluation/evaluate-rag
