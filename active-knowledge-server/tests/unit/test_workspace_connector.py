@@ -147,6 +147,47 @@ def test_workspace_scan_ignores_git_internals_even_without_config_exclude(tmp_pa
     assert all(not entry.relative_path.startswith(".git/") for entry in inventory.files)
 
 
+def test_workspace_scan_hard_excludes_repo_cache_even_without_config_exclude(
+    tmp_path: Path,
+) -> None:
+    connector, workspace = build_connector(tmp_path, exclude=())
+    write_file(
+        workspace / ".repo" / "project-objects" / "demo.git" / "objects" / "cache.pack",
+        "x",
+    )
+    write_file(workspace / "main.c", "int main(void) { return 0; }\n")
+
+    events = []
+    inventory = connector.scan(progress_callback=events.append)
+
+    assert "main.c" in {entry.relative_path for entry in inventory.files}
+    assert all(not entry.relative_path.startswith(".repo/") for entry in inventory.files)
+    assert all(not event.relative_path.startswith(".repo") for event in events)
+
+
+def test_workspace_scan_respects_gitignore_with_nested_repo_boundaries(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("git is not available")
+
+    connector, workspace = build_connector(tmp_path, exclude=())
+    nested = workspace / "components" / "demo"
+    nested.mkdir(parents=True)
+    write_file(nested / ".gitignore", "generated/\nignored.c\n")
+    write_file(nested / "tracked.c", "int tracked(void) { return 0; }\n")
+    write_file(nested / "ignored.c", "int ignored(void) { return 0; }\n")
+    write_file(nested / "generated" / "artifact.c", "int artifact(void) { return 0; }\n")
+    nested_head = init_git_repo(nested)
+
+    inventory = connector.scan()
+
+    files = {entry.relative_path for entry in inventory.files}
+    assert inventory.commit_map["components/demo"] == nested_head
+    assert "components/demo/tracked.c" in files
+    assert "components/demo/.gitignore" in files
+    assert "components/demo/ignored.c" not in files
+    assert "components/demo/generated/artifact.c" not in files
+
+
 def test_workspace_scan_emits_file_level_progress(tmp_path: Path) -> None:
     connector, workspace = build_connector(tmp_path)
     write_file(workspace / "drivers" / "input" / "button.c", "int button(void) { return 1; }\n")
@@ -159,5 +200,8 @@ def test_workspace_scan_emits_file_level_progress(tmp_path: Path) -> None:
     assert events
     assert events[0].relative_path == "."
     assert any(event.kind == "directory" and event.relative_path == "drivers" for event in events)
-    assert any(event.kind == "file" and event.relative_path == "drivers/input/button.c" for event in events)
+    assert any(
+        event.kind == "file" and event.relative_path == "drivers/input/button.c"
+        for event in events
+    )
     assert events[-1].files_scanned == len(inventory.files)

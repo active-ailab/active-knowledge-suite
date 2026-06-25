@@ -19,7 +19,7 @@ from active_knowledge_server.security.path_guard import GuardedPath, PathBlocked
 WORKSPACE_INVENTORY_SCHEMA_VERSION: Final = "workspace_inventory.v1"
 _HASH_CHUNK_SIZE: Final = 1024 * 1024
 _GIT_TIMEOUT_SECONDS: Final = 5
-_HARD_EXCLUDE_PATTERNS: Final = (".git", ".hg", ".svn")
+_HARD_EXCLUDE_PATTERNS: Final = (".git", ".hg", ".svn", ".repo")
 
 GitBoundaryKind = Literal["directory", "file", "submodule_status"]
 WorkspaceScanProgressKind = Literal["directory", "file"]
@@ -243,10 +243,32 @@ class _RepoCandidate:
     boundary_kind: GitBoundaryKind
 
 
+@dataclass(frozen=True)
+class _RepoScanContext:
+    relative_path: str
+    display_path: str
+    guarded_path: GuardedPath
+
+
+@dataclass(frozen=True)
+class _DirectoryEntryState:
+    relative_path: str
+    guarded: GuardedPath
+    is_dir: bool
+    is_regular_file: bool
+    is_symlink: bool
+    size_bytes: int
+
+
 @dataclass
 class _WorkspaceScanProgressState:
     files_scanned: int = 0
     directories_scanned: int = 0
+
+
+@dataclass
+class _GitIgnoreProbeState:
+    failed_repositories: set[str] = field(default_factory=set)
 
 
 WorkspaceScanProgressCallback = Callable[[WorkspaceScanProgress], None]
@@ -309,6 +331,7 @@ class WorkspaceConnector:
         repo_candidates: dict[str, _RepoCandidate] = {}
         area_stats: dict[str, _AreaStats] = {}
         progress_state = _WorkspaceScanProgressState()
+        gitignore_state = _GitIgnoreProbeState()
         callback(
             WorkspaceScanProgress(
                 kind="directory",
@@ -328,6 +351,8 @@ class WorkspaceConnector:
             warnings=warnings,
             progress_callback=callback,
             progress_state=progress_state,
+            active_repo=None,
+            gitignore_state=gitignore_state,
         )
 
         repositories = discover_repositories(root, repo_candidates.values(), self.guard, warnings)
@@ -386,6 +411,8 @@ class WorkspaceConnector:
         warnings: list[WorkspaceWarning],
         progress_callback: WorkspaceScanProgressCallback,
         progress_state: _WorkspaceScanProgressState,
+        active_repo: _RepoScanContext | None,
+        gitignore_state: _GitIgnoreProbeState,
     ) -> None:
         marker_kind = git_marker_kind(current, self.guard, warnings)
         if marker_kind is not None:
@@ -393,6 +420,11 @@ class WorkspaceConnector:
                 relative_path=relative_dir or ".",
                 display_path=display_for_relative(root.display_path, relative_dir),
                 boundary_kind=marker_kind,
+            )
+            active_repo = _RepoScanContext(
+                relative_path=relative_dir or ".",
+                display_path=display_for_relative(root.display_path, relative_dir),
+                guarded_path=current,
             )
 
         try:
@@ -407,6 +439,7 @@ class WorkspaceConnector:
             )
             return
 
+        child_entries: list[_DirectoryEntryState] = []
         for child in children:
             relative_path = child.relative_to(root.normalized_path).as_posix()
             guarded = self._guard_child(child, root, relative_path, warnings)
@@ -427,7 +460,7 @@ class WorkspaceConnector:
 
             is_symlink = stat.S_ISLNK(lstat_result.st_mode)
             mode = lstat_result.st_mode
-            target_stat = None
+            size_bytes = lstat_result.st_size
             if is_symlink:
                 try:
                     target_stat = guarded.real_path.stat()
@@ -441,13 +474,40 @@ class WorkspaceConnector:
                     )
                     continue
                 mode = target_stat.st_mode
+                size_bytes = target_stat.st_size
 
             is_dir = stat.S_ISDIR(mode)
             if is_excluded(relative_path, is_dir=is_dir, exclude=self.options.exclude):
                 continue
+            is_regular_file = stat.S_ISREG(mode)
+            if not is_dir and not is_regular_file:
+                continue
+            child_entries.append(
+                _DirectoryEntryState(
+                    relative_path=relative_path,
+                    guarded=guarded,
+                    is_dir=is_dir,
+                    is_regular_file=is_regular_file,
+                    is_symlink=is_symlink,
+                    size_bytes=size_bytes,
+                )
+            )
 
-            if is_dir:
-                if is_symlink:
+        gitignored_paths = self._gitignored_paths(
+            root=root,
+            active_repo=active_repo,
+            child_entries=child_entries,
+            warnings=warnings,
+            gitignore_state=gitignore_state,
+        )
+
+        for entry in child_entries:
+            relative_path = entry.relative_path
+            if relative_path in gitignored_paths:
+                continue
+
+            if entry.is_dir:
+                if entry.is_symlink:
                     warnings.append(
                         WorkspaceWarning(
                             code="workspace.symlink_dir_skipped",
@@ -469,7 +529,7 @@ class WorkspaceConnector:
                 )
                 self._scan_directory(
                     root=root,
-                    current=guarded,
+                    current=entry.guarded,
                     relative_dir=relative_path,
                     scanned_files=scanned_files,
                     repo_candidates=repo_candidates,
@@ -477,18 +537,19 @@ class WorkspaceConnector:
                     warnings=warnings,
                     progress_callback=progress_callback,
                     progress_state=progress_state,
+                    active_repo=active_repo,
+                    gitignore_state=gitignore_state,
                 )
                 continue
 
-            if not stat.S_ISREG(mode):
+            if not entry.is_regular_file:
                 continue
             if not is_included(relative_path, include=self.options.include):
                 continue
 
-            size_bytes = target_stat.st_size if target_stat is not None else lstat_result.st_size
             content_hash = None
             if self.options.hash_files:
-                content_hash = hash_file(guarded, root, relative_path, warnings)
+                content_hash = hash_file(entry.guarded, root, relative_path, warnings)
                 if content_hash is None:
                     continue
             register_area(area_stats, root.display_path, relative_path, is_file=True)
@@ -496,11 +557,11 @@ class WorkspaceConnector:
                 _ScannedFile(
                     relative_path=relative_path,
                     display_path=display_for_relative(root.display_path, relative_path),
-                    size_bytes=size_bytes,
+                    size_bytes=entry.size_bytes,
                     content_hash=content_hash,
                     area=area_for_relative_path(relative_path),
                     language=detect_language(Path(relative_path)),
-                    is_symlink=is_symlink,
+                    is_symlink=entry.is_symlink,
                 )
             )
             progress_state.files_scanned += 1
@@ -513,6 +574,51 @@ class WorkspaceConnector:
                     directories_scanned=progress_state.directories_scanned,
                 )
             )
+
+    def _gitignored_paths(
+        self,
+        *,
+        root: GuardedPath,
+        active_repo: _RepoScanContext | None,
+        child_entries: list[_DirectoryEntryState],
+        warnings: list[WorkspaceWarning],
+        gitignore_state: _GitIgnoreProbeState,
+    ) -> set[str]:
+        if active_repo is None or not child_entries:
+            return set()
+
+        repo_inputs: list[str] = []
+        workspace_by_repo_path: dict[str, str] = {}
+        for entry in child_entries:
+            repo_relative_path = workspace_to_repo_relative_path(
+                entry.relative_path,
+                repo_relative_path=active_repo.relative_path,
+            )
+            if not repo_relative_path:
+                continue
+            probe_path = f"{repo_relative_path}/" if entry.is_dir else repo_relative_path
+            repo_inputs.append(probe_path)
+            workspace_by_repo_path[repo_relative_path] = entry.relative_path
+            workspace_by_repo_path[probe_path] = entry.relative_path
+
+        ignored = git_check_ignored_paths(active_repo.guarded_path, repo_inputs)
+        if ignored.error is not None:
+            if active_repo.relative_path not in gitignore_state.failed_repositories:
+                gitignore_state.failed_repositories.add(active_repo.relative_path)
+                warnings.append(
+                    WorkspaceWarning(
+                        code="workspace.gitignore_probe_failed",
+                        message="Cannot evaluate gitignore rules for repository boundary.",
+                        display_path=active_repo.display_path,
+                        details={"error": ignored.error},
+                    )
+                )
+            return set()
+        return {
+            workspace_by_repo_path[repo_relative_path]
+            for repo_relative_path in ignored.paths
+            if repo_relative_path in workspace_by_repo_path
+        }
 
     def _guard_child(
         self,
@@ -672,6 +778,12 @@ class _GitResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class _GitPathListResult:
+    paths: tuple[str, ...]
+    error: str | None = None
+
+
 def run_git(repo: GuardedPath, args: tuple[str, ...]) -> _GitResult:
     """Run a bounded git command for a guarded repository path."""
 
@@ -693,6 +805,37 @@ def run_git(repo: GuardedPath, args: tuple[str, ...]) -> _GitResult:
         stderr = result.stderr.strip()
         return _GitResult(stdout=stdout, error=stderr or f"git exited {result.returncode}")
     return _GitResult(stdout=stdout)
+
+
+def git_check_ignored_paths(
+    repo: GuardedPath,
+    relative_paths: Iterable[str],
+) -> _GitPathListResult:
+    """Return repo-relative paths ignored by gitignore rules for one repository."""
+
+    candidates = tuple(path for path in relative_paths if path)
+    if not candidates:
+        return _GitPathListResult(paths=())
+
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(repo.normalized_path), "check-ignore", "-z", "--stdin"),
+            input="\0".join(candidates) + "\0",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        return _GitPathListResult(paths=(), error="git_not_available")
+    except subprocess.TimeoutExpired:
+        return _GitPathListResult(paths=(), error="git_timeout")
+
+    stdout = tuple(path for path in result.stdout.split("\0") if path)
+    if result.returncode in {0, 1}:
+        return _GitPathListResult(paths=stdout)
+    stderr = result.stderr.strip()
+    return _GitPathListResult(paths=(), error=stderr or f"git exited {result.returncode}")
 
 
 def git_marker_kind(
@@ -927,6 +1070,21 @@ def normalize_relative_path(relative_path: str) -> str:
     """Normalize a relative path emitted by git or config."""
 
     return relative_path.strip().replace("\\", "/").strip("/")
+
+
+def workspace_to_repo_relative_path(relative_path: str, *, repo_relative_path: str) -> str:
+    """Translate a workspace-relative path into a repo-relative path."""
+
+    normalized_path = normalize_relative_path(relative_path)
+    normalized_repo = normalize_relative_path(repo_relative_path)
+    if not normalized_path:
+        return ""
+    if not normalized_repo or normalized_repo == ".":
+        return normalized_path
+    prefix = f"{normalized_repo}/"
+    if normalized_path.startswith(prefix):
+        return normalized_path[len(prefix) :]
+    return normalized_path
 
 
 def path_matches_pattern(relative_path: str, pattern: str, *, is_dir: bool = False) -> bool:

@@ -248,7 +248,7 @@ server:
 
 paths:
   include: [application, components, drivers, framework, ui]
-  exclude: [.git, build/out, "**/.cache/**"]
+  exclude: [.git, .repo, build/out, "**/.cache/**"]
 ```
 
 完整配置示例见 [`examples/local-single-user.yaml`](examples/local-single-user.yaml) 和 [`examples/remote-shared.yaml`](examples/remote-shared.yaml)。

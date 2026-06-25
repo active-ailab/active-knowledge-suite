@@ -42,6 +42,7 @@ paths:
     - framework
   exclude:
     - .git
+    - .repo
     - build/out
     - build/tmp
     - "**/.cache/**"
