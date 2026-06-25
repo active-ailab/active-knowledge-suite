@@ -236,6 +236,126 @@ int health_bt_init(void)
     )
 
 
+def test_code_indexer_extracts_runtime_patterns(tmp_path: Path) -> None:
+    config = resolve_model(tmp_path)
+    workspace_root = Path(config.project.workspace_root)
+    runtime_dir = workspace_root / "components" / "runtime"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "runtime.c").write_text(
+        """#include "cmsis_os2.h"
+
+static osSemaphoreId_t irq_sem;
+static osEventFlagsId_t app_evt;
+static osMessageQueueId_t app_queue;
+static osTimerId_t app_timer;
+
+static void worker_entry(void *arg)
+{
+    osSemaphoreAcquire(irq_sem, osWaitForever);
+    osEventFlagsWait(app_evt, 1, osFlagsWaitAny, osWaitForever);
+    osMessageQueueGet(app_queue, arg, NULL, osWaitForever);
+}
+
+static void tick_handler(void *arg)
+{
+    osEventFlagsSet(app_evt, 1);
+}
+
+void app_start(void)
+{
+    app_timer = osTimerNew(tick_handler, osTimerOnce, NULL, NULL);
+    osTimerStart(app_timer, 10);
+    osThreadNew(worker_entry, NULL, NULL);
+}
+
+void queue_wrapper(osMessageQueueId_t queueId, void *eventData)
+{
+    osMessageQueuePut(queueId, &eventData, 0, 5);
+}
+
+void Timer_IRQHandler(void)
+{
+    osSemaphoreRelease(irq_sem);
+}
+
+void os_panic_handle(void *context)
+{
+    printk("failed vector fetch");
+}
+""",
+        encoding="utf-8",
+    )
+
+    indexed = CodeIndexer.from_config(config, cwd=tmp_path).collect(snapshot_id=CURRENT_SNAPSHOT_ID)
+
+    runtime_entity_types = {record.entity_type for record in indexed.entity_records}
+    assert runtime_entity_types >= {
+        "Task",
+        "Queue",
+        "Semaphore",
+        "Event",
+        "Timer",
+        "ISR",
+        "Vector",
+        "Fault",
+    }
+
+    relation_types = {record.relation_type for record in indexed.relation_records}
+    assert relation_types >= {
+        "creates_task",
+        "runs_in_context",
+        "posts_to_queue",
+        "waits_on_queue",
+        "waits_on_semaphore",
+        "signals_semaphore",
+        "waits_on_event",
+        "signals_event",
+        "creates_timer",
+        "starts_timer",
+        "triggers",
+        "mapped_to_vector",
+        "reports_fault",
+    }
+
+    runtime_relations = [
+        record
+        for record in indexed.relation_records
+        if record.relation_type
+        in {
+            "creates_task",
+            "runs_in_context",
+            "posts_to_queue",
+            "waits_on_queue",
+            "waits_on_semaphore",
+            "signals_semaphore",
+            "waits_on_event",
+            "signals_event",
+            "creates_timer",
+            "starts_timer",
+            "triggers",
+            "mapped_to_vector",
+            "reports_fault",
+        }
+    ]
+    assert runtime_relations
+    assert all(
+        record.metadata["extractor"] == "runtime_pattern_extractor"
+        for record in runtime_relations
+    )
+    assert all("confidence" in record.metadata for record in runtime_relations)
+    assert all("evidence_id" in record.metadata for record in runtime_relations)
+
+    evidence_ids = {
+        record.metadata["evidence_id"]
+        for record in runtime_relations
+        if isinstance(record.metadata.get("evidence_id"), str)
+    }
+    stored_evidence_ids = {record.evidence_id for record in indexed.evidence_records}
+    assert evidence_ids
+    assert evidence_ids <= stored_evidence_ids
+    assert indexed.metadata["runtime_patterns"]["relation_count"] >= len(runtime_relations)
+
+
 def test_code_indexer_parallel_collect_matches_serial_output(tmp_path: Path) -> None:
     config = resolve_model(tmp_path, overrides={"indexing": {"workers": 1}})
     parallel_config = config.model_copy(

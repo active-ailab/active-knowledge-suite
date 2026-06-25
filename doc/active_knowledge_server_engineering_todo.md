@@ -1656,17 +1656,18 @@ TODO：
 
 ### V9-01 Runtime pattern extractor
 
-- 状态：`[ ]`
+- 状态：`[x]`
 - 优先级：`P3`
 - 类型：`IMPL`、`TEST`
+- 输出：已在 `CodeIndexer` 接入 `runtime_pattern_extractor`，抽取 task/queue/semaphore/event/timer/ISR/vector/fault 关系，并为 runtime relation 写入 `confidence` 与 `evidence_id`；单测通过，且已用 `ZeppOS` 真实源码切片验证。
 
 TODO：
 
-- [ ] 抽取 task create wrapper。
-- [ ] 抽取 queue send/receive。
-- [ ] 抽取 semaphore/event/timer。
-- [ ] 抽取 ISR/vector/fault pattern。
-- [ ] 为 relation 标记 confidence 和 evidence。
+- [x] 抽取 task create wrapper。
+- [x] 抽取 queue send/receive。
+- [x] 抽取 semaphore/event/timer。
+- [x] 抽取 ISR/vector/fault pattern。
+- [x] 为 relation 标记 confidence 和 evidence。
 
 ### V9-02 Compile DB 接入
 

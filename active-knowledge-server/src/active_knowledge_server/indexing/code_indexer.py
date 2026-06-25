@@ -29,6 +29,7 @@ from active_knowledge_server.indexing.progress import (
     noop_progress_callback,
     utc_timestamp,
 )
+from active_knowledge_server.indexing.runtime_patterns import RuntimePatternExtractor
 from active_knowledge_server.indexing.snapshot import CURRENT_SNAPSHOT_ID
 from active_knowledge_server.parsers.ctags import (
     CodeParseWarning,
@@ -784,8 +785,19 @@ class CodeIndexer:
                             end_line=relation.line_number,
                             condition_expr=relation.condition_expr,
                             condition_macros=relation.condition_macros,
+                            )
                         )
-                    )
+
+        runtime_patterns = RuntimePatternExtractor().collect(
+            snapshot_id=snapshot_id,
+            file_records=tuple(_sorted_file_records(all_file_records.values())),
+            file_texts=file_texts,
+            entity_records=tuple(entity_records),
+            chunk_records=tuple(chunk_records),
+        )
+        entity_records.extend(runtime_patterns.entity_records)
+        relation_records.extend(runtime_patterns.relation_records)
+        evidence_records.extend(runtime_patterns.evidence_records)
 
         report_finalize(
             "Finalizing code index bundle for overlay apply"
@@ -805,6 +817,12 @@ class CodeIndexer:
                 "collect_workers": workers.to_dict(),
                 "timings": {
                     "parser_seconds": round(parser_seconds, 6),
+                },
+                "runtime_patterns": {
+                    "schema_version": runtime_patterns.schema_version,
+                    "entity_count": len(runtime_patterns.entity_records),
+                    "relation_count": len(runtime_patterns.relation_records),
+                    "evidence_count": len(runtime_patterns.evidence_records),
                 },
                 "diagnostics": {
                     "slowest_items": _top_slowest_items(slowest_items),
