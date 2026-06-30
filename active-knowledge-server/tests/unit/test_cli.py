@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any, cast
 
 from active_knowledge_server.cli import (
     main,
@@ -1576,6 +1577,116 @@ def test_index_incremental_json_auto_resumes_interrupted_job(
     with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
         row = connection.execute(
             "SELECT status, metadata_json FROM job WHERE job_id = 'index:auto-resume'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "ready"
+    assert json.loads(row[1])["resume_count"] == 1
+
+
+def test_index_incremental_auto_resumes_running_parsing_job(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_docs = tmp_path / "knowledge-sources"
+    workdir = tmp_path / ".active-kb"
+    workspace.mkdir()
+    source_docs.mkdir()
+    calls = {"count": 0}
+
+    class DummyPipeline:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def plan(self, *, snapshot_id: str, source: str, progress_callback) -> IncrementalIndexPlan:
+            return _empty_incremental_plan(snapshot_id=snapshot_id, source=source)
+
+        def run(
+            self,
+            *,
+            snapshot_id: str,
+            source: str,
+            progress_callback,
+            plan: IncrementalIndexPlan | None = None,
+            run_context: object | None = None,
+        ) -> IncrementalIndexResult:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                assert run_context is not None
+                context = cast(Any, run_context)
+                context.job_store.transition_or_update_running_metadata(
+                    context.job_id,
+                    "parsing",
+                    metadata_update={"last_phase": "code_finalize"},
+                )
+                raise SystemExit(99)
+            return IncrementalIndexResult(
+                schema_version="incremental_index_result.v1",
+                snapshot_id=snapshot_id,
+                result_status="ready",
+                plan=plan or _empty_incremental_plan(snapshot_id=snapshot_id, source=source),
+            )
+
+    monkeypatch.setattr("active_knowledge_server.cli.IncrementalIndexPipeline", DummyPipeline)
+
+    try:
+        main(
+            [
+                "index",
+                "--workdir",
+                str(workdir),
+                "--workspace",
+                str(workspace),
+                "--source-docs-root",
+                str(source_docs),
+                "--incremental",
+                "--no-resume",
+                "--job-id",
+                "index:orphaned-parsing",
+                "--format",
+                "json",
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 99
+    else:
+        raise AssertionError("first index run should simulate a hard process exit")
+    capsys.readouterr()
+
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        row = connection.execute(
+            "SELECT status FROM job WHERE job_id = 'index:orphaned-parsing'"
+        ).fetchone()
+        lock_count = connection.execute("SELECT COUNT(*) FROM job_lock").fetchone()
+    assert row == ("parsing",)
+    assert lock_count == (0,)
+
+    exit_code = main(
+        [
+            "index",
+            "--workdir",
+            str(workdir),
+            "--workspace",
+            str(workspace),
+            "--source-docs-root",
+            str(source_docs),
+            "--incremental",
+            "--resume",
+            "auto",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["job"]["job_id"] == "index:orphaned-parsing"
+    assert payload["job"]["resumed"] is True
+
+    with sqlite3.connect(workdir / "local" / "db" / "jobs.db") as connection:
+        row = connection.execute(
+            "SELECT status, metadata_json FROM job WHERE job_id = 'index:orphaned-parsing'"
         ).fetchone()
     assert row is not None
     assert row[0] == "ready"

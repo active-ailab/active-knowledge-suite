@@ -24,9 +24,7 @@ def test_renderer_keeps_recent_paths_bounded() -> None:
             )
         )
 
-    assert list(renderer.recent_paths) == [
-        f"components/file_{index}.c" for index in range(2, 12)
-    ]
+    assert list(renderer.recent_paths) == [f"components/file_{index}.c" for index in range(2, 12)]
 
 
 def test_renderer_interrupt_lines_include_snapshot() -> None:
@@ -174,7 +172,7 @@ def test_rich_reporter_renders_initial_frame(monkeypatch) -> None:
     assert reporter._progress.tasks[1].fields["label"] == "Stage"
 
 
-def test_rich_reporter_treats_discover_as_indeterminate() -> None:
+def test_rich_reporter_treats_discover_as_indeterminate_and_code_finalize_as_progress() -> None:
     pytest.importorskip("rich")
 
     class CaptureStream:
@@ -194,7 +192,10 @@ def test_rich_reporter_treats_discover_as_indeterminate() -> None:
                 phase="discover",
                 stage_total=3,
                 stage_done=0,
-                message="Scanning workspace inventory: services/sysservice.git (3973 files, 3824 directories)",
+                message=(
+                    "Scanning workspace inventory: services/sysservice.git "
+                    "(3973 files, 3824 directories)"
+                ),
             )
         )
         stage_task = reporter._progress.tasks[1]
@@ -210,7 +211,7 @@ def test_rich_reporter_treats_discover_as_indeterminate() -> None:
             )
         )
         stage_task = reporter._progress.tasks[1]
-        assert stage_task.total is None
-        assert stage_task.completed == 0
+        assert stage_task.total == 20
+        assert stage_task.completed == 20
     finally:
         reporter.close()

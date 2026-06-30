@@ -112,6 +112,7 @@ from active_knowledge_server.server import build_server_app, server_name
 from active_knowledge_server.storage import (
     ALL_SCOPE,
     JobRecord,
+    JobStatus,
     StorageMetadata,
     StorageWriteRequest,
     StorageWriteTarget,
@@ -1649,19 +1650,25 @@ def prepare_incremental_index_job(
             "plan_signature": signature.digest,
         },
     )
-    job = store.transition_or_update_running_metadata(
-        job.job_id,
-        "discovering",
-        metadata_update={
-            "execution_state": "running",
-            "started_at": utc_timestamp(),
-            "last_phase": "plan",
-            "tasks_total": tasks_total,
-            "tasks_applied": 0,
-            "tasks_skipped": 0,
-            "tasks_failed": 0,
-        },
-    )
+    start_metadata: StorageMetadata = {
+        "execution_state": "running",
+        "started_at": utc_timestamp(),
+        "last_phase": "plan",
+        "tasks_total": tasks_total,
+        "tasks_applied": 0,
+        "tasks_skipped": 0,
+        "tasks_failed": 0,
+    }
+    start_status: JobStatus | None = "discovering" if job.status == "pending" else None
+    try:
+        job = store.transition_or_update_running_metadata(
+            job.job_id,
+            start_status,
+            metadata_update=start_metadata,
+        )
+    except BaseException:
+        store.release_lock(INDEX_JOB_LOCK_ID, owner_job_id=job.job_id)
+        raise
     return IndexJobContext(
         store=store,
         job=job,

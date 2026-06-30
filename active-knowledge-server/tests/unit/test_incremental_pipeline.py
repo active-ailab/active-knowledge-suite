@@ -1275,6 +1275,11 @@ int health_progress_probe(void)
     assert code_finalize_events
     assert any("assembling" in (event.message or "").lower() for event in code_finalize_events)
     assert any(
+        event.message == "Preparing code overlay apply"
+        and event.current_path == "components/health/main.c"
+        for event in code_finalize_events
+    )
+    assert any(
         event.phase == "code_apply" and event.message == "Flushing code changes to overlay metadata"
         for event in events
     )
@@ -1612,7 +1617,7 @@ int health_interrupt_bt(void)
                 plan_signature=signature,
                 resume_policy={"mode": "auto"},
             ),
-    )
+        )
 
     assert interrupted_task_keys == [
         "code:apply:components/health/bt.c",
@@ -1733,7 +1738,7 @@ int health_replay_probe(void)
                 plan_signature=signature,
                 resume_policy={"mode": "auto"},
             ),
-    )
+        )
 
     assert interrupted_pipeline.interrupted_paths == ["components/health/main.c"]
     assert store.get_checkpoint(job.job_id, task_checkpoint_key(replayed_task)) is None
@@ -1838,6 +1843,25 @@ int health_artifact_reuse(void)
         job_id=job.job_id,
     )
     assert (artifact_store.collect_root / "code.json").exists()
+    collected_checkpoint_value = store.get_checkpoint(
+        job.job_id,
+        task_checkpoint_key(
+            "code:apply:components/health/main.c",
+            status="collected",
+        ),
+    )
+    assert collected_checkpoint_value is not None
+    assert len(collected_checkpoint_value.encode("utf-8")) < 4096
+    collected_checkpoint = decode_task_checkpoint(collected_checkpoint_value)
+    assert collected_checkpoint is not None
+    assert collected_checkpoint.status == "collected"
+    assert collected_checkpoint.metadata["artifact_hash"]
+    assert collected_checkpoint.metadata["artifact_ref"]
+    assert collected_checkpoint.metadata["path_count"] == len(
+        spy_code_indexer.include_paths_calls[0] or ()
+    )
+    assert collected_checkpoint.metadata["task_count"] >= 1
+    assert "collected_paths" not in collected_checkpoint.metadata
     assert len(spy_code_indexer.include_paths_calls) == 1
 
     resumed_pipeline = IncrementalIndexPipeline(

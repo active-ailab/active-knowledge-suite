@@ -40,12 +40,8 @@ class IndexProgressRenderer:
         event = self.last_event
         lines = ["Index interrupted."]
         lines.append(f"Phase: {event.phase}")
-        lines.append(
-            f"Stage: {_format_counter(event.stage_done, event.stage_total)}"
-        )
-        lines.append(
-            f"Overall: {_format_counter(event.global_done, event.global_total)}"
-        )
+        lines.append(f"Stage: {_format_counter(event.stage_done, event.stage_total)}")
+        lines.append(f"Overall: {_format_counter(event.global_done, event.global_total)}")
         if event.current_path:
             lines.append(f"Last path: {event.current_path}")
         return tuple(lines)
@@ -192,7 +188,7 @@ class RichIndexProgressReporter:
         self._state.handle(event)
         stage_total = event.stage_total
         stage_done = event.stage_done or 0
-        if event.phase in {"discover", "code_finalize", "doc_finalize"}:
+        if event.phase in {"discover", "doc_finalize"}:
             stage_total = None
             stage_done = 0
         self._progress.update(

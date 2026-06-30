@@ -1094,6 +1094,7 @@ class IncrementalIndexPipeline:
         ):
             try:
                 code_collect_artifact: CollectArtifactRef | None = None
+                code_collect_progress_accounted = False
                 if artifact_store is not None and code_paths_to_collect:
                     loaded_code_artifact = artifact_store.load_code(
                         plan_signature=signature.digest,
@@ -1117,14 +1118,18 @@ class IncrementalIndexPipeline:
                                 stage_done=progress_totals["code_collect"],
                                 message="Reusing collected code artifact",
                             )
+                            code_collect_progress_accounted = True
                 if code_indexed is None:
                     code_collect_base = global_done
 
                     def handle_code_collect(event: IndexProgressEvent) -> None:
+                        event_global_done = code_collect_base + (event.stage_done or 0)
+                        if event.phase == "code_finalize":
+                            event_global_done = code_collect_base + progress_totals["code_collect"]
                         updated_event = replace(
                             event,
                             global_total=global_total,
-                            global_done=code_collect_base + (event.stage_done or 0),
+                            global_done=event_global_done,
                             started_at=started_at,
                             updated_at=utc_timestamp(),
                         )
@@ -1147,11 +1152,29 @@ class IncrementalIndexPipeline:
                             code_indexed.warnings,
                             "code_indexer.collect_failed",
                         ):
+                            emit(
+                                phase="code_finalize",
+                                stage_total=1,
+                                stage_done=0,
+                                message="Saving collected code artifact",
+                                explicit_global_done=(
+                                    code_collect_base + progress_totals["code_collect"]
+                                ),
+                            )
                             code_collect_artifact = artifact_store.save_code(
                                 code_indexed,
                                 plan_signature=signature.digest,
                                 collect_paths=code_paths_to_collect,
                                 task_keys=tuple(task.task_key for task in code_collect_tasks),
+                            )
+                            emit(
+                                phase="code_finalize",
+                                stage_total=1,
+                                stage_done=1,
+                                message="Saved collected code artifact",
+                                explicit_global_done=(
+                                    code_collect_base + progress_totals["code_collect"]
+                                ),
                             )
                             _record_collect_artifact_checkpoints(
                                 run_context=run_context,
@@ -1204,8 +1227,21 @@ class IncrementalIndexPipeline:
                             },
                         )
                     )
-                if code_collect_artifact is None and progress_totals["code_collect"] > 0:
+                if not code_collect_progress_accounted and progress_totals["code_collect"] > 0:
                     global_done += progress_totals["code_collect"]
+                    code_collect_progress_accounted = True
+                prepare_code_paths = tuple(
+                    dict.fromkeys((*plan.deleted_code_paths, *plan.changed_code_paths))
+                )
+                prepare_code_total = len(prepare_code_paths)
+                prepare_code_done = 0
+                if prepare_code_total:
+                    emit(
+                        phase="code_finalize",
+                        stage_total=prepare_code_total,
+                        stage_done=0,
+                        message="Preparing code overlay apply",
+                    )
                 new_code_bundles = _code_bundles_by_path(code_indexed)
                 code_apply_done = phase_done["code_apply"]
                 code_apply_eta = SlidingWindowEtaEstimator()
@@ -1232,12 +1268,36 @@ class IncrementalIndexPipeline:
                             ),
                         )
                     )
+                    prepare_code_done += 1
+                    emit(
+                        phase="code_finalize",
+                        stage_total=prepare_code_total,
+                        stage_done=prepare_code_done,
+                        current_path=relative_path,
+                        message="Preparing code overlay apply",
+                    )
                 for relative_path in plan.changed_code_paths:
                     task_key = f"code:apply:{relative_path}"
                     if task_is_skipped(task_key):
+                        prepare_code_done += 1
+                        emit(
+                            phase="code_finalize",
+                            stage_total=prepare_code_total,
+                            stage_done=prepare_code_done,
+                            current_path=relative_path,
+                            message="Preparing code overlay apply",
+                        )
                         continue
                     bundle = new_code_bundles.get(relative_path)
                     if bundle is None:
+                        prepare_code_done += 1
+                        emit(
+                            phase="code_finalize",
+                            stage_total=prepare_code_total,
+                            stage_done=prepare_code_done,
+                            current_path=relative_path,
+                            message="Preparing code overlay apply",
+                        )
                         continue
                     code_apply_items.append(
                         ApplyBatchItem(
@@ -1262,6 +1322,14 @@ class IncrementalIndexPipeline:
                                 ),
                             ),
                         )
+                    )
+                    prepare_code_done += 1
+                    emit(
+                        phase="code_finalize",
+                        stage_total=prepare_code_total,
+                        stage_done=prepare_code_done,
+                        current_path=relative_path,
+                        message="Preparing code overlay apply",
                     )
                 code_apply_items.sort(key=lambda item: item.task_key)
                 metadata_batch_results, failed_code_items = self._apply_metadata_batches(
@@ -1974,8 +2042,7 @@ class IncrementalIndexPipeline:
             for item in items:
                 item_records = max(1, item.record_total)
                 if current_items and (
-                    len(current_items) >= max_files
-                    or current_records + item_records > max_records
+                    len(current_items) >= max_files or current_records + item_records > max_records
                 ):
                     close_batch()
                 if transaction_cm is None:
@@ -2100,9 +2167,7 @@ class IncrementalIndexPipeline:
                 )
         elapsed_seconds = time.perf_counter() - started_at
         per_item_elapsed = (
-            tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
-            if batch.items
-            else ()
+            tuple(elapsed_seconds / len(batch.items) for _ in batch.items) if batch.items else ()
         )
         return _AppliedBatchResult(
             batch=batch,
@@ -2123,9 +2188,7 @@ class IncrementalIndexPipeline:
         self._apply_vector_batch(vector_writer, batch=batch)
         elapsed_seconds = time.perf_counter() - started_at
         per_item_elapsed = (
-            tuple(elapsed_seconds / len(batch.items) for _ in batch.items)
-            if batch.items
-            else ()
+            tuple(elapsed_seconds / len(batch.items) for _ in batch.items) if batch.items else ()
         )
         return _AppliedBatchResult(
             batch=batch,
@@ -2180,9 +2243,7 @@ class IncrementalIndexPipeline:
 
     def _apply_vector_batch(self, vector_writer: object, *, batch: ApplyBatch) -> None:
         vector_writer.upsert_vectors(
-            vector_write
-            for item in batch.items
-            for vector_write in item.vector_writes
+            vector_write for item in batch.items for vector_write in item.vector_writes
         )
 
     def _apply_code_bundle(
@@ -2566,7 +2627,8 @@ def _record_collect_artifact_checkpoints(
                 "plan_signature": plan_signature,
                 "artifact_ref": str(artifact.path),
                 "artifact_hash": artifact.artifact_hash,
-                "collected_paths": list(artifact.collect_paths),
+                "path_count": len(artifact.collect_paths),
+                "task_count": len(artifact.task_keys),
             },
         )
 
@@ -3116,30 +3178,38 @@ def _doc_storage_relative_path(manifest: SourceDocsManifest, relative_path: str)
 def _code_bundles_by_path(indexed: IndexedCode) -> dict[str, _ObjectBundle]:
     file_by_id = {record.file_id: record for record in indexed.file_records}
     entities_by_file: dict[str, list[EntityRecord]] = {}
+    entity_file_by_id: dict[str, str] = {}
     for entity in indexed.entity_records:
         entities_by_file.setdefault(entity.file_id, []).append(entity)
+        entity_file_by_id[entity.entity_id] = entity.file_id
     chunks_by_file: dict[str, list[ChunkRecord]] = {}
     for chunk in indexed.chunk_records:
         chunks_by_file.setdefault(chunk.file_id, []).append(chunk)
     evidence_by_file: dict[str, list[EvidenceRecord]] = {}
     for evidence in indexed.evidence_records:
         evidence_by_file.setdefault(evidence.file_id, []).append(evidence)
+    relations_by_file: dict[str, list[RelationRecord]] = {}
+    for relation in indexed.relation_records:
+        relation_file_ids = {
+            file_id
+            for file_id in (
+                entity_file_by_id.get(relation.src_entity_id),
+                entity_file_by_id.get(relation.dst_entity_id),
+            )
+            if file_id is not None
+        }
+        for file_id in relation_file_ids:
+            relations_by_file.setdefault(file_id, []).append(relation)
 
     bundles: dict[str, _ObjectBundle] = {}
     for file_id, file_record in file_by_id.items():
-        entity_ids = {item.entity_id for item in entities_by_file.get(file_id, [])}
-        relations = tuple(
-            record
-            for record in indexed.relation_records
-            if record.src_entity_id in entity_ids or record.dst_entity_id in entity_ids
-        )
         if file_record.metadata.get("synthetic_anchor") is True:
             continue
         bundles[file_record.relative_path] = _ObjectBundle(
             file_record=file_record,
             chunks=tuple(chunks_by_file.get(file_id, [])),
             entities=tuple(entities_by_file.get(file_id, [])),
-            relations=relations,
+            relations=tuple(relations_by_file.get(file_id, [])),
             evidence=tuple(evidence_by_file.get(file_id, [])),
         )
     return bundles
